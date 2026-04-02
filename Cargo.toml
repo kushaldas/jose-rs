@@ -1,0 +1,40 @@
+[package]
+name = "jose-rs"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
+repository = "https://github.com/kushaldas/jose-rs"
+homepage = "https://github.com/kushaldas/jose-rs"
+keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
+categories = ["cryptography", "authentication", "web-programming"]
+rust-version = "1.83"
+
+[features]
+default = ["pkcs11"]
+post-quantum = ["kryptering/post-quantum"]
+deprecated = ["kryptering/legacy"]
+pkcs11 = ["kryptering/pkcs11"]
+
+[dependencies]
+kryptering = { version = "0.1.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+thiserror = "2"
+aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+rsa = "0.9"
+digest = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
+num-bigint-dig = { version = "0.8", features = ["prime"] }
+ecdsa = "0.16"
+
+[dev-dependencies]
