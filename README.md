@@ -112,6 +112,24 @@ let claims = Claims::default();
 let token = jwt::encode(&signer, &header, &claims).unwrap();
 ```
 
+## Examples
+
+See the [examples directory](https://github.com/kushaldas/jose-rs/tree/main/examples)
+for complete, runnable examples covering all major JOSE operations:
+
+- **generate_keys** -- generate RSA, EC P-256, Ed25519, HMAC, and AES keys as JWK files
+- **jwt_hmac** -- JWT sign/verify with HMAC-SHA256
+- **jwt_rsa** -- JWT sign with RS256, verify with public key
+- **jwt_ecdsa** -- JWT sign with ES256, verify with public key
+- **jwt_eddsa** -- JWT sign with EdDSA (Ed25519), verify with public key
+- **jwe_aes_kw** -- JWE encrypt/decrypt with AES Key Wrap + AES-GCM
+- **jwe_rsa_oaep** -- JWE encrypt with RSA-OAEP, decrypt with private key
+- **jws_json** -- JWS flattened and general JSON serialization (multi-signature)
+- **jwk_thumbprint** -- RFC 7638 JWK Thumbprint for all key types
+- **nested_jwt** -- sign a JWT then encrypt it inside a JWE
+
+Run `cargo run --example generate_keys` first to create the key files, then run any other example.
+
 ## License
 
 BSD-2-Clause

@@ -9,6 +9,7 @@ homepage = "https://github.com/kushaldas/jose-rs"
 keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
 categories = ["cryptography", "authentication", "web-programming"]
 rust-version = "1.83"
+exclude = ["examples/"]
 
 [features]
 default = ["pkcs11"]
@@ -29,6 +30,7 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 rsa = "0.9"
+pkcs8 = "0.10"
 digest = "0.10"
 p256 = { version = "0.13", features = ["ecdsa"] }
 p384 = { version = "0.13", features = ["ecdsa"] }
