@@ -75,6 +75,16 @@ pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
+    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: reject unknown crit extensions.
+    // The library understands no JWE extensions, so any non-empty crit is rejected.
+    if let Some(crit) = &header.crit {
+        if !crit.is_empty() {
+            return Err(JoseError::InvalidHeader(format!(
+                "unsupported crit extensions: {crit:?}"
+            )));
+        }
+    }
+
     let alg = JweAlgorithm::from_str(&header.alg)?;
     let enc_str = header
         .enc
@@ -142,7 +152,18 @@ fn produce_cek(
         }
 
         // RSA-OAEP.
-        JweAlgorithm::RsaOaep | JweAlgorithm::RsaOaep256 => {
+        JweAlgorithm::RsaOaep256 => {
+            let pub_key = parse_rsa_public_key(key)?;
+            let kt_alg = jwe_alg_to_keytransport(alg)?;
+            let cek = random_bytes(cek_len);
+            let encrypted =
+                kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
+                    .map_err(JoseError::Crypto)?;
+            Ok((cek, encrypted))
+        }
+
+        #[cfg(feature = "deprecated")]
+        JweAlgorithm::RsaOaep => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
             let cek = random_bytes(cek_len);
@@ -202,27 +223,43 @@ fn recover_cek(
             Ok(cek)
         }
 
-        JweAlgorithm::RsaOaep | JweAlgorithm::RsaOaep256 => {
-            let priv_key = parse_rsa_private_key(key)?;
-            let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek =
-                kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None)
-                    .map_err(JoseError::Crypto)?;
-            if cek.len() != cek_len {
-                return Err(JoseError::Key(format!(
-                    "decrypted CEK length {} does not match expected {}",
-                    cek.len(),
-                    cek_len
-                )));
-            }
-            Ok(cek)
-        }
+        JweAlgorithm::RsaOaep256 => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
+
+        #[cfg(feature = "deprecated")]
+        JweAlgorithm::RsaOaep => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
 
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
             "key management algorithm {} not yet implemented",
             alg.as_str()
         ))),
     }
+}
+
+/// Shared RSA-OAEP CEK recovery (used by both RSA-OAEP-256 and the deprecated
+/// SHA-1 RSA-OAEP variant). Post-decrypt error paths are deliberately merged
+/// into a single opaque error to avoid distinguishable oracles (J-11).
+fn rsa_oaep_recover_cek(
+    key: &[u8],
+    alg: JweAlgorithm,
+    encrypted_key: &[u8],
+    cek_len: usize,
+) -> Result<Vec<u8>> {
+    let priv_key = parse_rsa_private_key(key)?;
+    let kt_alg = jwe_alg_to_keytransport(alg)?;
+    let cek_result =
+        kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None);
+    // Opaque error: whether OAEP failed or the CEK length is wrong, return
+    // the same error type so remote attackers cannot distinguish.
+    let opaque_err = || {
+        JoseError::Crypto(kryptering::Error::Crypto(
+            "RSA-OAEP key unwrap failed".into(),
+        ))
+    };
+    let cek = cek_result.map_err(|_| opaque_err())?;
+    if cek.len() != cek_len {
+        return Err(opaque_err());
+    }
+    Ok(cek)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +685,7 @@ fn jwe_alg_to_keywrap(alg: JweAlgorithm) -> Result<kryptering::KeyWrapAlgorithm>
 fn jwe_alg_to_keytransport(alg: JweAlgorithm) -> Result<kryptering::KeyTransportAlgorithm> {
     use kryptering::{HashAlgorithm, KeyTransportAlgorithm, OaepConfig};
     match alg {
+        #[cfg(feature = "deprecated")]
         JweAlgorithm::RsaOaep => Ok(KeyTransportAlgorithm::RsaOaep(OaepConfig {
             digest: HashAlgorithm::Sha1,
             mgf_digest: HashAlgorithm::Sha1,
@@ -669,14 +707,32 @@ fn jwe_alg_to_keytransport(alg: JweAlgorithm) -> Result<kryptering::KeyTransport
 
 fn parse_rsa_public_key(der: &[u8]) -> Result<rsa::RsaPublicKey> {
     use rsa::pkcs8::DecodePublicKey;
-    rsa::RsaPublicKey::from_public_key_der(der)
-        .map_err(|e| JoseError::Key(format!("failed to parse RSA public key DER: {e}")))
+    use rsa::traits::PublicKeyParts;
+    let key = rsa::RsaPublicKey::from_public_key_der(der)
+        .map_err(|e| JoseError::Key(format!("failed to parse RSA public key DER: {e}")))?;
+    if key.n().bits() < crate::MIN_RSA_BITS {
+        return Err(JoseError::Key(format!(
+            "RSA key size {} bits is below the required minimum of {}",
+            key.n().bits(),
+            crate::MIN_RSA_BITS
+        )));
+    }
+    Ok(key)
 }
 
 fn parse_rsa_private_key(der: &[u8]) -> Result<rsa::RsaPrivateKey> {
     use rsa::pkcs8::DecodePrivateKey;
-    rsa::RsaPrivateKey::from_pkcs8_der(der)
-        .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))
+    use rsa::traits::PublicKeyParts;
+    let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
+        .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
+    if key.n().bits() < crate::MIN_RSA_BITS {
+        return Err(JoseError::Key(format!(
+            "RSA key size {} bits is below the required minimum of {}",
+            key.n().bits(),
+            crate::MIN_RSA_BITS
+        )));
+    }
+    Ok(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,15 +746,16 @@ fn random_bytes(len: usize) -> Vec<u8> {
 }
 
 /// Constant-time byte comparison to prevent timing attacks on HMAC tags.
+///
+/// Uses the audited `subtle` crate. The length-inequality branch is safe
+/// because HMAC tag lengths are fixed per `enc` algorithm — mismatched
+/// lengths indicate a malformed token, not a secret-dependent value.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 // ===========================================================================
@@ -804,6 +861,7 @@ mod tests {
         (pub_der.as_ref().to_vec(), priv_der.as_bytes().to_vec())
     }
 
+    #[cfg(feature = "deprecated")]
     #[test]
     fn rsa_oaep_a256gcm_roundtrip() {
         let (pub_der, priv_der) = generate_rsa_keypair();
@@ -1052,6 +1110,32 @@ mod tests {
             encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    /// J-04 regression: a JWE with a non-empty crit header must be rejected.
+    #[test]
+    fn nonempty_crit_rejected_on_decrypt() {
+        let cek = [0x42u8; 32];
+        let token =
+            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        // Rewrite the header to include a non-empty crit.
+        let parts: Vec<&str> = token.splitn(5, '.').collect();
+        let mut header: JoseHeader = serde_json::from_slice(
+            &base64url::decode(parts[0]).unwrap(),
+        )
+        .unwrap();
+        header.crit = Some(vec!["myext".to_string()]);
+        let new_header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let tampered_token = format!(
+            "{}.{}.{}.{}.{}",
+            new_header_b64, parts[1], parts[2], parts[3], parts[4]
+        );
+
+        let result = decrypt(&cek, &tampered_token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("crit"), "unexpected error: {err}");
     }
 
     #[test]

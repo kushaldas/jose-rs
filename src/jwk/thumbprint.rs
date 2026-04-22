@@ -2,67 +2,86 @@
 
 use super::Jwk;
 use crate::error::{JoseError, Result};
+use std::collections::BTreeMap;
 
 /// Compute the JWK Thumbprint using SHA-256 (RFC 7638).
 ///
-/// Builds the required members JSON object in lexicographic order per RFC 7638 Section 3,
-/// hashes it with SHA-256, and returns the base64url-encoded digest.
+/// Builds the required-members JSON object with fields in lexicographic order
+/// (RFC 7638 §3.2) using proper JSON serialization, hashes it with SHA-256,
+/// and returns the base64url-encoded digest.
+///
+/// The required-members JSON is serialized via `serde_json` to guarantee
+/// correct escaping of any character inside the JWK field values (critical
+/// for spec compliance and to prevent collision attacks on attacker-supplied
+/// JWKs).
 pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
-    let thumbprint_json = match jwk.kty.as_str() {
+    // BTreeMap gives lexicographic key ordering automatically.
+    let mut required: BTreeMap<&str, &str> = BTreeMap::new();
+
+    match jwk.kty.as_str() {
         "RSA" => {
             let e = jwk
                 .e
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing e".into()))?;
             let n = jwk
                 .n
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing n".into()))?;
-            format!(r#"{{"e":"{e}","kty":"RSA","n":"{n}"}}"#)
+            required.insert("e", e);
+            required.insert("kty", "RSA");
+            required.insert("n", n);
         }
         "EC" => {
             let crv = jwk
                 .crv
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing crv".into()))?;
             let x = jwk
                 .x
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing x".into()))?;
             let y = jwk
                 .y
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing y".into()))?;
-            format!(r#"{{"crv":"{crv}","kty":"EC","x":"{x}","y":"{y}"}}"#)
+            required.insert("crv", crv);
+            required.insert("kty", "EC");
+            required.insert("x", x);
+            required.insert("y", y);
         }
         "oct" => {
             let k = jwk
                 .k
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing k".into()))?;
-            format!(r#"{{"k":"{k}","kty":"oct"}}"#)
+            required.insert("k", k);
+            required.insert("kty", "oct");
         }
         "OKP" => {
             let crv = jwk
                 .crv
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing crv".into()))?;
             let x = jwk
                 .x
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| JoseError::Key("missing x".into()))?;
-            format!(r#"{{"crv":"{crv}","kty":"OKP","x":"{x}"}}"#)
+            required.insert("crv", crv);
+            required.insert("kty", "OKP");
+            required.insert("x", x);
         }
         other => {
             return Err(JoseError::Key(format!(
                 "unsupported kty for thumbprint: {other}"
             )))
         }
-    };
+    }
 
+    let thumbprint_json = serde_json::to_vec(&required)?;
     let hash = kryptering::digest::digest(
         kryptering::HashAlgorithm::Sha256,
-        thumbprint_json.as_bytes(),
+        &thumbprint_json,
     );
     Ok(crate::base64url::encode(&hash))
 }
@@ -138,6 +157,40 @@ mod tests {
         let err = thumbprint_sha256(&jwk).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("unsupported kty"));
+    }
+
+    /// J-05 regression: thumbprint input containing a double-quote must be
+    /// properly escaped by the serde_json serializer — the old format!()
+    /// implementation would silently produce malformed JSON and a wrong hash.
+    #[test]
+    fn thumbprint_escapes_quotes_correctly() {
+        // Two JWKs whose string-concat thumbprint inputs would collide if
+        // unescaped, but whose serde_json serialization differs.
+        let a = Jwk {
+            kty: "oct".into(),
+            k: Some("abc\",\"evil\":\"xyz".into()),
+            use_: None,
+            key_ops: None,
+            alg: None,
+            kid: None,
+            n: None, e: None, d: None, p: None, q: None, dp: None, dq: None, qi: None,
+            crv: None, x: None, y: None,
+            extra: Default::default(),
+        };
+        let b = Jwk {
+            kty: "oct".into(),
+            k: Some("abc".into()),
+            use_: None,
+            key_ops: None,
+            alg: None,
+            kid: None,
+            n: None, e: None, d: None, p: None, q: None, dp: None, dq: None, qi: None,
+            crv: None, x: None, y: None,
+            extra: Default::default(),
+        };
+        let tp_a = thumbprint_sha256(&a).unwrap();
+        let tp_b = thumbprint_sha256(&b).unwrap();
+        assert_ne!(tp_a, tp_b, "escaping must distinguish these inputs");
     }
 
     #[test]

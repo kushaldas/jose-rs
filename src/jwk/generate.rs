@@ -6,8 +6,16 @@ use crate::jwk::Jwk;
 
 /// Generate an RSA key pair as a JWK.
 ///
-/// `bits` is the modulus size in bits (e.g. 2048, 3072, 4096).
+/// `bits` is the modulus size in bits (e.g. 2048, 3072, 4096). Must be at
+/// least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3.
 pub fn generate_rsa(bits: usize) -> Result<Jwk> {
+    if bits < crate::MIN_RSA_BITS {
+        return Err(JoseError::Key(format!(
+            "requested RSA key size {} bits is below the required minimum of {}",
+            bits,
+            crate::MIN_RSA_BITS
+        )));
+    }
     let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits)
         .map_err(|e| JoseError::Key(format!("RSA keygen failed: {e}")))?;
     let public_key = private_key.to_public_key();
@@ -143,6 +151,17 @@ mod tests {
         // Verify key bytes length
         let k_bytes = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
         assert_eq!(k_bytes.len(), 32);
+    }
+
+    /// J-07 regression: sub-2048-bit RSA keys must be refused at generation time.
+    #[test]
+    fn generate_rsa_below_2048_is_rejected() {
+        let err = generate_rsa(1024).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("2048") || msg.contains("minimum"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

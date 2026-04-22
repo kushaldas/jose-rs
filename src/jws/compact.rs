@@ -2,6 +2,7 @@
 //!
 //! Format: `BASE64URL(header).BASE64URL(payload).BASE64URL(signature)`
 
+use crate::algorithm::JwsAlgorithm;
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
@@ -25,9 +26,52 @@ pub fn sign(
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
+/// Validate a protected header against the verifier's algorithm.
+///
+/// Rejects `alg: "none"` unconditionally (even under the `deprecated` feature),
+/// rejects any header whose `alg` does not map to the same
+/// `kryptering::SignatureAlgorithm` that the verifier was constructed with,
+/// and rejects any non-empty `crit` (RFC 7515 §4.1.11 — the library
+/// understands no extensions).
+pub(crate) fn validate_header(
+    header_b64: &str,
+    verifier: &dyn kryptering::Verifier,
+) -> Result<()> {
+    let header_json = base64url::decode(header_b64)?;
+    let header: JoseHeader = serde_json::from_slice(&header_json)?;
+
+    // RFC 7515 §4.1.11: reject unknown crit.
+    if let Some(crit) = &header.crit {
+        if !crit.is_empty() {
+            return Err(JoseError::InvalidHeader(format!(
+                "unsupported crit extensions: {crit:?}"
+            )));
+        }
+    }
+
+    // Reject alg="none" at the parse layer — never reach the verifier.
+    if header.alg == "none" {
+        return Err(JoseError::InvalidToken(
+            "alg=\"none\" is not permitted".into(),
+        ));
+    }
+
+    let header_alg = JwsAlgorithm::from_str(&header.alg)?;
+    let header_sig_alg = header_alg.to_crypto()?;
+    if verifier.algorithm() != header_sig_alg {
+        return Err(JoseError::InvalidToken(format!(
+            "header alg {} does not match verifier algorithm",
+            header.alg
+        )));
+    }
+    Ok(())
+}
+
 /// Verify a JWS Compact Serialization string.
 ///
-/// Returns the decoded payload on success.
+/// Returns the decoded payload on success. The token's `alg` header is
+/// cross-checked against `verifier.algorithm()` — mismatches are rejected
+/// before any cryptographic operation. `alg: "none"` is always rejected.
 pub fn verify(
     verifier: &dyn kryptering::Verifier,
     token: &str,
@@ -38,6 +82,7 @@ pub fn verify(
             "expected 3 dot-separated parts".into(),
         ));
     }
+    validate_header(parts[0], verifier)?;
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let signature = base64url::decode(parts[2])?;
     let valid = verifier
@@ -180,5 +225,62 @@ mod tests {
 
         let result = verify(&hmac_verifier(), &tampered_token);
         assert!(result.is_err());
+    }
+
+    /// Algorithm confusion regression (J-01): a token with header alg="RS256"
+    /// MUST be rejected by an HMAC verifier, even if the attacker crafted a
+    /// matching HMAC signature using the RSA public key as the HMAC secret.
+    #[test]
+    fn alg_header_mismatch_is_rejected() {
+        let payload = b"payload";
+
+        // Attacker forges a token with header alg="RS256" but signs with the HMAC verifier's key.
+        let mut header = JoseHeader::new("RS256");
+        header.kid = Some("attacker".into());
+        let token = sign(&hmac_signer(), payload, &header).unwrap();
+
+        // HMAC verifier must refuse because header alg disagrees with verifier algorithm.
+        let result = verify(&hmac_verifier(), &token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not match verifier algorithm"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// none-downgrade regression (J-03): a token with alg="none" must be
+    /// rejected unconditionally, even if the caller hands in a real verifier.
+    #[test]
+    fn alg_none_is_rejected() {
+        let payload = b"payload";
+        let header = JoseHeader::new("none");
+        // Build a token with alg="none" manually — no signer will accept "none",
+        // so we craft the parts directly.
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64url::encode(payload);
+        let token = format!("{header_b64}.{payload_b64}.");
+
+        let result = verify(&hmac_verifier(), &token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("none"), "unexpected error: {err}");
+    }
+
+    /// crit enforcement regression (J-04): any non-empty crit array must be rejected.
+    #[test]
+    fn nonempty_crit_is_rejected() {
+        let payload = b"payload";
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["b64".to_string()]);
+        let token = sign(&hmac_signer(), payload, &header).unwrap();
+
+        let result = verify(&hmac_verifier(), &token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("crit"),
+            "unexpected error: {err}"
+        );
     }
 }

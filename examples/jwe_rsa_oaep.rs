@@ -1,4 +1,4 @@
-//! JWE encryption with RSA-OAEP key transport + AES-256-GCM content encryption.
+//! JWE encryption with RSA-OAEP-256 key transport + AES-256-GCM content encryption.
 //!
 //! Encrypts with the RSA public key, decrypts with the RSA private key.
 //!
@@ -30,11 +30,11 @@ fn main() -> jose_rs::Result<()> {
         _ => panic!("expected RSA key"),
     };
 
-    // Encrypt with RSA-OAEP
+    // Encrypt with RSA-OAEP-256 (SHA-1 OAEP is deprecated; use SHA-256 OAEP by default).
     let token = jose_rs::jwe::encrypt(
         &pub_der,
         plaintext,
-        JweAlgorithm::RsaOaep,
+        JweAlgorithm::RsaOaep256,
         JweEncryption::A256GCM,
     )?;
     println!("\nJWE token ({} bytes)", token.len());

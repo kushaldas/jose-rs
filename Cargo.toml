@@ -38,5 +38,6 @@ p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
 num-bigint-dig = { version = "0.8", features = ["prime"] }
 ecdsa = "0.16"
+subtle = "2"
 
 [dev-dependencies]

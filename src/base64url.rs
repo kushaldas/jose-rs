@@ -1,4 +1,8 @@
 //! Base64url encoding/decoding (RFC 4648 §5, no padding).
+//!
+//! RFC 7515, 7516, and 7519 mandate unpadded base64url for all JOSE fields.
+//! This module rejects padded input on decode to align with the spec and
+//! avoid accepting two distinct encodings of the same byte string.
 
 use crate::error::{JoseError, Result};
 use base64::Engine;
@@ -6,7 +10,7 @@ use base64::Engine;
 const ENGINE: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
     &base64::alphabet::URL_SAFE,
     base64::engine::GeneralPurposeConfig::new()
-        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::RequireNone)
         .with_encode_padding(false),
 );
 
@@ -15,7 +19,7 @@ pub fn encode(data: &[u8]) -> String {
     ENGINE.encode(data)
 }
 
-/// Decode base64url string to bytes (accepts with or without padding).
+/// Decode base64url string to bytes. Padding is rejected (RFC 7515).
 pub fn decode(s: &str) -> Result<Vec<u8>> {
     ENGINE
         .decode(s)
@@ -37,12 +41,17 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
+    /// J-13 regression: padded input is rejected (RFC 7515 mandates unpadded).
     #[test]
-    fn accepts_padding() {
-        // Should accept input with padding too
-        let encoded = base64::engine::general_purpose::URL_SAFE.encode(b"test");
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded, b"test");
+    fn rejects_padding() {
+        // URL_SAFE engine emits padding; URL_SAFE_NO_PAD does not.
+        let padded = base64::engine::general_purpose::URL_SAFE.encode(b"test");
+        assert!(padded.ends_with('='));
+        let result = decode(&padded);
+        assert!(
+            result.is_err(),
+            "padded base64url must be rejected, got {result:?}"
+        );
     }
 
     #[test]

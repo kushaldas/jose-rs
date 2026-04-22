@@ -100,7 +100,7 @@ fn new_jwk(kty: &str) -> Jwk {
 
 fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     use num_bigint_dig::BigUint;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 
     let n_bytes = require(jwk, "n")?;
     let e_bytes = require(jwk, "e")?;
@@ -109,6 +109,15 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
 
     let public = RsaPublicKey::new(n.clone(), e.clone())
         .map_err(|err| JoseError::Key(format!("invalid RSA public key: {err}")))?;
+
+    // RFC 7518 §3.3 / §4.2: RSA keys must be at least 2048 bits.
+    if public.n().bits() < crate::MIN_RSA_BITS {
+        return Err(JoseError::Key(format!(
+            "RSA key size {} bits is below the required minimum of {}",
+            public.n().bits(),
+            crate::MIN_RSA_BITS
+        )));
+    }
 
     let private = if jwk.d.is_some() {
         let d_bytes = require(jwk, "d")?;

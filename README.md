@@ -114,8 +114,7 @@ let token = jwt::encode(&signer, &header, &claims).unwrap();
 
 ## Examples
 
-See the [examples directory](https://github.com/kushaldas/jose-rs/tree/main/examples)
-for complete, runnable examples covering all major JOSE operations:
+See the [examples directory](https://github.com/kushaldas/jose/tree/main/examples) for complete, runnable examples covering all major JOSE operations:
 
 - **generate_keys** -- generate RSA, EC P-256, Ed25519, HMAC, and AES keys as JWK files
 - **jwt_hmac** -- JWT sign/verify with HMAC-SHA256
@@ -129,6 +128,30 @@ for complete, runnable examples covering all major JOSE operations:
 - **nested_jwt** -- sign a JWT then encrypt it inside a JWE
 
 Run `cargo run --example generate_keys` first to create the key files, then run any other example.
+
+## Security notes
+
+- **`rsa` crate advisory (RUSTSEC-2023-0071, a.k.a. "Marvin attack").** The
+  upstream `rsa` crate used by this library has a known timing side-channel
+  in PKCS#1 v1.5 and OAEP decryption. The vulnerability affects JWE
+  `RSA-OAEP-256` (and, with the `deprecated` feature, `RSA-OAEP`) on the
+  decryption side. There is no patched `rsa` 0.9.x release yet. If you
+  operate a service that decrypts JWEs from untrusted senders, rate-limit
+  decryption failures and prefer non-RSA key management algorithms.
+- **Trust-sensitive header fields.** `jku`, `x5u`, and `jwk` headers are
+  parsed by the library but **never fetched or trusted** — callers must
+  never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
+  key-substitution risk) and must never treat an inline `jwk` header as a
+  verification key without first verifying it against a trusted key store.
+- **`jwt::decode_unverified` is for inspection only.** It returns the
+  header and claims without any cryptographic check. Production code
+  paths must call `jwt::decode` with a real verifier and `Validation`.
+- **Algorithm binding.** `jws`/`jwt` verify functions reject tokens whose
+  `alg` header does not match the verifier's algorithm and always reject
+  `alg: "none"` — even with the `deprecated` feature enabled. Non-empty
+  `crit` headers are rejected per RFC 7515 §4.1.11.
+- **RSA minimum key size.** Keys below 2048 bits are rejected at parse
+  and at generation time (RFC 7518 §3.3 / §4.2).
 
 ## License
 

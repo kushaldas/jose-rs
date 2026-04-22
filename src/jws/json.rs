@@ -73,10 +73,15 @@ pub fn sign_flattened(
 }
 
 /// Verify a Flattened JWS JSON and return the decoded payload.
+///
+/// The protected header's `alg` is cross-checked against
+/// `verifier.algorithm()`; `alg: "none"` and any non-empty `crit` are
+/// rejected before any cryptographic operation.
 pub fn verify_flattened(
     verifier: &dyn kryptering::Verifier,
     jws: &FlattenedJws,
 ) -> Result<Vec<u8>> {
+    crate::jws::compact::validate_header(&jws.protected, verifier)?;
     let signing_input = format!("{}.{}", jws.protected, jws.payload);
     let sig = base64url::decode(&jws.signature)?;
     let valid = verifier
@@ -133,8 +138,11 @@ pub fn sign_general(
 
 /// Verify at least one signature in a General JWS JSON.
 ///
-/// Iterates through all signatures and returns the decoded payload if any
-/// one of them verifies successfully. Returns an error if none verify.
+/// Iterates through signatures whose protected header's `alg` matches
+/// `verifier.algorithm()` (per-entry algorithm binding — J-01/J-02).
+/// Entries with mismatched algorithms, `alg: "none"`, or a non-empty
+/// `crit` are skipped. Returns the decoded payload on the first
+/// successful cryptographic verification.
 pub fn verify_general(
     verifier: &dyn kryptering::Verifier,
     jws: &GeneralJws,
@@ -143,6 +151,13 @@ pub fn verify_general(
         return Err(JoseError::InvalidToken("no signatures present".into()));
     }
     for entry in &jws.signatures {
+        // Per-entry header binding: skip entries whose header doesn't agree
+        // with the verifier's algorithm (or that use alg=none or carry a
+        // non-empty crit). This prevents attacker-controlled signature arrays
+        // from selecting a weaker algorithm at will.
+        if crate::jws::compact::validate_header(&entry.protected, verifier).is_err() {
+            continue;
+        }
         let signing_input = format!("{}.{}", entry.protected, jws.payload);
         let sig = match base64url::decode(&entry.signature) {
             Ok(s) => s,
@@ -292,6 +307,55 @@ mod tests {
         assert_eq!(sigs.len(), 1);
         assert!(sigs[0].get("protected").is_some());
         assert!(sigs[0].get("signature").is_some());
+    }
+
+    /// J-01 regression: Flattened verify rejects alg-header mismatch.
+    #[test]
+    fn flattened_alg_header_mismatch_rejected() {
+        let mut header = JoseHeader::new("RS256");
+        header.kid = Some("attacker".into());
+        let jws = sign_flattened(&hmac_signer(KEY_A), b"p", &header).unwrap();
+        let result = verify_flattened(&hmac_verifier(KEY_A), &jws);
+        assert!(result.is_err());
+    }
+
+    /// J-03 regression: Flattened verify rejects alg=none.
+    #[test]
+    fn flattened_alg_none_rejected() {
+        let header = JoseHeader::new("none");
+        let protected = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload = base64url::encode(b"p");
+        let jws = FlattenedJws {
+            payload,
+            protected,
+            signature: String::new(),
+        };
+        let result = verify_flattened(&hmac_verifier(KEY_A), &jws);
+        assert!(result.is_err());
+    }
+
+    /// J-02 regression: General verify with only mismatched-alg entries must fail.
+    #[test]
+    fn general_all_mismatched_alg_fails() {
+        let payload_b64 = base64url::encode(b"p");
+        // Craft an entry with header alg="RS256" but using HMAC signer.
+        let mut rs256_header = JoseHeader::new("RS256");
+        rs256_header.kid = Some("attacker".into());
+        let protected = base64url::encode(&serde_json::to_vec(&rs256_header).unwrap());
+        let signing_input = format!("{protected}.{payload_b64}");
+        use kryptering::Signer;
+        let sig = hmac_signer(KEY_A).sign(signing_input.as_bytes()).unwrap();
+        let jws = GeneralJws {
+            payload: payload_b64,
+            signatures: vec![JwsSignature {
+                protected,
+                signature: base64url::encode(&sig),
+                header: None,
+            }],
+        };
+        // HMAC verifier must not accept any entry whose header says RS256.
+        let result = verify_general(&hmac_verifier(KEY_A), &jws);
+        assert!(result.is_err());
     }
 
     #[test]

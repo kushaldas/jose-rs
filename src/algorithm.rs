@@ -143,7 +143,8 @@ pub enum JweAlgorithm {
     A192KW,
     /// AES Key Wrap (256-bit)
     A256KW,
-    /// RSAES-OAEP using default parameters
+    /// RSAES-OAEP using default parameters (SHA-1 — only available with the `deprecated` feature)
+    #[cfg(feature = "deprecated")]
     #[serde(rename = "RSA-OAEP")]
     RsaOaep,
     /// RSAES-OAEP using SHA-256 and MGF1 with SHA-256
@@ -181,6 +182,7 @@ impl JweAlgorithm {
             "A128KW" => Ok(Self::A128KW),
             "A192KW" => Ok(Self::A192KW),
             "A256KW" => Ok(Self::A256KW),
+            #[cfg(feature = "deprecated")]
             "RSA-OAEP" => Ok(Self::RsaOaep),
             "RSA-OAEP-256" => Ok(Self::RsaOaep256),
             "ECDH-ES" => Ok(Self::EcdhEs),
@@ -201,6 +203,7 @@ impl JweAlgorithm {
             Self::A128KW => "A128KW",
             Self::A192KW => "A192KW",
             Self::A256KW => "A256KW",
+            #[cfg(feature = "deprecated")]
             Self::RsaOaep => "RSA-OAEP",
             Self::RsaOaep256 => "RSA-OAEP-256",
             Self::EcdhEs => "ECDH-ES",
