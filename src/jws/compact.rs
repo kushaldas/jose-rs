@@ -7,6 +7,17 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
+fn ensure_token_size(token: &str) -> Result<()> {
+    if token.len() > crate::MAX_TOKEN_BYTES {
+        return Err(JoseError::InvalidToken(format!(
+            "token size {} exceeds MAX_TOKEN_BYTES ({})",
+            token.len(),
+            crate::MAX_TOKEN_BYTES
+        )));
+    }
+    Ok(())
+}
+
 /// Cross-check the caller-supplied protected header against the signer's
 /// algorithm before signing.
 ///
@@ -113,13 +124,7 @@ pub fn verify(
     verifier: &dyn kryptering::Verifier,
     token: &str,
 ) -> Result<Vec<u8>> {
-    if token.len() > crate::MAX_TOKEN_BYTES {
-        return Err(JoseError::InvalidToken(format!(
-            "token size {} exceeds MAX_TOKEN_BYTES ({})",
-            token.len(),
-            crate::MAX_TOKEN_BYTES
-        )));
-    }
+    ensure_token_size(token)?;
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
         return Err(JoseError::InvalidToken(
@@ -223,6 +228,7 @@ pub fn verify_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
 
 /// Decode the header from a JWS Compact Serialization without verifying.
 pub fn decode_header(token: &str) -> Result<JoseHeader> {
+    ensure_token_size(token)?;
     let header_b64 = token
         .split('.')
         .next()
@@ -557,6 +563,13 @@ mod tests {
     fn oversize_token_is_rejected() {
         let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
         let err = verify(&hmac_verifier(), &big).unwrap_err().to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn oversize_decode_header_is_rejected() {
+        let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
+        let err = decode_header(&big).unwrap_err().to_string();
         assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
     }
 

@@ -10,6 +10,17 @@ use crate::header::JoseHeader;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
+fn ensure_token_size(token: &str) -> Result<()> {
+    if token.len() > crate::MAX_TOKEN_BYTES {
+        return Err(JoseError::InvalidToken(format!(
+            "token size {} exceeds MAX_TOKEN_BYTES ({})",
+            token.len(),
+            crate::MAX_TOKEN_BYTES
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -254,13 +265,7 @@ pub fn decrypt_with_options(
     token: &str,
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
-    if token.len() > crate::MAX_TOKEN_BYTES {
-        return Err(JoseError::InvalidToken(format!(
-            "token size {} exceeds MAX_TOKEN_BYTES ({})",
-            token.len(),
-            crate::MAX_TOKEN_BYTES
-        )));
-    }
+    ensure_token_size(token)?;
     // 1. Parse compact serialization.
     let parts: Vec<&str> = token.splitn(6, '.').collect();
     if parts.len() != 5 {
@@ -315,6 +320,7 @@ pub fn decrypt_with_options(
 
 /// Decode the protected header from a JWE compact token without decrypting.
 pub fn decode_header(token: &str) -> Result<JoseHeader> {
+    ensure_token_size(token)?;
     let header_b64 = token
         .split('.')
         .next()
@@ -1486,6 +1492,13 @@ mod tests {
         let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
         let cek = [0x42u8; 32];
         let err = decrypt(&cek, &big).unwrap_err().to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn oversize_jwe_decode_header_is_rejected() {
+        let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
+        let err = decode_header(&big).unwrap_err().to_string();
         assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
     }
 

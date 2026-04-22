@@ -435,6 +435,16 @@ mod tests {
     }
 
     #[test]
+    fn decode_with_jwkset_rejects_oversize_token_before_header_parse() {
+        let set = crate::jwk::JwkSet { keys: Vec::new() };
+        let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
+        let err = decode_with_jwkset(&set, &big, &Validation::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn missing_issuer_fails_validation() {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();

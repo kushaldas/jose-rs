@@ -12,6 +12,25 @@ pub use generate::{generate_ec, generate_ed25519, generate_rsa, generate_symmetr
 use serde::{Deserialize, Serialize};
 use crate::error::{JoseError, Result};
 
+fn zeroize_json_value(value: &mut serde_json::Value) {
+    use zeroize::Zeroize;
+
+    match value {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                zeroize_json_value(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                zeroize_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A JSON Web Key (RFC 7517).
 ///
 /// The `Debug` implementation redacts the private-key fields (`d`, `p`,
@@ -147,6 +166,9 @@ impl Drop for Jwk {
         if let Some(s) = self.k.as_mut() {
             s.zeroize();
         }
+        for value in self.extra.values_mut() {
+            zeroize_json_value(value);
+        }
     }
 }
 
@@ -175,7 +197,14 @@ impl std::fmt::Debug for Jwk {
             .field("x", &self.x)
             .field("y", &self.y)
             .field("k", &redact(&self.k))
-            .field("extra", &self.extra)
+            .field(
+                "extra",
+                &if self.extra.is_empty() {
+                    None::<&str>
+                } else {
+                    Some("<redacted>")
+                },
+            )
             .finish()
     }
 }
@@ -198,8 +227,13 @@ impl Jwk {
 
     /// Return a copy of this JWK with all private-key components removed.
     ///
-    /// Wipes `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`. Public components and
-    /// metadata (`kid`, `use`, `alg`, `key_ops`, `extra`) are preserved.
+    /// Wipes `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`. From the flattened
+    /// `extra` parameters, preserves only the RFC 7517 §4.6–§4.9 X.509
+    /// public parameters (`x5c`, `x5t`, `x5t#S256`, `x5u`) and drops
+    /// everything else — any unrecognised field, including the RFC 7517
+    /// `oth` array of "other primes info" (whose `r`/`d`/`t` members are
+    /// private), is not propagated.
+    ///
     /// For symmetric (`kty: "oct"`) keys the result has no key material at
     /// all — there is no public companion — which is the correct outcome
     /// if someone tries to publish a symmetric key.
@@ -207,6 +241,17 @@ impl Jwk {
     /// Use this before serializing a JWK to any audience that should not
     /// see private material (a JWK Set endpoint, logs, error messages).
     pub fn to_public_jwk(&self) -> Jwk {
+        // RFC 7517 §4.6–§4.9: the four X.509 parameters are public by
+        // design (cert chains, thumbprints, URLs). Everything else in
+        // `extra` has unknown provenance and is dropped.
+        const PUBLIC_EXTRA_ALLOWLIST: &[&str] = &["x5c", "x5t", "x5t#S256", "x5u"];
+        let extra = self
+            .extra
+            .iter()
+            .filter(|(k, _)| PUBLIC_EXTRA_ALLOWLIST.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         Jwk {
             kty: self.kty.clone(),
             use_: self.use_.clone(),
@@ -225,7 +270,7 @@ impl Jwk {
             x: self.x.clone(),
             y: self.y.clone(),
             k: None,
-            extra: self.extra.clone(),
+            extra,
         }
     }
 
@@ -495,6 +540,57 @@ mod tests {
         assert_eq!(pub_jwk.kid.as_deref(), Some("h1"));
     }
 
+    #[test]
+    fn to_public_jwk_drops_unknown_extra_fields() {
+        let json = r#"{
+            "kty":"RSA","n":"pubN","e":"AQAB","d":"SECRET-D",
+            "oth":[{"r":"SECRET-R","d":"SECRET-DI","t":"SECRET-T"}],
+            "vendor_secret":"SECRET-V"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+        assert!(
+            pub_jwk.extra.is_empty(),
+            "unknown extras must be dropped, got: {:?}",
+            pub_jwk.extra.keys().collect::<Vec<_>>()
+        );
+        let s = pub_jwk.to_json().unwrap();
+        assert!(!s.contains("SECRET"), "private leaked via extra: {s}");
+    }
+
+    /// RFC 7517 §4.6–§4.9: X.509 parameters are public by design and
+    /// must survive `to_public_jwk`.
+    #[test]
+    fn to_public_jwk_preserves_x509_public_extras() {
+        let json = r#"{
+            "kty":"RSA","n":"pubN","e":"AQAB","d":"SECRET-D",
+            "x5c":["MIIB-fake-cert"],
+            "x5t":"fake-sha1-thumbprint",
+            "x5t#S256":"fake-sha256-thumbprint",
+            "x5u":"https://example.invalid/cert.pem",
+            "private_metadata":"SECRET-M"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+
+        // Private scalar is gone.
+        assert!(pub_jwk.d.is_none());
+
+        // RFC 7517 §4.6–§4.9 extensions survive.
+        assert!(pub_jwk.extra.contains_key("x5c"));
+        assert!(pub_jwk.extra.contains_key("x5t"));
+        assert!(pub_jwk.extra.contains_key("x5t#S256"));
+        assert!(pub_jwk.extra.contains_key("x5u"));
+
+        // Unknown / non-RFC-sanctioned extras are dropped.
+        assert!(!pub_jwk.extra.contains_key("private_metadata"));
+
+        let s = pub_jwk.to_json().unwrap();
+        assert!(!s.contains("SECRET"), "private leaked via extra: {s}");
+        assert!(s.contains("MIIB-fake-cert"));
+        assert!(s.contains("fake-sha256-thumbprint"));
+    }
+
     /// Phase 6: use="sig" permits Verify but not Encrypt.
     #[test]
     fn use_sig_permits_verify_blocks_encrypt() {
@@ -563,6 +659,20 @@ mod tests {
         let jwk = Jwk::from_json(json).unwrap();
         let s = format!("{jwk:?}");
         assert!(!s.contains("SECRET-SYMMETRIC-KEY"), "k leaked: {s}");
+        assert!(s.contains("<redacted>"));
+    }
+
+    #[test]
+    fn debug_redacts_extra_fields() {
+        let json = r#"{
+            "kty":"RSA","n":"AA","e":"AQAB",
+            "oth":[{"r":"SECRET-R"}],
+            "vendor_secret":"SECRET-V"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let s = format!("{jwk:?}");
+        assert!(!s.contains("SECRET-R"), "extra leaked: {s}");
+        assert!(!s.contains("SECRET-V"), "extra leaked: {s}");
         assert!(s.contains("<redacted>"));
     }
 
