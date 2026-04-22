@@ -1,0 +1,62 @@
+[package]
+name = "jose-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+jose-rs = { path = ".." }
+kryptering = { version = "0.1", default-features = false }
+
+[[bin]]
+name = "base64url_decode"
+path = "fuzz_targets/base64url_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk_from_json"
+path = "fuzz_targets/jwk_from_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk_thumbprint"
+path = "fuzz_targets/jwk_thumbprint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jws_decode_header"
+path = "fuzz_targets/jws_decode_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jws_verify"
+path = "fuzz_targets/jws_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwe_decrypt"
+path = "fuzz_targets/jwe_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwt_decode_unverified"
+path = "fuzz_targets/jwt_decode_unverified.rs"
+test = false
+doc = false
+bench = false

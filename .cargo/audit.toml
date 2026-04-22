@@ -1,0 +1,28 @@
+# cargo-audit configuration for jose-rs
+#
+# Advisories listed here are tracked and intentionally allowed. Every
+# entry must have a justification; if the underlying situation changes
+# (upstream release, mitigation landed) the entry should be removed and
+# the advisory re-checked.
+
+[advisories]
+ignore = [
+    # RSA timing side-channel, a.k.a. the "Marvin" attack. Affects the
+    # `rsa` crate's PKCS#1 v1.5 and OAEP decryption paths. There is no
+    # patched 0.9.x release as of 2026-04; the advisory remains open
+    # upstream. jose-rs uses `rsa` transitively through kryptering for
+    # JWE RSA-OAEP decryption.
+    #
+    # Mitigations in jose-rs:
+    # - RSA-OAEP SHA-1 variant is gated behind the `deprecated` feature
+    #   (see src/algorithm.rs).
+    # - RSA keys under 2048 bits are rejected at parse and generation
+    #   time (see src/jwk/convert.rs, src/jwe/compact.rs).
+    # - RSA-OAEP post-decrypt error paths are collapsed into a single
+    #   opaque error to remove a one-bit oracle (see
+    #   rsa_oaep_recover_cek in src/jwe/compact.rs).
+    #
+    # Operational guidance: rate-limit JWE decryption failures on the
+    # caller side when RSA-OAEP is in use.
+    "RUSTSEC-2023-0071",
+]

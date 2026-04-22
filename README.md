@@ -224,6 +224,47 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   `decode_with_jwkset` is the canonical OIDC flow (kid-lookup with
   fall-through to each key in the set).
 
+## Development tooling
+
+### Dependency audit
+
+The repository is wired for [`cargo-audit`](https://rustsec.org/).
+Local run:
+
+```
+cargo install --locked cargo-audit
+cargo audit
+```
+
+CI runs the same command on every push to `main`, every pull request
+that touches `Cargo.toml` / `Cargo.lock`, and on a weekly schedule
+(`.github/workflows/audit.yml`).
+
+`.cargo/audit.toml` carries a single documented advisory ignore —
+RUSTSEC-2023-0071 (the `rsa` crate Marvin timing advisory) — with
+mitigations described above. Any advisory that is **not** in the
+ignore list fails CI; the ignore file itself is the source of truth
+for "what are we accepting, and why".
+
+### Fuzzing
+
+`fuzz/` is a [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
+project with seven targets covering the attacker-controlled parse and
+verify paths (base64url, JWK JSON, thumbprint, JWS decode/verify, JWE
+decrypt, JWT header/claims). See `fuzz/README.md` for the per-target
+breakdown.
+
+```
+rustup toolchain install nightly
+cargo install --locked cargo-fuzz
+cargo +nightly fuzz run jwk_from_json         # run indefinitely
+cargo +nightly fuzz run jws_verify -- -max_total_time=300
+```
+
+CI (`.github/workflows/fuzz.yml`) builds every target on every PR to
+catch compilation regressions; the actual fuzzing runs are expected to
+live in a longer-running job or OSS-Fuzz once the corpus stabilizes.
+
 ## License
 
 BSD-2-Clause

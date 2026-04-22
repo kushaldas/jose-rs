@@ -1,0 +1,35 @@
+name: Fuzz Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/fuzz.yml'
+
+jobs:
+  fuzz-build:
+    # cargo-fuzz requires nightly; this job only confirms the harnesses
+    # compile. Actual fuzzing runs are long-running and should live in a
+    # dedicated job (or OSS-Fuzz) once the corpus stabilizes.
+    name: Build fuzz harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Build fuzz targets
+        working-directory: ./fuzz
+        run: cargo +nightly fuzz build --dev
