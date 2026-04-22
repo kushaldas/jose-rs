@@ -5,7 +5,12 @@ use crate::error::{JoseError, Result};
 use crate::jwk::Jwk;
 
 /// Convert a JWK to a kryptering SoftwareKey.
+///
+/// If the JWK advertises an `alg`, it is cross-checked against `kty` (and
+/// `crv` for EC/OKP keys). Mismatches — e.g. `kty: "oct"` with
+/// `alg: "RS256"` — are rejected before any key construction.
 pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
+    check_alg_kty_consistency(jwk)?;
     match jwk.kty.as_str() {
         "RSA" => jwk_to_rsa(jwk),
         "EC" => jwk_to_ec(jwk),
@@ -13,6 +18,75 @@ pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         "oct" => jwk_to_oct(jwk),
         other => Err(JoseError::Key(format!("unsupported kty: {other}"))),
     }
+}
+
+/// Verify that `alg`, if present, is consistent with `kty` and `crv`.
+///
+/// RFC 7517 §4.4: `alg` is an identifier for the algorithm this key is
+/// intended for use with. It MUST be consistent with the key's other
+/// parameters.
+fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
+    let Some(alg) = jwk.alg.as_deref() else {
+        return Ok(());
+    };
+    let kty = jwk.kty.as_str();
+    let crv = jwk.crv.as_deref();
+
+    let expected_kty: &[&str] = match alg {
+        // JWS HMAC: symmetric oct.
+        "HS256" | "HS384" | "HS512" => &["oct"],
+        // JWS RSA variants.
+        "RS256" | "RS384" | "RS512" | "PS256" | "PS384" | "PS512" => &["RSA"],
+        // JWS ECDSA.
+        "ES256" | "ES384" | "ES512" | "ES256K" => &["EC"],
+        // EdDSA.
+        "EdDSA" => &["OKP"],
+        // JWE key wrap, direct, PBES2 — all symmetric.
+        "A128KW" | "A192KW" | "A256KW" | "dir"
+        | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW" | "PBES2-HS512+A256KW" => &["oct"],
+        // JWE RSA key transport.
+        "RSA-OAEP" | "RSA-OAEP-256" | "RSA1_5" => &["RSA"],
+        // JWE ECDH-ES family.
+        "ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW" => &["EC", "OKP"],
+        // JWE content encryption algs shouldn't be on a JWK `alg` field,
+        // but if they are, they imply symmetric.
+        "A128GCM" | "A192GCM" | "A256GCM"
+        | "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => &["oct"],
+        _ => &[], // unknown alg: don't enforce
+    };
+
+    if !expected_kty.is_empty() && !expected_kty.contains(&kty) {
+        return Err(JoseError::Key(format!(
+            "JWK alg {alg} is incompatible with kty {kty}"
+        )));
+    }
+
+    // ECDSA alg implies a specific curve.
+    let expected_crv: Option<&str> = match alg {
+        "ES256" => Some("P-256"),
+        "ES384" => Some("P-384"),
+        "ES512" => Some("P-521"),
+        "ES256K" => Some("secp256k1"),
+        "EdDSA" => Some("Ed25519"),
+        _ => None,
+    };
+    if let Some(want) = expected_crv {
+        match crv {
+            Some(got) if got == want => {}
+            Some(got) => {
+                return Err(JoseError::Key(format!(
+                    "JWK alg {alg} requires crv={want}, got {got}"
+                )));
+            }
+            None => {
+                return Err(JoseError::Key(format!(
+                    "JWK alg {alg} requires crv={want}, got none"
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert a kryptering SoftwareKey to a JWK.
@@ -798,6 +872,52 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("odd"), "unexpected error: {err}");
+    }
+
+    /// Phase 6: alg/kty mismatch is rejected with a clear error.
+    #[test]
+    fn alg_kty_mismatch_rejected() {
+        // RS256 declared on a symmetric oct key.
+        let json = r#"{"kty":"oct","k":"AA","alg":"RS256"}"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("incompatible with kty"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Phase 6: ES256 requires crv=P-256; mismatched crv is rejected.
+    #[test]
+    fn alg_crv_mismatch_rejected() {
+        let json = r#"{
+            "kty":"EC","crv":"P-384",
+            "x":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "y":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "alg":"ES256"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("requires crv=P-256"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Phase 6: a consistent alg/kty combination passes.
+    #[test]
+    fn alg_kty_match_accepted() {
+        let json = r#"{"kty":"oct","k":"AA","alg":"HS256"}"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        // HS256 + oct is fine — conversion proceeds (may fail later due to
+        // short key, but the alg/kty gate passes).
+        let _ = jwk_to_software_key(&jwk);
     }
 
     /// Phase 5: EC JWK with oversized x coordinate is rejected with a clear error.

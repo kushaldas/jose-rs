@@ -185,6 +185,16 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   verifier (`with_allowed_algorithms`). These close the JWT-context
   confusion and replay-window gaps that fall outside JWS-layer
   verification.
+- **JWK authorization (RFC 7517 §4.2/§4.3).** Call `Jwk::check_op`
+  before using a key. If the JWK's `use` or `key_ops` field is set,
+  the call enforces it — a verify-only key cannot be used to sign, an
+  `enc`-marked key cannot be used for signatures, and so on. `Jwk` also
+  provides `to_public_jwk()` for safely exporting a key (it strips
+  every private component — `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`).
+- **JWK `alg` / `kty` consistency.** Importing a JWK whose `alg`
+  contradicts its `kty` (e.g. `alg: "RS256"` on a `kty: "oct"` key, or
+  `alg: "ES256"` on a `P-384` curve) is rejected at conversion time
+  with a clear error, rather than failing opaquely downstream.
 
 ## License
 

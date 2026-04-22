@@ -7,6 +7,8 @@ pub mod thumbprint;
 pub use convert::{jwk_to_software_key, software_key_to_jwk};
 pub use generate::{generate_ec, generate_ed25519, generate_rsa, generate_symmetric};
 
+// Re-export JwkOp at the crate root pattern.
+
 use serde::{Deserialize, Serialize};
 use crate::error::{JoseError, Result};
 
@@ -72,6 +74,45 @@ pub struct Jwk {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// A cryptographic operation a JWK may be authorized to perform
+/// (RFC 7517 §4.3 "key_ops" values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JwkOp {
+    Sign,
+    Verify,
+    Encrypt,
+    Decrypt,
+    WrapKey,
+    UnwrapKey,
+    DeriveKey,
+    DeriveBits,
+}
+
+impl JwkOp {
+    /// RFC 7517 §4.3 operation identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sign => "sign",
+            Self::Verify => "verify",
+            Self::Encrypt => "encrypt",
+            Self::Decrypt => "decrypt",
+            Self::WrapKey => "wrapKey",
+            Self::UnwrapKey => "unwrapKey",
+            Self::DeriveKey => "deriveKey",
+            Self::DeriveBits => "deriveBits",
+        }
+    }
+
+    /// RFC 7517 §4.2 "use" category this operation belongs to.
+    /// Returns `"sig"` for sign/verify, `"enc"` otherwise.
+    pub fn use_category(self) -> &'static str {
+        match self {
+            Self::Sign | Self::Verify => "sig",
+            _ => "enc",
+        }
+    }
+}
+
 impl std::fmt::Debug for Jwk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact any private-key component that is present, but still show
@@ -116,6 +157,75 @@ impl Jwk {
     /// Serialize this JWK to a pretty-printed JSON string.
     pub fn to_json_pretty(&self) -> Result<String> {
         serde_json::to_string_pretty(self).map_err(JoseError::from)
+    }
+
+    /// Return a copy of this JWK with all private-key components removed.
+    ///
+    /// Wipes `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`. Public components and
+    /// metadata (`kid`, `use`, `alg`, `key_ops`, `extra`) are preserved.
+    /// For symmetric (`kty: "oct"`) keys the result has no key material at
+    /// all — there is no public companion — which is the correct outcome
+    /// if someone tries to publish a symmetric key.
+    ///
+    /// Use this before serializing a JWK to any audience that should not
+    /// see private material (a JWK Set endpoint, logs, error messages).
+    pub fn to_public_jwk(&self) -> Jwk {
+        Jwk {
+            kty: self.kty.clone(),
+            use_: self.use_.clone(),
+            key_ops: self.key_ops.clone(),
+            alg: self.alg.clone(),
+            kid: self.kid.clone(),
+            n: self.n.clone(),
+            e: self.e.clone(),
+            d: None,
+            p: None,
+            q: None,
+            dp: None,
+            dq: None,
+            qi: None,
+            crv: self.crv.clone(),
+            x: self.x.clone(),
+            y: self.y.clone(),
+            k: None,
+            extra: self.extra.clone(),
+        }
+    }
+
+    /// Check whether this JWK is authorized for the requested operation
+    /// per RFC 7517 §4.2 (`use`) and §4.3 (`key_ops`).
+    ///
+    /// Rules:
+    /// - If `use` is set, it must equal the operation's category
+    ///   (`"sig"` for `Sign`/`Verify`, `"enc"` otherwise).
+    /// - If `key_ops` is set, the operation's JOSE name must appear in it.
+    /// - If both are set, they must be consistent with each other.
+    /// - If neither is set, the key is unrestricted.
+    ///
+    /// Returns `Ok(())` when the operation is permitted. Errors are
+    /// `JoseError::Key` with a message identifying which field blocked
+    /// the operation.
+    pub fn check_op(&self, op: JwkOp) -> Result<()> {
+        if let Some(use_) = self.use_.as_deref() {
+            if use_ != op.use_category() {
+                return Err(JoseError::Key(format!(
+                    "JWK `use` is {use_}, not permitted for operation {}",
+                    op.as_str()
+                )));
+            }
+        }
+        if let Some(ops) = &self.key_ops {
+            let name = op.as_str();
+            if !ops.iter().any(|o| o == name) {
+                return Err(JoseError::Key(format!(
+                    "JWK `key_ops` does not include {name}"
+                )));
+            }
+        }
+        // If both are set, RFC 7517 §4.3 says they SHOULD be consistent;
+        // the two checks above already enforce each independently, which
+        // implies consistency at the point where a specific op is checked.
+        Ok(())
     }
 }
 
@@ -256,6 +366,132 @@ mod tests {
         // Public fields still appear.
         assert!(s.contains("publicN"));
         assert!(s.contains("log-leak-test"));
+    }
+
+    /// Phase 6: to_public_jwk strips RSA private components.
+    #[test]
+    fn to_public_jwk_strips_rsa_private() {
+        let json = r#"{
+            "kty":"RSA","n":"pubN","e":"AQAB",
+            "d":"SECRET-D","p":"SECRET-P","q":"SECRET-Q",
+            "dp":"SECRET-DP","dq":"SECRET-DQ","qi":"SECRET-QI",
+            "kid":"k1","alg":"RS256"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+        assert!(pub_jwk.d.is_none());
+        assert!(pub_jwk.p.is_none());
+        assert!(pub_jwk.q.is_none());
+        assert!(pub_jwk.dp.is_none());
+        assert!(pub_jwk.dq.is_none());
+        assert!(pub_jwk.qi.is_none());
+        // Public components preserved.
+        assert_eq!(pub_jwk.n.as_deref(), Some("pubN"));
+        assert_eq!(pub_jwk.e.as_deref(), Some("AQAB"));
+        assert_eq!(pub_jwk.kid.as_deref(), Some("k1"));
+        assert_eq!(pub_jwk.alg.as_deref(), Some("RS256"));
+        // The serialized form must not contain any SECRET-* string.
+        let s = pub_jwk.to_json().unwrap();
+        assert!(!s.contains("SECRET"), "private leaked: {s}");
+    }
+
+    /// Phase 6: to_public_jwk strips EC d (private scalar).
+    #[test]
+    fn to_public_jwk_strips_ec_private() {
+        let json = r#"{
+            "kty":"EC","crv":"P-256",
+            "x":"pubX","y":"pubY","d":"SECRET-D","kid":"ec1"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+        assert!(pub_jwk.d.is_none());
+        assert_eq!(pub_jwk.x.as_deref(), Some("pubX"));
+        assert_eq!(pub_jwk.y.as_deref(), Some("pubY"));
+    }
+
+    /// Phase 6: to_public_jwk on OKP strips d, keeps x.
+    #[test]
+    fn to_public_jwk_strips_okp_private() {
+        let json = r#"{
+            "kty":"OKP","crv":"Ed25519",
+            "x":"pubX","d":"SECRET-D"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+        assert!(pub_jwk.d.is_none());
+        assert_eq!(pub_jwk.x.as_deref(), Some("pubX"));
+    }
+
+    /// Phase 6: to_public_jwk on oct strips k entirely (symmetric keys have
+    /// no public companion).
+    #[test]
+    fn to_public_jwk_strips_oct() {
+        let json = r#"{"kty":"oct","k":"SECRET","kid":"h1"}"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let pub_jwk = jwk.to_public_jwk();
+        assert!(pub_jwk.k.is_none());
+        assert_eq!(pub_jwk.kid.as_deref(), Some("h1"));
+    }
+
+    /// Phase 6: use="sig" permits Verify but not Encrypt.
+    #[test]
+    fn use_sig_permits_verify_blocks_encrypt() {
+        let jwk = Jwk::from_json(
+            r#"{"kty":"RSA","n":"AA","e":"AQAB","use":"sig"}"#,
+        )
+        .unwrap();
+        jwk.check_op(JwkOp::Verify).unwrap();
+        let err = jwk.check_op(JwkOp::Encrypt).unwrap_err().to_string();
+        assert!(err.contains("`use` is sig"), "unexpected: {err}");
+    }
+
+    /// Phase 6: use="enc" permits Encrypt but not Sign.
+    #[test]
+    fn use_enc_permits_encrypt_blocks_sign() {
+        let jwk = Jwk::from_json(
+            r#"{"kty":"oct","k":"AA","use":"enc"}"#,
+        )
+        .unwrap();
+        jwk.check_op(JwkOp::Encrypt).unwrap();
+        let err = jwk.check_op(JwkOp::Sign).unwrap_err().to_string();
+        assert!(err.contains("`use` is enc"), "unexpected: {err}");
+    }
+
+    /// Phase 6: key_ops narrows to specific operations.
+    #[test]
+    fn key_ops_restricts_to_listed_operations() {
+        let jwk = Jwk::from_json(
+            r#"{"kty":"RSA","n":"AA","e":"AQAB","key_ops":["verify"]}"#,
+        )
+        .unwrap();
+        jwk.check_op(JwkOp::Verify).unwrap();
+        let err = jwk.check_op(JwkOp::Sign).unwrap_err().to_string();
+        assert!(err.contains("key_ops"), "unexpected: {err}");
+    }
+
+    /// Phase 6: when neither use nor key_ops is set, all ops are allowed.
+    #[test]
+    fn no_restriction_allows_everything() {
+        let jwk = Jwk::from_json(r#"{"kty":"oct","k":"AA"}"#).unwrap();
+        jwk.check_op(JwkOp::Sign).unwrap();
+        jwk.check_op(JwkOp::Verify).unwrap();
+        jwk.check_op(JwkOp::Encrypt).unwrap();
+        jwk.check_op(JwkOp::WrapKey).unwrap();
+    }
+
+    /// Phase 6: conflicting use + key_ops is caught (sig + key_ops:["encrypt"]).
+    #[test]
+    fn inconsistent_use_and_key_ops_both_block() {
+        // use=sig says only sig ops. key_ops=["encrypt"] says only encrypt.
+        // Any op chosen is blocked by at least one constraint.
+        let jwk = Jwk::from_json(
+            r#"{"kty":"oct","k":"AA","use":"sig","key_ops":["encrypt"]}"#,
+        )
+        .unwrap();
+        // Verify is a sig-op but not in key_ops → blocked by key_ops.
+        assert!(jwk.check_op(JwkOp::Verify).is_err());
+        // Encrypt is in key_ops but use=sig → blocked by use.
+        assert!(jwk.check_op(JwkOp::Encrypt).is_err());
     }
 
     /// Phase 3: symmetric key `k` is also redacted in Debug.
