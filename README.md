@@ -152,6 +152,19 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   `crit` headers are rejected per RFC 7515 §4.1.11.
 - **RSA minimum key size.** Keys below 2048 bits are rejected at parse
   and at generation time (RFC 7518 §3.3 / §4.2).
+- **AES-GCM nonce collision bound.** Content encryption with A128GCM /
+  A192GCM / A256GCM uses a 96-bit random nonce per RFC 7518 §5.3. Under
+  a single CEK the collision probability reaches 2⁻³² after ~2³² messages
+  (NIST SP 800-38D §8.3). For high-throughput senders, rotate CEKs well
+  before that bound — the `dir` mode with a fresh CEK per message
+  avoids the issue entirely.
+- **Token size cap.** The JWS and JWE decoders reject any input larger
+  than `jose_rs::MAX_TOKEN_BYTES` (1 MiB) before allocating any
+  base64url buffer, to bound DoS from oversized attacker-supplied
+  tokens.
+- **Debug output redaction.** `Jwk`'s `Debug` implementation redacts
+  private components (`d`, `p`, `q`, `dp`, `dq`, `qi`, `k`) — logging a
+  private `Jwk` will not spill the private material.
 
 ## License
 

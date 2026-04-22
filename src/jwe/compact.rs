@@ -129,6 +129,13 @@ pub fn decrypt_with_options(
     token: &str,
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
+    if token.len() > crate::MAX_TOKEN_BYTES {
+        return Err(JoseError::InvalidToken(format!(
+            "token size {} exceeds MAX_TOKEN_BYTES ({})",
+            token.len(),
+            crate::MAX_TOKEN_BYTES
+        )));
+    }
     // 1. Parse compact serialization.
     let parts: Vec<&str> = token.splitn(6, '.').collect();
     if parts.len() != 5 {
@@ -218,6 +225,7 @@ fn produce_cek(
 
         // AES Key Wrap.
         JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
+            check_kek_size(alg, key)?;
             let kw_alg = jwe_alg_to_keywrap(alg)?;
             let cek = random_bytes(cek_len);
             let wrapped =
@@ -284,6 +292,7 @@ fn recover_cek(
         }
 
         JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
+            check_kek_size(alg, key)?;
             let kw_alg = jwe_alg_to_keywrap(alg)?;
             let cek = kryptering::keywrap::unwrap(kw_alg, key, encrypted_key)
                 .map_err(JoseError::Crypto)?;
@@ -783,6 +792,30 @@ fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
 // Algorithm mapping helpers
 // ---------------------------------------------------------------------------
 
+/// Verify that the supplied Key Encryption Key is exactly the size
+/// demanded by the declared AES Key Wrap algorithm.
+///
+/// Prevents silent acceptance of a 32-byte key for `A128KW` (or similar
+/// mis-sized KEKs) if the underlying crypto backend does not validate
+/// strictly.
+fn check_kek_size(alg: JweAlgorithm, key: &[u8]) -> Result<()> {
+    let expected = match alg {
+        JweAlgorithm::A128KW => 16,
+        JweAlgorithm::A192KW => 24,
+        JweAlgorithm::A256KW => 32,
+        _ => return Ok(()),
+    };
+    if key.len() != expected {
+        return Err(JoseError::Key(format!(
+            "{}: KEK must be {} bytes, got {}",
+            alg.as_str(),
+            expected,
+            key.len()
+        )));
+    }
+    Ok(())
+}
+
 fn jwe_alg_to_keywrap(alg: JweAlgorithm) -> Result<kryptering::KeyWrapAlgorithm> {
     use kryptering::{AesKeySize, KeyWrapAlgorithm};
     match alg {
@@ -1224,6 +1257,51 @@ mod tests {
             encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 3: oversized JWE tokens are rejected before any decoding.
+    #[test]
+    fn oversize_jwe_token_is_rejected() {
+        let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
+        let cek = [0x42u8; 32];
+        let err = decrypt(&cek, &big).unwrap_err().to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
+    }
+
+    /// Phase 3: A128KW rejects a 32-byte KEK.
+    #[test]
+    fn a128kw_rejects_wrong_size_kek_on_encrypt() {
+        let too_big = [0x11u8; 32];
+        let err = encrypt(&too_big, b"p", JweAlgorithm::A128KW, JweEncryption::A128GCM)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("A128KW"), "unexpected error: {err}");
+        assert!(err.contains("16 bytes"), "unexpected error: {err}");
+    }
+
+    /// Phase 3: A256KW rejects a 16-byte KEK.
+    #[test]
+    fn a256kw_rejects_wrong_size_kek_on_encrypt() {
+        let too_small = [0x22u8; 16];
+        let err = encrypt(&too_small, b"p", JweAlgorithm::A256KW, JweEncryption::A128GCM)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("A256KW"), "unexpected error: {err}");
+        assert!(err.contains("32 bytes"), "unexpected error: {err}");
+    }
+
+    /// Phase 3: decryption also rejects a mis-sized KEK.
+    #[test]
+    fn aes_kw_rejects_wrong_size_kek_on_decrypt() {
+        // Encrypt with a correct KEK...
+        let kek = [0xABu8; 32];
+        let token =
+            encrypt(&kek, b"p", JweAlgorithm::A256KW, JweEncryption::A128GCM).unwrap();
+        // ...then attempt decryption with a wrong-size key.
+        let wrong_size = [0xABu8; 16];
+        let err = decrypt(&wrong_size, &token).unwrap_err().to_string();
+        assert!(err.contains("A256KW"), "unexpected error: {err}");
+        assert!(err.contains("32 bytes"), "unexpected error: {err}");
     }
 
     /// Phase 2: direct unit tests for the constant-time PKCS#7 unpad implementation.

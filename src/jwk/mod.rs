@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::{JoseError, Result};
 
 /// A JSON Web Key (RFC 7517).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The `Debug` implementation redacts the private-key fields (`d`, `p`,
+/// `q`, `dp`, `dq`, `qi`, `k`) so accidentally logging a `Jwk` does not
+/// spill the private material — any present private component is
+/// rendered as `<redacted>`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Jwk {
     /// Key type (`kty`): "RSA", "EC", "oct", "OKP"
     pub kty: String,
@@ -65,6 +70,36 @@ pub struct Jwk {
     // Catch-all for additional parameters
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for Jwk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact any private-key component that is present, but still show
+        // that it existed (so debug output conveys "this is a private key").
+        let redact = |opt: &Option<String>| -> Option<&'static str> {
+            opt.as_ref().map(|_| "<redacted>")
+        };
+        f.debug_struct("Jwk")
+            .field("kty", &self.kty)
+            .field("use_", &self.use_)
+            .field("key_ops", &self.key_ops)
+            .field("alg", &self.alg)
+            .field("kid", &self.kid)
+            .field("n", &self.n)
+            .field("e", &self.e)
+            .field("d", &redact(&self.d))
+            .field("p", &redact(&self.p))
+            .field("q", &redact(&self.q))
+            .field("dp", &redact(&self.dp))
+            .field("dq", &redact(&self.dq))
+            .field("qi", &redact(&self.qi))
+            .field("crv", &self.crv)
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .field("k", &redact(&self.k))
+            .field("extra", &self.extra)
+            .finish()
+    }
 }
 
 impl Jwk {
@@ -198,6 +233,39 @@ mod tests {
         assert_eq!(jwk.kty, "oct");
         assert!(jwk.k.is_some());
         assert_eq!(jwk.kid.as_deref(), Some("hmac-key"));
+    }
+
+    /// Phase 3: Debug output must redact private-key fields.
+    #[test]
+    fn debug_redacts_private_fields() {
+        let json = r#"{
+            "kty": "RSA",
+            "n": "publicN",
+            "e": "AQAB",
+            "d": "SECRET-PRIVATE-D",
+            "p": "SECRET-PRIME-P",
+            "q": "SECRET-PRIME-Q",
+            "kid": "log-leak-test"
+        }"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let s = format!("{jwk:?}");
+        assert!(!s.contains("SECRET-PRIVATE-D"), "d leaked: {s}");
+        assert!(!s.contains("SECRET-PRIME-P"), "p leaked: {s}");
+        assert!(!s.contains("SECRET-PRIME-Q"), "q leaked: {s}");
+        assert!(s.contains("<redacted>"), "expected redaction marker: {s}");
+        // Public fields still appear.
+        assert!(s.contains("publicN"));
+        assert!(s.contains("log-leak-test"));
+    }
+
+    /// Phase 3: symmetric key `k` is also redacted in Debug.
+    #[test]
+    fn debug_redacts_symmetric_key() {
+        let json = r#"{"kty":"oct","k":"SECRET-SYMMETRIC-KEY"}"#;
+        let jwk = Jwk::from_json(json).unwrap();
+        let s = format!("{jwk:?}");
+        assert!(!s.contains("SECRET-SYMMETRIC-KEY"), "k leaked: {s}");
+        assert!(s.contains("<redacted>"));
     }
 
     #[test]

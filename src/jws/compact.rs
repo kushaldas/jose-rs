@@ -76,6 +76,13 @@ pub fn verify(
     verifier: &dyn kryptering::Verifier,
     token: &str,
 ) -> Result<Vec<u8>> {
+    if token.len() > crate::MAX_TOKEN_BYTES {
+        return Err(JoseError::InvalidToken(format!(
+            "token size {} exceeds MAX_TOKEN_BYTES ({})",
+            token.len(),
+            crate::MAX_TOKEN_BYTES
+        )));
+    }
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
         return Err(JoseError::InvalidToken(
@@ -265,6 +272,14 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("none"), "unexpected error: {err}");
+    }
+
+    /// Phase 3: oversized tokens are rejected before any decoding.
+    #[test]
+    fn oversize_token_is_rejected() {
+        let big = "a".repeat(crate::MAX_TOKEN_BYTES + 1);
+        let err = verify(&hmac_verifier(), &big).unwrap_err().to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
     }
 
     /// crit enforcement regression (J-04): any non-empty crit array must be rejected.
