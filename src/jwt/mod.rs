@@ -26,15 +26,18 @@ pub fn encode(
 /// Decode and validate a JWT.
 ///
 /// Returns the validated claims. Signature is verified using the provided
-/// verifier, and claims are checked against the `Validation` configuration.
+/// verifier, and both the protected header and claims are checked against
+/// the `Validation` configuration — header-bound checks (`typ`,
+/// `allowed_algorithms`) run alongside the usual claim checks.
 pub fn decode(
     verifier: &dyn kryptering::Verifier,
     token: &str,
     validation: &Validation,
 ) -> Result<Claims> {
     let payload = crate::jws::compact::verify(verifier, token)?;
+    let header = crate::jws::compact::decode_header(token)?;
     let claims: Claims = serde_json::from_slice(&payload)?;
-    validation.validate(&claims)?;
+    validation.validate_with_header(&claims, &header)?;
     Ok(claims)
 }
 

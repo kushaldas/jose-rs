@@ -72,6 +72,19 @@ fn pad_left(bytes: &[u8], target_len: usize) -> Vec<u8> {
     padded
 }
 
+/// Reject an EC coordinate whose byte length exceeds the curve's coord size.
+/// Left-padding with pad_left handles the short case; anything strictly longer
+/// is malformed and should fail early with a clear error.
+fn reject_oversized_coord(bytes: &[u8], target_len: usize, field: &str) -> Result<()> {
+    if bytes.len() > target_len {
+        return Err(JoseError::Key(format!(
+            "EC coordinate {field} is {} bytes, exceeds curve size {target_len}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Build a new Jwk with only the common metadata cleared.
 fn new_jwk(kty: &str) -> Jwk {
     Jwk {
@@ -218,6 +231,8 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     let y_bytes = require(jwk, "y")?;
 
     let coord_len = 32;
+    reject_oversized_coord(&x_bytes, coord_len, "x")?;
+    reject_oversized_coord(&y_bytes, coord_len, "y")?;
     let mut point = vec![0x04u8];
     point.extend(pad_left(&x_bytes, coord_len));
     point.extend(pad_left(&y_bytes, coord_len));
@@ -252,6 +267,8 @@ fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     let y_bytes = require(jwk, "y")?;
 
     let coord_len = 48;
+    reject_oversized_coord(&x_bytes, coord_len, "x")?;
+    reject_oversized_coord(&y_bytes, coord_len, "y")?;
     let mut point = vec![0x04u8];
     point.extend(pad_left(&x_bytes, coord_len));
     point.extend(pad_left(&y_bytes, coord_len));
@@ -284,6 +301,8 @@ fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     let y_bytes = require(jwk, "y")?;
 
     let coord_len = 66;
+    reject_oversized_coord(&x_bytes, coord_len, "x")?;
+    reject_oversized_coord(&y_bytes, coord_len, "y")?;
     let mut point = vec![0x04u8];
     point.extend(pad_left(&x_bytes, coord_len));
     point.extend(pad_left(&y_bytes, coord_len));
@@ -779,6 +798,23 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("odd"), "unexpected error: {err}");
+    }
+
+    /// Phase 5: EC JWK with oversized x coordinate is rejected with a clear error.
+    #[test]
+    fn ec_oversized_coordinate_is_rejected() {
+        // P-256 expects 32-byte x; provide 33 bytes (0x01 prefix).
+        let big_x = base64url::encode(&[1u8; 33]);
+        let y = base64url::encode(&[0u8; 32]);
+        let json = format!(
+            r#"{{"kty":"EC","crv":"P-256","x":"{big_x}","y":"{y}"}}"#
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("exceeds curve size"), "unexpected error: {err}");
     }
 
     // ── Unsupported kty ────────────────────────────────────────────

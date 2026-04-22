@@ -178,6 +178,13 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   match the signer's algorithm, refuse `alg: "none"`, and refuse a
   non-empty `crit`. This prevents emitting malformed tokens whose
   header advertises a different algorithm than the one actually used.
+- **JWT Best Current Practices (RFC 8725).** `Validation` supports
+  pinning the `typ` header (`with_typ`), capping token age via `iat`
+  (`with_max_age`), rejecting future-dated `iat` by default, and
+  restricting the accepted signing algorithms independently of the
+  verifier (`with_allowed_algorithms`). These close the JWT-context
+  confusion and replay-window gaps that fall outside JWS-layer
+  verification.
 
 ## License
 
