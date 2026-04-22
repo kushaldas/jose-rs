@@ -208,6 +208,17 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   function remains available for legitimate pre-verification
   inspection (e.g. reading a token's `kid` to select the right
   verifier).
+- **JWK-based verify / decode (safer one-shot API).** Prefer
+  `jws::compact::verify_with_jwk`, `jwt::decode_with_jwk`, and
+  `jwt::decode_with_jwkset` over the manual "build a verifier
+  yourself" path. These functions derive the algorithm from the
+  token header, require any pinned `jwk.alg` to agree, enforce
+  `Jwk::check_op` for the intended operation, and build the
+  verifier internally — so the alg-binding, `use`/`key_ops`
+  authorization, and `kid` lookup are all handled by the library
+  instead of being the caller's responsibility. `decode_with_jwkset`
+  is the canonical OIDC flow (kid-lookup with fall-through to each
+  key in the set).
 
 ## License
 

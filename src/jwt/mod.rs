@@ -108,6 +108,64 @@ pub fn decode_nested_with_options(
     decode(verifier, inner_jwt, validation)
 }
 
+/// Decode and validate a JWT using a JWK directly.
+///
+/// One-shot alternative to [`decode`]: derives the verifier from the
+/// JWK (matching the token header's algorithm), enforces
+/// [`crate::jwk::JwkOp::Verify`] on the JWK, requires any pinned
+/// `jwk.alg` to agree with the token's header, and runs claim
+/// validation (including header-bound `typ` and allowed-algorithm
+/// checks).
+pub fn decode_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+    validation: &Validation,
+) -> Result<Claims> {
+    let payload = crate::jws::compact::verify_with_jwk(jwk, token)?;
+    let header = crate::jws::compact::decode_header(token)?;
+    let claims: Claims = serde_json::from_slice(&payload)?;
+    validation.validate_with_header(&claims, &header)?;
+    Ok(claims)
+}
+
+/// Decode and validate a JWT using a JWK Set (the canonical OIDC flow).
+///
+/// If the token header carries a `kid`, the matching JWK is selected and
+/// [`decode_with_jwk`] is called. If no `kid` is present (or no JWK in
+/// the set matches), every key in the set is tried in order; the first
+/// one whose signature validates wins. Returns the last error if no key
+/// in the set validates the token.
+pub fn decode_with_jwkset(
+    set: &crate::jwk::JwkSet,
+    token: &str,
+    validation: &Validation,
+) -> Result<Claims> {
+    let header = crate::jws::compact::decode_header(token)?;
+
+    // Prefer kid-based selection when the header pins one and the set
+    // contains a matching JWK.
+    if let Some(kid) = header.kid.as_deref() {
+        if let Some(jwk) = set.find_by_kid(kid) {
+            return decode_with_jwk(jwk, token, validation);
+        }
+    }
+
+    // Otherwise fall through: try every key until one verifies.
+    if set.keys.is_empty() {
+        return Err(JoseError::Key("JWK Set is empty".into()));
+    }
+    let mut last_err: Option<JoseError> = None;
+    for jwk in &set.keys {
+        match decode_with_jwk(jwk, token, validation) {
+            Ok(claims) => return Ok(claims),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        JoseError::InvalidToken("no key in the set verified the token".into())
+    }))
+}
+
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).
 ///
 /// Emits a deprecation warning at every call site. The function is kept
@@ -505,5 +563,124 @@ mod tests {
         let decoded = decode_nested(&cek, &hmac_verifier(), &nested_token, &validation).unwrap();
 
         assert_eq!(decoded.iss.as_deref(), Some("cbc-nested"));
+    }
+
+    // ── Phase 8: JWK-based decode ──────────────────────────────────
+
+    /// decode_with_jwk: happy path using a symmetric JWK.
+    #[test]
+    fn decode_with_jwk_hmac() {
+        // Prepare a symmetric JWK marked for HS256.
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        jwk.kid = Some("key-1".into());
+
+        // Sign with the same key material.
+        let sw = crate::jwk::jwk_to_software_key(&jwk).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), sw).unwrap();
+        let header = JoseHeader::jwt("HS256");
+        let mut claims = Claims::default();
+        claims.iss = Some("issuer-1".into());
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let validation = Validation::new().with_issuer("issuer-1");
+        let decoded = decode_with_jwk(&jwk, &token, &validation).unwrap();
+        assert_eq!(decoded.iss.as_deref(), Some("issuer-1"));
+    }
+
+    /// decode_with_jwk: a JWK marked use="enc" is rejected for verification.
+    #[test]
+    fn decode_with_jwk_use_enc_rejected() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        jwk.use_ = Some("enc".into());
+
+        let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let signer =
+            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k)).unwrap();
+        let header = JoseHeader::jwt("HS256");
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let err = decode_with_jwk(&jwk, &token, &Validation::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`use` is enc"), "unexpected: {err}");
+    }
+
+    /// decode_with_jwkset: kid-based selection.
+    #[test]
+    fn decode_with_jwkset_kid_match() {
+        let mut jwk_a = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_a.alg = Some("HS256".into());
+        jwk_a.kid = Some("a".into());
+
+        let mut jwk_b = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_b.alg = Some("HS256".into());
+        jwk_b.kid = Some("b".into());
+
+        // Sign with jwk_b.
+        let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
+        let signer =
+            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let mut header = JoseHeader::jwt("HS256");
+        header.kid = Some("b".into()); // kid points at jwk_b
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![jwk_a, jwk_b],
+        };
+        let decoded =
+            decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+        assert_eq!(decoded.exp, claims.exp);
+    }
+
+    /// decode_with_jwkset: no kid → fall back to trying each key.
+    #[test]
+    fn decode_with_jwkset_no_kid_fallback() {
+        let mut jwk_a = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_a.alg = Some("HS256".into());
+        // Deliberately no kid on either key.
+        let mut jwk_b = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_b.alg = Some("HS256".into());
+
+        // Token signed with jwk_b, header has no kid.
+        let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
+        let signer =
+            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let header = JoseHeader::jwt("HS256");
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![jwk_a, jwk_b],
+        };
+        // Fallback finds jwk_b on second try.
+        decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+    }
+
+    /// decode_with_jwkset: no key in the set matches → error.
+    #[test]
+    fn decode_with_jwkset_no_match() {
+        let mut jwk_a = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_a.alg = Some("HS256".into());
+
+        // Sign with a completely different key.
+        let other = SoftwareKey::Hmac(b"completely-different-32-byte-key".to_vec());
+        let signer = SoftwareSigner::new(hmac_algo(), other).unwrap();
+        let header = JoseHeader::jwt("HS256");
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![jwk_a],
+        };
+        assert!(decode_with_jwkset(&set, &token, &Validation::new()).is_err());
     }
 }
