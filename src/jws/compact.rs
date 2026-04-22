@@ -7,15 +7,52 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
+/// Cross-check the caller-supplied protected header against the signer's
+/// algorithm before signing.
+///
+/// Refuses `alg: "none"` unconditionally, refuses headers whose `alg`
+/// doesn't map to the same `kryptering::SignatureAlgorithm` the signer
+/// was constructed with, and refuses a non-empty `crit` (RFC 7515
+/// §4.1.11 — the library understands no extensions).
+pub(crate) fn validate_sign_header(
+    header: &JoseHeader,
+    signer: &dyn kryptering::Signer,
+) -> Result<()> {
+    if let Some(crit) = &header.crit {
+        if !crit.is_empty() {
+            return Err(JoseError::InvalidHeader(format!(
+                "unsupported crit extensions: {crit:?}"
+            )));
+        }
+    }
+    if header.alg == "none" {
+        return Err(JoseError::InvalidHeader(
+            "alg=\"none\" is not permitted".into(),
+        ));
+    }
+    let header_alg = JwsAlgorithm::from_str(&header.alg)?;
+    let header_sig_alg = header_alg.to_crypto()?;
+    if signer.algorithm() != header_sig_alg {
+        return Err(JoseError::InvalidHeader(format!(
+            "header alg {} does not match signer algorithm",
+            header.alg
+        )));
+    }
+    Ok(())
+}
+
 /// Sign a payload and produce a JWS Compact Serialization string.
 ///
 /// The `signer` provides the cryptographic operation -- it can be a software
-/// key or an HSM-backed key.
+/// key or an HSM-backed key. The supplied `header.alg` is cross-checked
+/// against `signer.algorithm()` before any cryptographic operation;
+/// mismatches (including `alg: "none"` or a non-empty `crit`) are rejected.
 pub fn sign(
     signer: &dyn kryptering::Signer,
     payload: &[u8],
     header: &JoseHeader,
 ) -> Result<String> {
+    validate_sign_header(header, signer)?;
     let header_json = serde_json::to_vec(header)?;
     let header_b64 = base64url::encode(&header_json);
     let payload_b64 = base64url::encode(payload);
@@ -237,14 +274,24 @@ mod tests {
     /// Algorithm confusion regression (J-01): a token with header alg="RS256"
     /// MUST be rejected by an HMAC verifier, even if the attacker crafted a
     /// matching HMAC signature using the RSA public key as the HMAC secret.
+    ///
+    /// The attacker-forged token is constructed manually because the
+    /// phase-4 sign-side binding refuses to emit such a token through
+    /// the library's own API.
     #[test]
     fn alg_header_mismatch_is_rejected() {
+        use kryptering::Signer;
         let payload = b"payload";
 
-        // Attacker forges a token with header alg="RS256" but signs with the HMAC verifier's key.
+        // Attacker-forged token: header says RS256, but the signature is
+        // HMAC-SHA256 over the signing input using the verifier's key.
         let mut header = JoseHeader::new("RS256");
         header.kid = Some("attacker".into());
-        let token = sign(&hmac_signer(), payload, &header).unwrap();
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64url::encode(payload);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_signer().sign(signing_input.as_bytes()).unwrap();
+        let token = format!("{signing_input}.{}", base64url::encode(&sig));
 
         // HMAC verifier must refuse because header alg disagrees with verifier algorithm.
         let result = verify(&hmac_verifier(), &token);
@@ -274,6 +321,42 @@ mod tests {
         assert!(err.contains("none"), "unexpected error: {err}");
     }
 
+    /// Phase 4: sign-side mismatch between header.alg and signer.algorithm()
+    /// is rejected. Mirror of the verify-side alg-confusion fix.
+    #[test]
+    fn sign_rejects_header_alg_mismatch() {
+        // HMAC signer, but header advertises RS256.
+        let header = JoseHeader::new("RS256");
+        let err = sign(&hmac_signer(), b"payload", &header)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not match signer algorithm"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Phase 4: sign refuses alg="none" unconditionally.
+    #[test]
+    fn sign_rejects_alg_none() {
+        let header = JoseHeader::new("none");
+        let err = sign(&hmac_signer(), b"payload", &header)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("none"), "unexpected error: {err}");
+    }
+
+    /// Phase 4: sign refuses a non-empty crit header.
+    #[test]
+    fn sign_rejects_crit() {
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["ext".into()]);
+        let err = sign(&hmac_signer(), b"payload", &header)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("crit"), "unexpected error: {err}");
+    }
+
     /// Phase 3: oversized tokens are rejected before any decoding.
     #[test]
     fn oversize_token_is_rejected() {
@@ -282,13 +365,20 @@ mod tests {
         assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected error: {err}");
     }
 
-    /// crit enforcement regression (J-04): any non-empty crit array must be rejected.
+    /// crit enforcement regression (J-04): any non-empty crit array must be
+    /// rejected on the verify path. Token constructed manually because the
+    /// phase-4 sign-side binding refuses to emit a crit-bearing token.
     #[test]
     fn nonempty_crit_is_rejected() {
+        use kryptering::Signer;
         let payload = b"payload";
         let mut header = JoseHeader::new("HS256");
         header.crit = Some(vec!["b64".to_string()]);
-        let token = sign(&hmac_signer(), payload, &header).unwrap();
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64url::encode(payload);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_signer().sign(signing_input.as_bytes()).unwrap();
+        let token = format!("{signing_input}.{}", base64url::encode(&sig));
 
         let result = verify(&hmac_verifier(), &token);
         assert!(result.is_err());

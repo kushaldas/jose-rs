@@ -8,6 +8,7 @@ use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -203,11 +204,15 @@ pub fn decode_header(token: &str) -> Result<JoseHeader> {
 // ---------------------------------------------------------------------------
 
 /// Returns `(cek, encrypted_key)`. For `dir`, `encrypted_key` is empty.
+///
+/// The CEK is returned wrapped in `Zeroizing` so its heap buffer is
+/// wiped when it goes out of scope — key material never lingers in
+/// the allocator after the encryption completes.
 fn produce_cek(
     key: &[u8],
     alg: JweAlgorithm,
     enc: JweEncryption,
-) -> Result<(Vec<u8>, Vec<u8>)> {
+) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
     let cek_len = enc.cek_size();
 
     match alg {
@@ -220,14 +225,14 @@ fn produce_cek(
                     cek_len
                 )));
             }
-            Ok((key.to_vec(), Vec::new()))
+            Ok((Zeroizing::new(key.to_vec()), Vec::new()))
         }
 
         // AES Key Wrap.
         JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
             check_kek_size(alg, key)?;
             let kw_alg = jwe_alg_to_keywrap(alg)?;
-            let cek = random_bytes(cek_len);
+            let cek = Zeroizing::new(random_bytes(cek_len));
             let wrapped =
                 kryptering::keywrap::wrap(kw_alg, key, &cek).map_err(JoseError::Crypto)?;
             Ok((cek, wrapped))
@@ -237,7 +242,7 @@ fn produce_cek(
         JweAlgorithm::RsaOaep256 => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = random_bytes(cek_len);
+            let cek = Zeroizing::new(random_bytes(cek_len));
             let encrypted =
                 kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
                     .map_err(JoseError::Crypto)?;
@@ -248,7 +253,7 @@ fn produce_cek(
         JweAlgorithm::RsaOaep => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = random_bytes(cek_len);
+            let cek = Zeroizing::new(random_bytes(cek_len));
             let encrypted =
                 kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
                     .map_err(JoseError::Crypto)?;
@@ -271,7 +276,7 @@ fn recover_cek(
     alg: JweAlgorithm,
     enc: JweEncryption,
     encrypted_key: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     let cek_len = enc.cek_size();
 
     match alg {
@@ -288,14 +293,16 @@ fn recover_cek(
                     cek_len
                 )));
             }
-            Ok(key.to_vec())
+            Ok(Zeroizing::new(key.to_vec()))
         }
 
         JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
             check_kek_size(alg, key)?;
             let kw_alg = jwe_alg_to_keywrap(alg)?;
-            let cek = kryptering::keywrap::unwrap(kw_alg, key, encrypted_key)
-                .map_err(JoseError::Crypto)?;
+            let cek = Zeroizing::new(
+                kryptering::keywrap::unwrap(kw_alg, key, encrypted_key)
+                    .map_err(JoseError::Crypto)?,
+            );
             if cek.len() != cek_len {
                 return Err(JoseError::Key(format!(
                     "unwrapped CEK length {} does not match expected {}",
@@ -320,25 +327,24 @@ fn recover_cek(
 
 /// Shared RSA-OAEP CEK recovery (used by both RSA-OAEP-256 and the deprecated
 /// SHA-1 RSA-OAEP variant). Post-decrypt error paths are deliberately merged
-/// into a single opaque error to avoid distinguishable oracles (J-11).
+/// into a single opaque error to avoid distinguishable oracles. The recovered
+/// CEK is wrapped in `Zeroizing` so it is wiped when dropped.
 fn rsa_oaep_recover_cek(
     key: &[u8],
     alg: JweAlgorithm,
     encrypted_key: &[u8],
     cek_len: usize,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     let priv_key = parse_rsa_private_key(key)?;
     let kt_alg = jwe_alg_to_keytransport(alg)?;
     let cek_result =
         kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None);
-    // Opaque error: whether OAEP failed or the CEK length is wrong, return
-    // the same error type so remote attackers cannot distinguish.
     let opaque_err = || {
         JoseError::Crypto(kryptering::Error::Crypto(
             "RSA-OAEP key unwrap failed".into(),
         ))
     };
-    let cek = cek_result.map_err(|_| opaque_err())?;
+    let cek = Zeroizing::new(cek_result.map_err(|_| opaque_err())?);
     if cek.len() != cek_len {
         return Err(opaque_err());
     }

@@ -53,11 +53,16 @@ pub struct GeneralJws {
 // ---------------------------------------------------------------------------
 
 /// Create a Flattened JWS JSON from a signer, payload, and header.
+///
+/// The supplied `header.alg` is cross-checked against `signer.algorithm()`
+/// before signing; mismatches (including `alg: "none"` or a non-empty
+/// `crit`) are rejected.
 pub fn sign_flattened(
     signer: &dyn kryptering::Signer,
     payload: &[u8],
     header: &JoseHeader,
 ) -> Result<FlattenedJws> {
+    crate::jws::compact::validate_sign_header(header, signer)?;
     let header_json = serde_json::to_vec(header)?;
     let protected_b64 = base64url::encode(&header_json);
     let payload_b64 = base64url::encode(payload);
@@ -117,6 +122,7 @@ pub fn sign_general(
     let mut signatures = Vec::with_capacity(signers.len());
 
     for (signer, header) in signers {
+        crate::jws::compact::validate_sign_header(header, *signer)?;
         let header_json = serde_json::to_vec(header)?;
         let protected_b64 = base64url::encode(&header_json);
         let signing_input = format!("{protected_b64}.{payload_b64}");
@@ -310,11 +316,22 @@ mod tests {
     }
 
     /// J-01 regression: Flattened verify rejects alg-header mismatch.
+    /// Token is crafted manually because the phase-4 sign-side binding
+    /// refuses to emit a mismatched token via `sign_flattened`.
     #[test]
     fn flattened_alg_header_mismatch_rejected() {
+        use kryptering::Signer;
         let mut header = JoseHeader::new("RS256");
         header.kid = Some("attacker".into());
-        let jws = sign_flattened(&hmac_signer(KEY_A), b"p", &header).unwrap();
+        let protected = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload = base64url::encode(b"p");
+        let signing_input = format!("{protected}.{payload}");
+        let sig = hmac_signer(KEY_A).sign(signing_input.as_bytes()).unwrap();
+        let jws = FlattenedJws {
+            payload,
+            protected,
+            signature: base64url::encode(&sig),
+        };
         let result = verify_flattened(&hmac_verifier(KEY_A), &jws);
         assert!(result.is_err());
     }

@@ -165,6 +165,19 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 - **Debug output redaction.** `Jwk`'s `Debug` implementation redacts
   private components (`d`, `p`, `q`, `dp`, `dq`, `qi`, `k`) — logging a
   private `Jwk` will not spill the private material.
+- **CEK zeroization.** Content Encryption Keys generated or recovered
+  inside JWE `encrypt`/`decrypt` — including the `MAC_KEY || ENC_KEY`
+  split used for AES-CBC-HS — are wrapped in `zeroize::Zeroizing` and
+  wiped from the heap when they go out of scope. This does not extend
+  to key material held inside the underlying cipher crates (which
+  manage their own state), and the decrypted plaintext returned to
+  the caller is not zeroized — if your plaintext is itself a secret,
+  wrap it on the caller side.
+- **Signing-side algorithm binding.** Symmetric to the verify path,
+  the `jws`/`jwt` sign functions reject a header whose `alg` does not
+  match the signer's algorithm, refuse `alg: "none"`, and refuse a
+  non-empty `crit`. This prevents emitting malformed tokens whose
+  header advertises a different algorithm than the one actually used.
 
 ## License
 
