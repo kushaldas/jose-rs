@@ -208,17 +208,21 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   function remains available for legitimate pre-verification
   inspection (e.g. reading a token's `kid` to select the right
   verifier).
-- **JWK-based verify / decode (safer one-shot API).** Prefer
-  `jws::compact::verify_with_jwk`, `jwt::decode_with_jwk`, and
-  `jwt::decode_with_jwkset` over the manual "build a verifier
-  yourself" path. These functions derive the algorithm from the
-  token header, require any pinned `jwk.alg` to agree, enforce
-  `Jwk::check_op` for the intended operation, and build the
-  verifier internally — so the alg-binding, `use`/`key_ops`
-  authorization, and `kid` lookup are all handled by the library
-  instead of being the caller's responsibility. `decode_with_jwkset`
-  is the canonical OIDC flow (kid-lookup with fall-through to each
-  key in the set).
+- **JWK-first API (safer one-shot for every operation).** Prefer the
+  `*_with_jwk` functions over the manual "build a signer/verifier
+  yourself" path:
+  - Sign/verify: `jws::compact::sign_with_jwk`,
+    `jws::compact::verify_with_jwk`, `jwt::encode_with_jwk`,
+    `jwt::decode_with_jwk`, `jwt::decode_with_jwkset`.
+  - Encrypt/decrypt: `jwe::encrypt_with_jwk`, `jwe::decrypt_with_jwk`.
+
+  Each derives the algorithm from the JWK (or the token header, on the
+  receive side), enforces `Jwk::check_op` for the intended operation
+  (`Sign`/`Verify`/`Encrypt`/`Decrypt`/`WrapKey`/`UnwrapKey`), requires
+  any pinned `jwk.alg` to agree with the token's header, and constructs
+  the underlying signer/verifier or key-material form internally.
+  `decode_with_jwkset` is the canonical OIDC flow (kid-lookup with
+  fall-through to each key in the set).
 
 ## License
 

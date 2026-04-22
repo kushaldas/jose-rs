@@ -108,6 +108,20 @@ pub fn decode_nested_with_options(
     decode(verifier, inner_jwt, validation)
 }
 
+/// Encode claims as a JWT using a JWK directly (sign-side JWK one-shot).
+///
+/// The signing algorithm is read from `jwk.alg`. `Jwk::check_op(Sign)` is
+/// enforced, the header's `alg` must match `jwk.alg`, and the signer is
+/// built internally. Mirror of [`decode_with_jwk`].
+pub fn encode_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    header: &JoseHeader,
+    claims: &Claims,
+) -> Result<String> {
+    let payload = serde_json::to_vec(claims)?;
+    crate::jws::compact::sign_with_jwk(jwk, &payload, header)
+}
+
 /// Decode and validate a JWT using a JWK directly.
 ///
 /// One-shot alternative to [`decode`]: derives the verifier from the
@@ -563,6 +577,26 @@ mod tests {
         let decoded = decode_nested(&cek, &hmac_verifier(), &nested_token, &validation).unwrap();
 
         assert_eq!(decoded.iss.as_deref(), Some("cbc-nested"));
+    }
+
+    // ── Phase 9: encode_with_jwk ───────────────────────────────────
+
+    /// Phase 9: encode_with_jwk + decode_with_jwk full JWT round-trip.
+    #[test]
+    fn encode_decode_with_jwk_hmac() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        jwk.kid = Some("k1".into());
+
+        let header = JoseHeader::jwt("HS256");
+        let mut claims = Claims::default();
+        claims.iss = Some("me".into());
+        claims.exp = Some(now() + 3600);
+
+        let token = encode_with_jwk(&jwk, &header, &claims).unwrap();
+        let validation = Validation::new().with_issuer("me");
+        let decoded = decode_with_jwk(&jwk, &token, &validation).unwrap();
+        assert_eq!(decoded.iss.as_deref(), Some("me"));
     }
 
     // ── Phase 8: JWK-based decode ──────────────────────────────────

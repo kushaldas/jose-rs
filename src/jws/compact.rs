@@ -140,6 +140,47 @@ pub fn verify(
     base64url::decode(parts[1])
 }
 
+/// Sign a payload using a JWK directly — the one-shot signer-side API.
+///
+/// The signing algorithm is derived from `jwk.alg` (which must be set to
+/// one of the JWS algorithm identifiers). The supplied `header.alg` is
+/// cross-checked against it, `Jwk::check_op(Sign)` is enforced, the
+/// signer is built internally, and `sign` runs. All the phase-4 sign-side
+/// bindings (header/signer alg agreement, `alg: "none"` rejection,
+/// non-empty `crit` rejection) apply transitively.
+pub fn sign_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+) -> Result<String> {
+    // 1. Derive the algorithm from the JWK.
+    let jwk_alg_str = jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("JWK alg must be set for sign_with_jwk".into()))?;
+    let jwk_alg = JwsAlgorithm::from_str(jwk_alg_str)?;
+    let sig_alg = jwk_alg.to_crypto()?;
+
+    // 2. Header must agree with the JWK's pinned alg.
+    if header.alg != jwk_alg_str {
+        return Err(JoseError::InvalidHeader(format!(
+            "header alg {} does not match JWK alg {jwk_alg_str}",
+            header.alg
+        )));
+    }
+
+    // 3. Enforce use / key_ops.
+    jwk.check_op(crate::jwk::JwkOp::Sign)?;
+
+    // 4. Convert to SoftwareKey and build the signer.
+    let sw_key = crate::jwk::jwk_to_software_key(jwk)?;
+    let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key)
+        .map_err(JoseError::Crypto)?;
+
+    // 5. Standard sign — applies the full phase-4 sign-side binding.
+    sign(&signer, payload, header)
+}
+
 /// Verify a JWS Compact Serialization string using a JWK directly.
 ///
 /// This is the safer one-shot API: it decodes the token's protected
@@ -359,6 +400,54 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("none"), "unexpected error: {err}");
+    }
+
+    /// Phase 9: sign_with_jwk + verify_with_jwk round-trip.
+    #[test]
+    fn sign_with_jwk_roundtrip() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+
+        let header = JoseHeader::new("HS256");
+        let token = sign_with_jwk(&jwk, b"hello", &header).unwrap();
+
+        let recovered = verify_with_jwk(&jwk, &token).unwrap();
+        assert_eq!(recovered, b"hello");
+    }
+
+    /// Phase 9: sign_with_jwk rejects a JWK with no alg pinned.
+    #[test]
+    fn sign_with_jwk_rejects_missing_alg() {
+        let jwk = crate::jwk::generate_symmetric(32).unwrap(); // no alg set
+        let header = JoseHeader::new("HS256");
+        let err = sign_with_jwk(&jwk, b"p", &header).unwrap_err().to_string();
+        assert!(err.contains("alg must be set"), "unexpected: {err}");
+    }
+
+    /// Phase 9: sign_with_jwk rejects use="enc" even on the sign side.
+    #[test]
+    fn sign_with_jwk_rejects_use_enc() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        jwk.use_ = Some("enc".into());
+
+        let header = JoseHeader::new("HS256");
+        let err = sign_with_jwk(&jwk, b"p", &header).unwrap_err().to_string();
+        assert!(err.contains("`use` is enc"), "unexpected: {err}");
+    }
+
+    /// Phase 9: header alg must agree with jwk.alg.
+    #[test]
+    fn sign_with_jwk_header_alg_must_match() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        // Header claims HS384 but JWK is HS256.
+        let header = JoseHeader::new("HS384");
+        let err = sign_with_jwk(&jwk, b"p", &header).unwrap_err().to_string();
+        assert!(
+            err.contains("does not match JWK alg"),
+            "unexpected: {err}"
+        );
     }
 
     /// Phase 8: verify_with_jwk happy path (HMAC).

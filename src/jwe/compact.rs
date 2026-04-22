@@ -51,6 +51,130 @@ pub fn encrypt(
     ))
 }
 
+/// Determine which `JwkOp` governs a JWE alg on the encrypt side.
+///
+/// `Dir` uses the key directly for content encryption (`Encrypt`);
+/// key-transport (`A*KW`, `RSA-OAEP*`) wraps a CEK (`WrapKey`).
+fn jwe_alg_encrypt_op(alg: JweAlgorithm) -> crate::jwk::JwkOp {
+    match alg {
+        JweAlgorithm::Dir => crate::jwk::JwkOp::Encrypt,
+        _ => crate::jwk::JwkOp::WrapKey,
+    }
+}
+
+/// Determine which `JwkOp` governs a JWE alg on the decrypt side.
+fn jwe_alg_decrypt_op(alg: JweAlgorithm) -> crate::jwk::JwkOp {
+    match alg {
+        JweAlgorithm::Dir => crate::jwk::JwkOp::Decrypt,
+        _ => crate::jwk::JwkOp::UnwrapKey,
+    }
+}
+
+/// Convert a JWK to the raw key-material form that [`encrypt`] /
+/// [`decrypt`] expect for the given JWE algorithm.
+///
+/// - For `dir`, `A*KW`: returns the `k` bytes of an `oct` JWK.
+/// - For `RSA-OAEP*` on the encrypt side: returns SPKI DER of the public key.
+/// - For `RSA-OAEP*` on the decrypt side: returns PKCS#8 DER of the private key.
+fn jwk_to_jwe_key_bytes(
+    jwk: &crate::jwk::Jwk,
+    alg: JweAlgorithm,
+    for_decrypt: bool,
+) -> Result<Vec<u8>> {
+    match alg {
+        JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
+            let k = jwk
+                .k
+                .as_deref()
+                .ok_or_else(|| JoseError::Key("JWK is missing `k`".into()))?;
+            base64url::decode(k)
+        }
+        JweAlgorithm::RsaOaep256 => {
+            rsa_jwk_to_der(jwk, for_decrypt)
+        }
+        #[cfg(feature = "deprecated")]
+        JweAlgorithm::RsaOaep => rsa_jwk_to_der(jwk, for_decrypt),
+        _ => Err(JoseError::UnsupportedAlgorithm(format!(
+            "JWE alg {} not supported via JWK one-shot API",
+            alg.as_str()
+        ))),
+    }
+}
+
+fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
+    let sw = crate::jwk::jwk_to_software_key(jwk)?;
+    match sw {
+        kryptering::SoftwareKey::Rsa { public, private } => {
+            if for_decrypt {
+                use rsa::pkcs8::EncodePrivateKey;
+                let pk = private.ok_or_else(|| {
+                    JoseError::Key("JWK lacks RSA private components".into())
+                })?;
+                Ok(pk
+                    .to_pkcs8_der()
+                    .map_err(|e| JoseError::Key(format!("PKCS#8 encode: {e}")))?
+                    .as_bytes()
+                    .to_vec())
+            } else {
+                use rsa::pkcs8::EncodePublicKey;
+                Ok(public
+                    .to_public_key_der()
+                    .map_err(|e| JoseError::Key(format!("SPKI encode: {e}")))?
+                    .as_ref()
+                    .to_vec())
+            }
+        }
+        _ => Err(JoseError::Key("RSA JWK expected".into())),
+    }
+}
+
+/// Encrypt plaintext using a JWK directly — the one-shot JWE encrypt API.
+///
+/// The key management algorithm is read from `jwk.alg` and
+/// `Jwk::check_op` is enforced: `Encrypt` for `dir`, `WrapKey` for
+/// `A*KW` / `RSA-OAEP*`. The caller supplies the content-encryption
+/// algorithm.
+pub fn encrypt_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    plaintext: &[u8],
+    enc: JweEncryption,
+) -> Result<String> {
+    let jwk_alg_str = jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
+    let alg = JweAlgorithm::from_str(jwk_alg_str)?;
+    jwk.check_op(jwe_alg_encrypt_op(alg))?;
+    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
+    encrypt(&key_bytes, plaintext, alg, enc)
+}
+
+/// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.
+///
+/// The key management algorithm is read from the token's protected
+/// header (and cross-checked against `jwk.alg` if pinned).
+/// `Jwk::check_op` is enforced: `Decrypt` for `dir`, `UnwrapKey` for
+/// `A*KW` / `RSA-OAEP*`.
+pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
+    // Read the header's alg for dispatch.
+    let header = decode_header(token)?;
+    let alg = JweAlgorithm::from_str(&header.alg)?;
+
+    // If the JWK pins an alg, it must agree with the token.
+    if let Some(jwk_alg) = jwk.alg.as_deref() {
+        if jwk_alg != header.alg {
+            return Err(JoseError::InvalidToken(format!(
+                "JWK alg {jwk_alg} does not match token header alg {}",
+                header.alg
+            )));
+        }
+    }
+
+    jwk.check_op(jwe_alg_decrypt_op(alg))?;
+    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
+    decrypt(&key_bytes, token)
+}
+
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
 ///
 /// Accepts any key-management / content-encryption algorithm the library
@@ -1263,6 +1387,97 @@ mod tests {
             encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 9: encrypt_with_jwk + decrypt_with_jwk roundtrip, dir + A256GCM.
+    #[test]
+    fn jwk_dir_roundtrip() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("dir".into());
+        let plaintext = b"jwk-dir";
+
+        let token = encrypt_with_jwk(&jwk, plaintext, JweEncryption::A256GCM).unwrap();
+        let recovered = decrypt_with_jwk(&jwk, &token).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 9: encrypt_with_jwk + decrypt_with_jwk roundtrip, A256KW + A128GCM.
+    #[test]
+    fn jwk_aes_kw_roundtrip() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("A256KW".into());
+        let plaintext = b"jwk-a256kw";
+
+        let token = encrypt_with_jwk(&jwk, plaintext, JweEncryption::A128GCM).unwrap();
+        let recovered = decrypt_with_jwk(&jwk, &token).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 9: encrypt_with_jwk + decrypt_with_jwk roundtrip, RSA-OAEP-256.
+    #[test]
+    fn jwk_rsa_oaep_roundtrip() {
+        let mut jwk = crate::jwk::generate_rsa(2048).unwrap();
+        jwk.alg = Some("RSA-OAEP-256".into());
+        let plaintext = b"jwk-rsa-oaep";
+
+        let token =
+            encrypt_with_jwk(&jwk, plaintext, JweEncryption::A256GCM).unwrap();
+        let recovered = decrypt_with_jwk(&jwk, &token).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 9: encrypt_with_jwk rejects JWK with no alg.
+    #[test]
+    fn jwk_encrypt_requires_alg() {
+        let jwk = crate::jwk::generate_symmetric(32).unwrap();
+        let err = encrypt_with_jwk(&jwk, b"p", JweEncryption::A256GCM)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("alg must be set"), "unexpected: {err}");
+    }
+
+    /// Phase 9: encrypt_with_jwk honours use="sig" → reject.
+    #[test]
+    fn jwk_encrypt_rejects_use_sig() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("dir".into());
+        jwk.use_ = Some("sig".into());
+        let err = encrypt_with_jwk(&jwk, b"p", JweEncryption::A256GCM)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`use` is sig"), "unexpected: {err}");
+    }
+
+    /// Phase 9: decrypt_with_jwk rejects use="sig" → reject.
+    #[test]
+    fn jwk_decrypt_rejects_use_sig() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("dir".into());
+        // Encrypt using raw bytes to build a token, then flip use before decrypt.
+        let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let token = encrypt(&k, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        jwk.use_ = Some("sig".into());
+        let err = decrypt_with_jwk(&jwk, &token).unwrap_err().to_string();
+        assert!(err.contains("`use` is sig"), "unexpected: {err}");
+    }
+
+    /// Phase 9: decrypt_with_jwk rejects alg mismatch between JWK and token.
+    #[test]
+    fn jwk_decrypt_pinned_alg_mismatch() {
+        // Encrypt with dir, but JWK claims A256KW at decrypt time.
+        let jwk_bytes = crate::jwk::generate_symmetric(32).unwrap();
+        let k = crate::base64url::decode(jwk_bytes.k.as_ref().unwrap()).unwrap();
+        let token =
+            encrypt(&k, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        let mut jwk = jwk_bytes;
+        jwk.alg = Some("A256KW".into());
+        let err = decrypt_with_jwk(&jwk, &token).unwrap_err().to_string();
+        assert!(
+            err.contains("does not match token header alg"),
+            "unexpected: {err}"
+        );
     }
 
     /// Phase 3: oversized JWE tokens are rejected before any decoding.

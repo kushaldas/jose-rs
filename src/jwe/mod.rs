@@ -10,4 +10,7 @@
 //! - `A128CBC-HS256`, `A192CBC-HS384`, `A256CBC-HS512` -- AES-CBC with HMAC
 
 pub mod compact;
-pub use compact::{decrypt, decrypt_with_options, encrypt, JweDecryptOptions};
+pub use compact::{
+    decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_jwk,
+    JweDecryptOptions,
+};
