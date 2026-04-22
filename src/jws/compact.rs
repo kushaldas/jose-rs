@@ -68,7 +68,8 @@ pub fn sign(
     let header_b64 = base64url::encode(&header_json);
     let payload_b64 = base64url::encode(payload);
     let signing_input = format!("{header_b64}.{payload_b64}");
-    let signature = signer.sign(signing_input.as_bytes())
+    let signature = signer
+        .sign(signing_input.as_bytes())
         .map_err(JoseError::Crypto)?;
     let sig_b64 = base64url::encode(&signature);
     Ok(format!("{signing_input}.{sig_b64}"))
@@ -81,10 +82,7 @@ pub fn sign(
 /// `kryptering::SignatureAlgorithm` that the verifier was constructed with,
 /// and rejects any non-empty `crit` (RFC 7515 §4.1.11 — the library
 /// understands no extensions).
-pub(crate) fn validate_header(
-    header_b64: &str,
-    verifier: &dyn kryptering::Verifier,
-) -> Result<()> {
+pub(crate) fn validate_header(header_b64: &str, verifier: &dyn kryptering::Verifier) -> Result<()> {
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
@@ -120,10 +118,7 @@ pub(crate) fn validate_header(
 /// Returns the decoded payload on success. The token's `alg` header is
 /// cross-checked against `verifier.algorithm()` — mismatches are rejected
 /// before any cryptographic operation. `alg: "none"` is always rejected.
-pub fn verify(
-    verifier: &dyn kryptering::Verifier,
-    token: &str,
-) -> Result<Vec<u8>> {
+pub fn verify(verifier: &dyn kryptering::Verifier, token: &str) -> Result<Vec<u8>> {
     ensure_token_size(token)?;
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
@@ -153,11 +148,7 @@ pub fn verify(
 /// signer is built internally, and `sign` runs. All the phase-4 sign-side
 /// bindings (header/signer alg agreement, `alg: "none"` rejection,
 /// non-empty `crit` rejection) apply transitively.
-pub fn sign_with_jwk(
-    jwk: &crate::jwk::Jwk,
-    payload: &[u8],
-    header: &JoseHeader,
-) -> Result<String> {
+pub fn sign_with_jwk(jwk: &crate::jwk::Jwk, payload: &[u8], header: &JoseHeader) -> Result<String> {
     // 1. Derive the algorithm from the JWK.
     let jwk_alg_str = jwk
         .alg
@@ -179,8 +170,7 @@ pub fn sign_with_jwk(
 
     // 4. Convert to SoftwareKey and build the signer.
     let sw_key = crate::jwk::jwk_to_software_key(jwk)?;
-    let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key)
-        .map_err(JoseError::Crypto)?;
+    let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
 
     // 5. Standard sign — applies the full phase-4 sign-side binding.
     sign(&signer, payload, header)
@@ -219,8 +209,7 @@ pub fn verify_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
 
     // 4. Convert to a SoftwareKey and build the verifier.
     let sw_key = crate::jwk::jwk_to_software_key(jwk)?;
-    let verifier = kryptering::SoftwareVerifier::new(sig_alg, sw_key)
-        .map_err(JoseError::Crypto)?;
+    let verifier = kryptering::SoftwareVerifier::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
 
     // 5. Standard verify — applies the full JWS-layer binding.
     verify(&verifier, token)
@@ -240,26 +229,20 @@ pub fn decode_header(token: &str) -> Result<JoseHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kryptering::{HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier};
+    use kryptering::{
+        HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
+    };
 
     fn hmac_key() -> SoftwareKey {
         SoftwareKey::Hmac(b"my-secret-key-at-least-32-bytes!".to_vec())
     }
 
     fn hmac_signer() -> SoftwareSigner {
-        SoftwareSigner::new(
-            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-            hmac_key(),
-        )
-        .unwrap()
+        SoftwareSigner::new(SignatureAlgorithm::Hmac(HashAlgorithm::Sha256), hmac_key()).unwrap()
     }
 
     fn hmac_verifier() -> SoftwareVerifier {
-        SoftwareVerifier::new(
-            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-            hmac_key(),
-        )
-        .unwrap()
+        SoftwareVerifier::new(SignatureAlgorithm::Hmac(HashAlgorithm::Sha256), hmac_key()).unwrap()
     }
 
     #[test]
@@ -318,11 +301,9 @@ mod tests {
 
         // Verify with a different key.
         let wrong_key = SoftwareKey::Hmac(b"wrong-key-that-is-also-32-bytes!".to_vec());
-        let wrong_verifier = SoftwareVerifier::new(
-            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-            wrong_key,
-        )
-        .unwrap();
+        let wrong_verifier =
+            SoftwareVerifier::new(SignatureAlgorithm::Hmac(HashAlgorithm::Sha256), wrong_key)
+                .unwrap();
 
         let result = verify(&wrong_verifier, &token);
         assert!(result.is_err());
@@ -450,10 +431,7 @@ mod tests {
         // Header claims HS384 but JWK is HS256.
         let header = JoseHeader::new("HS384");
         let err = sign_with_jwk(&jwk, b"p", &header).unwrap_err().to_string();
-        assert!(
-            err.contains("does not match JWK alg"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("does not match JWK alg"), "unexpected: {err}");
     }
 
     /// Phase 8: verify_with_jwk happy path (HMAC).
@@ -465,11 +443,8 @@ mod tests {
 
         // Sign via SoftwareKey path for setup.
         let sw = crate::jwk::jwk_to_software_key(&jwk).unwrap();
-        let signer = kryptering::SoftwareSigner::new(
-            JwsAlgorithm::HS256.to_crypto().unwrap(),
-            sw,
-        )
-        .unwrap();
+        let signer =
+            kryptering::SoftwareSigner::new(JwsAlgorithm::HS256.to_crypto().unwrap(), sw).unwrap();
         let header = JoseHeader::new("HS256");
         let token = sign(&signer, b"payload", &header).unwrap();
 
@@ -486,11 +461,8 @@ mod tests {
         jwk.use_ = Some("enc".into());
 
         let sw = crate::jwk::jwk_to_software_key(&jwk).unwrap();
-        let signer = kryptering::SoftwareSigner::new(
-            JwsAlgorithm::HS256.to_crypto().unwrap(),
-            sw,
-        )
-        .unwrap();
+        let signer =
+            kryptering::SoftwareSigner::new(JwsAlgorithm::HS256.to_crypto().unwrap(), sw).unwrap();
         let header = JoseHeader::new("HS256");
         let token = sign(&signer, b"payload", &header).unwrap();
 
@@ -505,8 +477,7 @@ mod tests {
         jwk.alg = Some("HS384".into()); // JWK claims HS384...
 
         // ...but we build an HS256-keyed signer and sign with HS256.
-        let k_bytes =
-            crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let k_bytes = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
         let signer = kryptering::SoftwareSigner::new(
             JwsAlgorithm::HS256.to_crypto().unwrap(),
             kryptering::SoftwareKey::Hmac(k_bytes),
@@ -591,9 +562,6 @@ mod tests {
         let result = verify(&hmac_verifier(), &token);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("crit"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("crit"), "unexpected error: {err}");
     }
 }

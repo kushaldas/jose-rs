@@ -6,8 +6,9 @@
 //! Run: cargo run --example jwk_thumbprint
 
 fn load_jwk(path: &str) -> jose_rs::jwk::Jwk {
-    let json = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first."));
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first.")
+    });
     jose_rs::jwk::Jwk::from_json(&json).expect("invalid JWK")
 }
 

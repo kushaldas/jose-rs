@@ -141,7 +141,11 @@ fn rfc7520_4_4_hs256_deterministic_roundtrip() {
 
     use kryptering::{HashAlgorithm, SignatureAlgorithm, Signer, SoftwareKey, SoftwareSigner};
     let k = jose_rs::base64url::decode(
-        jose_rs::jwk::Jwk::from_json(HMAC_JWK_JSON).unwrap().k.as_ref().unwrap(),
+        jose_rs::jwk::Jwk::from_json(HMAC_JWK_JSON)
+            .unwrap()
+            .k
+            .as_ref()
+            .unwrap(),
     )
     .unwrap();
     let signer = SoftwareSigner::new(
@@ -152,7 +156,10 @@ fn rfc7520_4_4_hs256_deterministic_roundtrip() {
     let sig = signer.sign(signing_input.as_bytes()).unwrap();
     let produced = format!("{signing_input}.{}", jose_rs::base64url::encode(&sig));
 
-    assert_eq!(produced, HS256_COMPACT, "HMAC signing must match RFC byte-for-byte");
+    assert_eq!(
+        produced, HS256_COMPACT,
+        "HMAC signing must match RFC byte-for-byte"
+    );
 
     // And the JWK-based verify must recognise the produced token too.
     let _ = jws::compact::verify_with_jwk(&jwk, &produced).unwrap();

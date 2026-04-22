@@ -146,9 +146,7 @@ impl Validation {
         // If the system clock is before 1970 something is very wrong — fail closed.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                JoseError::InvalidClaims("system clock is before UNIX_EPOCH".into())
-            })?
+            .map_err(|_| JoseError::InvalidClaims("system clock is before UNIX_EPOCH".into()))?
             .as_secs();
 
         // Check expiration — use saturating_add so an attacker-controlled exp
@@ -174,9 +172,7 @@ impl Validation {
         if self.validate_iat_not_future {
             if let Some(iat) = claims.iat {
                 if iat > now.saturating_add(self.leeway) {
-                    return Err(JoseError::InvalidClaims(
-                        "iat is in the future".into(),
-                    ));
+                    return Err(JoseError::InvalidClaims("iat is in the future".into()));
                 }
             }
         }
@@ -276,8 +272,7 @@ mod tests {
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
 
-        let validation =
-            Validation::new().with_allowed_algorithms(vec![JwsAlgorithm::RS256]);
+        let validation = Validation::new().with_allowed_algorithms(vec![JwsAlgorithm::RS256]);
         let err = validation
             .validate_with_header(&claims, &header)
             .unwrap_err()
@@ -292,10 +287,8 @@ mod tests {
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
 
-        let validation = Validation::new().with_allowed_algorithms(vec![
-            JwsAlgorithm::HS256,
-            JwsAlgorithm::RS256,
-        ]);
+        let validation = Validation::new()
+            .with_allowed_algorithms(vec![JwsAlgorithm::HS256, JwsAlgorithm::RS256]);
         validation.validate_with_header(&claims, &header).unwrap();
     }
 

@@ -48,7 +48,11 @@ fn main() -> jose_rs::Result<()> {
     std::fs::write(format!("{dir}/ed25519-private.jwk"), ed.to_json_pretty()?).unwrap();
     let mut ed_pub = ed;
     ed_pub.d = None;
-    std::fs::write(format!("{dir}/ed25519-public.jwk"), ed_pub.to_json_pretty()?).unwrap();
+    std::fs::write(
+        format!("{dir}/ed25519-public.jwk"),
+        ed_pub.to_json_pretty()?,
+    )
+    .unwrap();
     println!("  -> {dir}/ed25519-private.jwk, {dir}/ed25519-public.jwk");
 
     // HMAC (256-bit symmetric)

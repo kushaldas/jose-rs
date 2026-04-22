@@ -42,16 +42,17 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         // EdDSA.
         "EdDSA" => &["OKP"],
         // JWE key wrap, direct, PBES2 — all symmetric.
-        "A128KW" | "A192KW" | "A256KW" | "dir"
-        | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW" | "PBES2-HS512+A256KW" => &["oct"],
+        "A128KW" | "A192KW" | "A256KW" | "dir" | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW"
+        | "PBES2-HS512+A256KW" => &["oct"],
         // JWE RSA key transport.
         "RSA-OAEP" | "RSA-OAEP-256" | "RSA1_5" => &["RSA"],
         // JWE ECDH-ES family.
         "ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW" => &["EC", "OKP"],
         // JWE content encryption algs shouldn't be on a JWK `alg` field,
         // but if they are, they imply symmetric.
-        "A128GCM" | "A192GCM" | "A256GCM"
-        | "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => &["oct"],
+        "A128GCM" | "A192GCM" | "A256GCM" | "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => {
+            &["oct"]
+        }
         _ => &[], // unknown alg: don't enforce
     };
 
@@ -207,9 +208,7 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     // usable modulus.
     let is_even = e.to_bytes_be().last().copied().unwrap_or(0) & 1 == 0;
     if is_even {
-        return Err(JoseError::Key(
-            "RSA public exponent must be odd".into(),
-        ));
+        return Err(JoseError::Key("RSA public exponent must be odd".into()));
     }
 
     let public = RsaPublicKey::new(n.clone(), e.clone())
@@ -246,10 +245,7 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     Ok(kryptering::SoftwareKey::Rsa { private, public })
 }
 
-fn rsa_to_jwk(
-    private: Option<&rsa::RsaPrivateKey>,
-    public: &rsa::RsaPublicKey,
-) -> Result<Jwk> {
+fn rsa_to_jwk(private: Option<&rsa::RsaPrivateKey>, public: &rsa::RsaPublicKey) -> Result<Jwk> {
     use rsa::traits::PublicKeyParts;
 
     let mut jwk = new_jwk("RSA");
@@ -265,12 +261,8 @@ fn rsa_to_jwk(
         if primes.len() >= 2 {
             jwk.p = Some(base64url::encode(&primes[0].to_bytes_be()));
             jwk.q = Some(base64url::encode(&primes[1].to_bytes_be()));
-            jwk.dp = priv_key
-                .dp()
-                .map(|v| base64url::encode(&v.to_bytes_be()));
-            jwk.dq = priv_key
-                .dq()
-                .map(|v| base64url::encode(&v.to_bytes_be()));
+            jwk.dp = priv_key.dp().map(|v| base64url::encode(&v.to_bytes_be()));
+            jwk.dq = priv_key.dq().map(|v| base64url::encode(&v.to_bytes_be()));
             // qinv returns &BigInt (signed); extract magnitude bytes.
             jwk.qi = priv_key.qinv().map(|v| {
                 let (_sign, bytes) = v.to_bytes_be();
@@ -315,8 +307,7 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         .map_err(|e| JoseError::Key(format!("invalid P-256 point: {e}")))?;
     let public_key: Option<p256::PublicKey> =
         p256::PublicKey::from_encoded_point(&encoded_point).into();
-    let public_key =
-        public_key.ok_or_else(|| JoseError::Key("P-256 point not on curve".into()))?;
+    let public_key = public_key.ok_or_else(|| JoseError::Key("P-256 point not on curve".into()))?;
     let verifying_key = p256::ecdsa::VerifyingKey::from(&public_key);
 
     let private = if jwk.d.is_some() {
@@ -351,8 +342,7 @@ fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         .map_err(|e| JoseError::Key(format!("invalid P-384 point: {e}")))?;
     let public_key: Option<p384::PublicKey> =
         p384::PublicKey::from_encoded_point(&encoded_point).into();
-    let public_key =
-        public_key.ok_or_else(|| JoseError::Key("P-384 point not on curve".into()))?;
+    let public_key = public_key.ok_or_else(|| JoseError::Key("P-384 point not on curve".into()))?;
     let verifying_key = p384::ecdsa::VerifyingKey::from(&public_key);
 
     let private = if jwk.d.is_some() {
@@ -568,10 +558,7 @@ mod tests {
         // Convert back
         let sw2 = jwk_to_software_key(&jwk).unwrap();
         match &sw2 {
-            kryptering::SoftwareKey::Rsa {
-                private,
-                public: _,
-            } => {
+            kryptering::SoftwareKey::Rsa { private, public: _ } => {
                 assert!(private.is_some());
             }
             _ => panic!("expected RSA key"),
@@ -584,19 +571,15 @@ mod tests {
         use kryptering::Verifier as _;
         use kryptering::{SoftwareSigner, SoftwareVerifier};
 
-        let signer = SoftwareSigner::new(
-            SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256),
-            sw,
-        )
-        .unwrap();
+        let signer =
+            SoftwareSigner::new(SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256), sw)
+                .unwrap();
         let data = b"hello world";
         let sig = signer.sign(data).unwrap();
 
-        let verifier = SoftwareVerifier::new(
-            SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256),
-            sw2,
-        )
-        .unwrap();
+        let verifier =
+            SoftwareVerifier::new(SignatureAlgorithm::RsaPkcs1v15(HashAlgorithm::Sha256), sw2)
+                .unwrap();
         verifier.verify(data, &sig).unwrap();
     }
 
@@ -854,9 +837,7 @@ mod tests {
             use rsa::traits::PublicKeyParts;
             base64url::encode(&private_key.n().to_bytes_be())
         };
-        let json = format!(
-            r#"{{"kty":"RSA","n":"{n_b64}","e":"AQ"}}"#
-        );
+        let json = format!(r#"{{"kty":"RSA","n":"{n_b64}","e":"AQ"}}"#);
         let jwk = Jwk::from_json(&json).unwrap();
         let err = match jwk_to_software_key(&jwk) {
             Ok(_) => panic!("expected error"),
@@ -879,9 +860,7 @@ mod tests {
         // e = 4 → base64url("BA") — wait, 4 is two bytes? No, 4 = 0x04 → one byte "BA"
         // Actually base64url(0x04) — let's encode explicitly.
         let e_b64 = base64url::encode(&[0x04]);
-        let json = format!(
-            r#"{{"kty":"RSA","n":"{n_b64}","e":"{e_b64}"}}"#
-        );
+        let json = format!(r#"{{"kty":"RSA","n":"{n_b64}","e":"{e_b64}"}}"#);
         let jwk = Jwk::from_json(&json).unwrap();
         let err = match jwk_to_software_key(&jwk) {
             Ok(_) => panic!("expected error"),
@@ -936,10 +915,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(e) => e.to_string(),
         };
-        assert!(
-            err.contains("incompatible with kty"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("incompatible with kty"), "unexpected: {err}");
     }
 
     /// Phase 6: ES256 requires crv=P-256; mismatched crv is rejected.
@@ -956,10 +932,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(e) => e.to_string(),
         };
-        assert!(
-            err.contains("requires crv=P-256"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("requires crv=P-256"), "unexpected: {err}");
     }
 
     /// Phase 6: a consistent alg/kty combination passes.
@@ -978,15 +951,16 @@ mod tests {
         // P-256 expects 32-byte x; provide 33 bytes (0x01 prefix).
         let big_x = base64url::encode(&[1u8; 33]);
         let y = base64url::encode(&[0u8; 32]);
-        let json = format!(
-            r#"{{"kty":"EC","crv":"P-256","x":"{big_x}","y":"{y}"}}"#
-        );
+        let json = format!(r#"{{"kty":"EC","crv":"P-256","x":"{big_x}","y":"{y}"}}"#);
         let jwk = Jwk::from_json(&json).unwrap();
         let err = match jwk_to_software_key(&jwk) {
             Ok(_) => panic!("expected error"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("exceeds curve size"), "unexpected error: {err}");
+        assert!(
+            err.contains("exceeds curve size"),
+            "unexpected error: {err}"
+        );
     }
 
     // ── Unsupported kty ────────────────────────────────────────────

@@ -6,8 +6,9 @@
 use jose_rs::{JweAlgorithm, JweEncryption};
 
 fn load_jwk(path: &str) -> jose_rs::jwk::Jwk {
-    let json = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first."));
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first.")
+    });
     jose_rs::jwk::Jwk::from_json(&json).expect("invalid JWK")
 }
 
@@ -31,7 +32,12 @@ fn main() -> jose_rs::Result<()> {
         JweAlgorithm::A256KW,
         JweEncryption::A128GCM,
     )?;
-    println!("\nJWE token ({} bytes):\n{}...{}\n", token.len(), &token[..60], &token[token.len()-20..]);
+    println!(
+        "\nJWE token ({} bytes):\n{}...{}\n",
+        token.len(),
+        &token[..60],
+        &token[token.len() - 20..]
+    );
 
     // Decrypt
     let decrypted = jose_rs::jwe::decrypt(&kek, &token)?;

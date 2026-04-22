@@ -61,9 +61,18 @@ impl JwsAlgorithm {
             Self::PS256 => Ok(SignatureAlgorithm::RsaPss(HashAlgorithm::Sha256)),
             Self::PS384 => Ok(SignatureAlgorithm::RsaPss(HashAlgorithm::Sha384)),
             Self::PS512 => Ok(SignatureAlgorithm::RsaPss(HashAlgorithm::Sha512)),
-            Self::ES256 => Ok(SignatureAlgorithm::Ecdsa(EcCurve::P256, HashAlgorithm::Sha256)),
-            Self::ES384 => Ok(SignatureAlgorithm::Ecdsa(EcCurve::P384, HashAlgorithm::Sha384)),
-            Self::ES512 => Ok(SignatureAlgorithm::Ecdsa(EcCurve::P521, HashAlgorithm::Sha512)),
+            Self::ES256 => Ok(SignatureAlgorithm::Ecdsa(
+                EcCurve::P256,
+                HashAlgorithm::Sha256,
+            )),
+            Self::ES384 => Ok(SignatureAlgorithm::Ecdsa(
+                EcCurve::P384,
+                HashAlgorithm::Sha384,
+            )),
+            Self::ES512 => Ok(SignatureAlgorithm::Ecdsa(
+                EcCurve::P521,
+                HashAlgorithm::Sha512,
+            )),
             Self::EdDSA => Ok(SignatureAlgorithm::Ed25519),
             Self::ES256K => Err(JoseError::UnsupportedAlgorithm(
                 "ES256K (secp256k1) is not yet supported by kryptering".into(),
@@ -246,9 +255,9 @@ impl JweEncryption {
     /// Content Encryption Key size in bytes.
     pub fn cek_size(self) -> usize {
         match self {
-            Self::A128CbcHs256 => 32,  // 128-bit AES + 128-bit HMAC
-            Self::A192CbcHs384 => 48,  // 192-bit AES + 192-bit HMAC
-            Self::A256CbcHs512 => 64,  // 256-bit AES + 256-bit HMAC
+            Self::A128CbcHs256 => 32, // 128-bit AES + 128-bit HMAC
+            Self::A192CbcHs384 => 48, // 192-bit AES + 192-bit HMAC
+            Self::A256CbcHs512 => 64, // 256-bit AES + 256-bit HMAC
             Self::A128GCM => 16,
             Self::A192GCM => 24,
             Self::A256GCM => 32,

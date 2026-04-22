@@ -9,8 +9,8 @@ pub use generate::{generate_ec, generate_ed25519, generate_rsa, generate_symmetr
 
 // Re-export JwkOp at the crate root pattern.
 
-use serde::{Deserialize, Serialize};
 use crate::error::{JoseError, Result};
+use serde::{Deserialize, Serialize};
 
 fn zeroize_json_value(value: &mut serde_json::Value) {
     use zeroize::Zeroize;
@@ -176,9 +176,8 @@ impl std::fmt::Debug for Jwk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact any private-key component that is present, but still show
         // that it existed (so debug output conveys "this is a private key").
-        let redact = |opt: &Option<String>| -> Option<&'static str> {
-            opt.as_ref().map(|_| "<redacted>")
-        };
+        let redact =
+            |opt: &Option<String>| -> Option<&'static str> { opt.as_ref().map(|_| "<redacted>") };
         f.debug_struct("Jwk")
             .field("kty", &self.kty)
             .field("use_", &self.use_)
@@ -594,10 +593,7 @@ mod tests {
     /// Phase 6: use="sig" permits Verify but not Encrypt.
     #[test]
     fn use_sig_permits_verify_blocks_encrypt() {
-        let jwk = Jwk::from_json(
-            r#"{"kty":"RSA","n":"AA","e":"AQAB","use":"sig"}"#,
-        )
-        .unwrap();
+        let jwk = Jwk::from_json(r#"{"kty":"RSA","n":"AA","e":"AQAB","use":"sig"}"#).unwrap();
         jwk.check_op(JwkOp::Verify).unwrap();
         let err = jwk.check_op(JwkOp::Encrypt).unwrap_err().to_string();
         assert!(err.contains("`use` is sig"), "unexpected: {err}");
@@ -606,10 +602,7 @@ mod tests {
     /// Phase 6: use="enc" permits Encrypt but not Sign.
     #[test]
     fn use_enc_permits_encrypt_blocks_sign() {
-        let jwk = Jwk::from_json(
-            r#"{"kty":"oct","k":"AA","use":"enc"}"#,
-        )
-        .unwrap();
+        let jwk = Jwk::from_json(r#"{"kty":"oct","k":"AA","use":"enc"}"#).unwrap();
         jwk.check_op(JwkOp::Encrypt).unwrap();
         let err = jwk.check_op(JwkOp::Sign).unwrap_err().to_string();
         assert!(err.contains("`use` is enc"), "unexpected: {err}");
@@ -618,10 +611,8 @@ mod tests {
     /// Phase 6: key_ops narrows to specific operations.
     #[test]
     fn key_ops_restricts_to_listed_operations() {
-        let jwk = Jwk::from_json(
-            r#"{"kty":"RSA","n":"AA","e":"AQAB","key_ops":["verify"]}"#,
-        )
-        .unwrap();
+        let jwk =
+            Jwk::from_json(r#"{"kty":"RSA","n":"AA","e":"AQAB","key_ops":["verify"]}"#).unwrap();
         jwk.check_op(JwkOp::Verify).unwrap();
         let err = jwk.check_op(JwkOp::Sign).unwrap_err().to_string();
         assert!(err.contains("key_ops"), "unexpected: {err}");
@@ -642,10 +633,8 @@ mod tests {
     fn inconsistent_use_and_key_ops_both_block() {
         // use=sig says only sig ops. key_ops=["encrypt"] says only encrypt.
         // Any op chosen is blocked by at least one constraint.
-        let jwk = Jwk::from_json(
-            r#"{"kty":"oct","k":"AA","use":"sig","key_ops":["encrypt"]}"#,
-        )
-        .unwrap();
+        let jwk =
+            Jwk::from_json(r#"{"kty":"oct","k":"AA","use":"sig","key_ops":["encrypt"]}"#).unwrap();
         // Verify is a sig-op but not in key_ops → blocked by key_ops.
         assert!(jwk.check_op(JwkOp::Verify).is_err());
         // Encrypt is in key_ops but use=sig → blocked by use.

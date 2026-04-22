@@ -8,8 +8,9 @@
 use jose_rs::{JweAlgorithm, JweEncryption};
 
 fn load_jwk(path: &str) -> jose_rs::jwk::Jwk {
-    let json = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first."));
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first.")
+    });
     jose_rs::jwk::Jwk::from_json(&json).expect("invalid JWK")
 }
 
@@ -23,7 +24,8 @@ fn main() -> jose_rs::Result<()> {
     let pub_der = match &pub_key {
         kryptering::SoftwareKey::Rsa { public, .. } => {
             use rsa::pkcs8::EncodePublicKey;
-            public.to_public_key_der()
+            public
+                .to_public_key_der()
                 .map_err(|e| jose_rs::JoseError::Key(format!("DER encode: {e}")))?
                 .to_vec()
         }
@@ -43,7 +45,9 @@ fn main() -> jose_rs::Result<()> {
     let priv_jwk = load_jwk("examples/keys/rsa-private.jwk");
     let priv_key = jose_rs::jwk::jwk_to_software_key(&priv_jwk)?;
     let priv_der = match &priv_key {
-        kryptering::SoftwareKey::Rsa { private: Some(pk), .. } => {
+        kryptering::SoftwareKey::Rsa {
+            private: Some(pk), ..
+        } => {
             use rsa::pkcs8::EncodePrivateKey;
             pk.to_pkcs8_der()
                 .map_err(|e| jose_rs::JoseError::Key(format!("DER encode: {e}")))?

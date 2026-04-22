@@ -211,9 +211,8 @@ pub fn decode_with_jwkset(
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| {
-        JoseError::InvalidToken("no key in the set verified the token".into())
-    }))
+    Err(last_err
+        .unwrap_or_else(|| JoseError::InvalidToken("no key in the set verified the token".into())))
 }
 
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).
@@ -239,7 +238,9 @@ pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kryptering::{HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier};
+    use kryptering::{
+        HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn now() -> u64 {
@@ -366,9 +367,7 @@ mod tests {
         claims
             .extra
             .insert("role".into(), serde_json::Value::String("admin".into()));
-        claims
-            .extra
-            .insert("level".into(), serde_json::json!(42));
+        claims.extra.insert("level".into(), serde_json::json!(42));
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new();
@@ -654,8 +653,7 @@ mod tests {
         assert_eq!(token.split('.').count(), 5);
 
         let validation = Validation::new().with_issuer("nested-jwk");
-        let decoded =
-            decode_nested_with_jwk(&enc_jwk, &signer_jwk, &token, &validation).unwrap();
+        let decoded = decode_nested_with_jwk(&enc_jwk, &signer_jwk, &token, &validation).unwrap();
         assert_eq!(decoded.iss.as_deref(), Some("nested-jwk"));
     }
 
@@ -763,8 +761,7 @@ mod tests {
         jwk.use_ = Some("enc".into());
 
         let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
-        let signer =
-            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
@@ -789,8 +786,7 @@ mod tests {
 
         // Sign with jwk_b.
         let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
-        let signer =
-            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("b".into()); // kid points at jwk_b
         let mut claims = Claims::default();
@@ -800,8 +796,7 @@ mod tests {
         let set = crate::jwk::JwkSet {
             keys: vec![jwk_a, jwk_b],
         };
-        let decoded =
-            decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+        let decoded = decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
         assert_eq!(decoded.exp, claims.exp);
     }
 
@@ -816,8 +811,7 @@ mod tests {
 
         // Token signed with jwk_b, header has no kid.
         let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
-        let signer =
-            SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
@@ -844,9 +838,7 @@ mod tests {
         claims.exp = Some(now() + 3600);
         let token = encode(&signer, &header, &claims).unwrap();
 
-        let set = crate::jwk::JwkSet {
-            keys: vec![jwk_a],
-        };
+        let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
         assert!(decode_with_jwkset(&set, &token, &Validation::new()).is_err());
     }
 }

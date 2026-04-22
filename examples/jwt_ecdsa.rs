@@ -8,8 +8,9 @@ use jose_rs::{JoseHeader, JwsAlgorithm};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn load_jwk(path: &str) -> jose_rs::jwk::Jwk {
-    let json = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first."));
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("Key file not found: {path}\nRun `cargo run --example generate_keys` first.")
+    });
     jose_rs::jwk::Jwk::from_json(&json).expect("invalid JWK")
 }
 
@@ -19,7 +20,10 @@ fn main() -> jose_rs::Result<()> {
     let algo = JwsAlgorithm::ES256.to_crypto()?;
     let signer = kryptering::SoftwareSigner::new(algo, private_key)?;
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut claims = Claims::default();
     claims.iss = Some("mobile-app".into());
     claims.sub = Some("device-abc123".into());

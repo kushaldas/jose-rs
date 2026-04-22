@@ -100,9 +100,7 @@ fn jwk_to_jwe_key_bytes(
                 .ok_or_else(|| JoseError::Key("JWK is missing `k`".into()))?;
             base64url::decode(k)
         }
-        JweAlgorithm::RsaOaep256 => {
-            rsa_jwk_to_der(jwk, for_decrypt)
-        }
+        JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
         #[cfg(feature = "deprecated")]
         JweAlgorithm::RsaOaep => rsa_jwk_to_der(jwk, for_decrypt),
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
@@ -118,9 +116,8 @@ fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
         kryptering::SoftwareKey::Rsa { public, private } => {
             if for_decrypt {
                 use rsa::pkcs8::EncodePrivateKey;
-                let pk = private.ok_or_else(|| {
-                    JoseError::Key("JWK lacks RSA private components".into())
-                })?;
+                let pk = private
+                    .ok_or_else(|| JoseError::Key("JWK lacks RSA private components".into()))?;
                 Ok(pk
                     .to_pkcs8_der()
                     .map_err(|e| JoseError::Key(format!("PKCS#8 encode: {e}")))?
@@ -373,9 +370,8 @@ fn produce_cek(
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
             let cek = Zeroizing::new(random_bytes(cek_len));
-            let encrypted =
-                kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                    .map_err(JoseError::Crypto)?;
+            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
+                .map_err(JoseError::Crypto)?;
             Ok((cek, encrypted))
         }
 
@@ -384,9 +380,8 @@ fn produce_cek(
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
             let cek = Zeroizing::new(random_bytes(cek_len));
-            let encrypted =
-                kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                    .map_err(JoseError::Crypto)?;
+            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
+                .map_err(JoseError::Crypto)?;
             Ok((cek, encrypted))
         }
 
@@ -467,8 +462,7 @@ fn rsa_oaep_recover_cek(
 ) -> Result<Zeroizing<Vec<u8>>> {
     let priv_key = parse_rsa_private_key(key)?;
     let kt_alg = jwe_alg_to_keytransport(alg)?;
-    let cek_result =
-        kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None);
+    let cek_result = kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None);
     let opaque_err = || {
         JoseError::Crypto(kryptering::Error::Crypto(
             "RSA-OAEP key unwrap failed".into(),
@@ -496,9 +490,9 @@ fn content_encrypt(
         JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => {
             aes_gcm_encrypt(cek, plaintext, aad)
         }
-        JweEncryption::A128CbcHs256
-        | JweEncryption::A192CbcHs384
-        | JweEncryption::A256CbcHs512 => aes_cbc_hs_encrypt(enc, cek, plaintext, aad),
+        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
+            aes_cbc_hs_encrypt(enc, cek, plaintext, aad)
+        }
     }
 }
 
@@ -515,9 +509,9 @@ fn content_decrypt(
         JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => {
             aes_gcm_decrypt(cek, iv, ciphertext, tag, aad)
         }
-        JweEncryption::A128CbcHs256
-        | JweEncryption::A192CbcHs384
-        | JweEncryption::A256CbcHs512 => aes_cbc_hs_decrypt(enc, cek, iv, ciphertext, tag, aad),
+        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
+            aes_cbc_hs_decrypt(enc, cek, iv, ciphertext, tag, aad)
+        }
     }
 }
 
@@ -565,9 +559,7 @@ fn aes_gcm_encrypt(
                 .map_err(gcm_err)?
         }
         other => {
-            return Err(JoseError::Key(format!(
-                "invalid AES-GCM key size: {other}"
-            )));
+            return Err(JoseError::Key(format!("invalid AES-GCM key size: {other}")));
         }
     };
 
@@ -630,9 +622,7 @@ fn aes_gcm_decrypt(
                 .map_err(|_| auth_fail())?;
         }
         other => {
-            return Err(JoseError::Key(format!(
-                "invalid AES-GCM key size: {other}"
-            )));
+            return Err(JoseError::Key(format!("invalid AES-GCM key size: {other}")));
         }
     }
 
@@ -1097,12 +1087,20 @@ mod tests {
         let kek = [0xABu8; 32]; // 256-bit KEK
         let plaintext = b"Wrapped key encryption test";
 
-        let token =
-            encrypt(&kek, plaintext, JweAlgorithm::A256KW, JweEncryption::A128GCM).unwrap();
+        let token = encrypt(
+            &kek,
+            plaintext,
+            JweAlgorithm::A256KW,
+            JweEncryption::A128GCM,
+        )
+        .unwrap();
 
         // Encrypted key part must not be empty for key wrapping.
         let parts: Vec<&str> = token.splitn(5, '.').collect();
-        assert!(!parts[1].is_empty(), "A256KW: encrypted key must not be empty");
+        assert!(
+            !parts[1].is_empty(),
+            "A256KW: encrypted key must not be empty"
+        );
 
         let recovered = decrypt(&kek, &token).unwrap();
         assert_eq!(recovered, plaintext);
@@ -1113,8 +1111,13 @@ mod tests {
         let kek = [0xCDu8; 16]; // 128-bit KEK
         let plaintext = b"A128KW + A256GCM";
 
-        let token =
-            encrypt(&kek, plaintext, JweAlgorithm::A128KW, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(
+            &kek,
+            plaintext,
+            JweAlgorithm::A128KW,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
         let recovered = decrypt(&kek, &token).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1124,8 +1127,13 @@ mod tests {
         let kek = [0xEFu8; 24]; // 192-bit KEK
         let plaintext = b"A192KW + A256GCM";
 
-        let token =
-            encrypt(&kek, plaintext, JweAlgorithm::A192KW, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(
+            &kek,
+            plaintext,
+            JweAlgorithm::A192KW,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
         let recovered = decrypt(&kek, &token).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1251,8 +1259,7 @@ mod tests {
         let key2 = [0x99u8; 32];
         let plaintext = b"secret data";
 
-        let token =
-            encrypt(&key1, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&key1, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let result = decrypt(&key2, &token);
         assert!(result.is_err(), "decryption with wrong key should fail");
     }
@@ -1297,8 +1304,7 @@ mod tests {
         let key = [0x42u8; 32];
         let plaintext = b"integrity test";
 
-        let token =
-            encrypt(&key, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&key, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         // Tamper with the ciphertext part (fourth segment).
         let parts: Vec<&str> = token.splitn(5, '.').collect();
@@ -1313,10 +1319,7 @@ mod tests {
         );
 
         let result = decrypt(&key, &tampered_token);
-        assert!(
-            result.is_err(),
-            "tampered ciphertext should fail GCM auth"
-        );
+        assert!(result.is_err(), "tampered ciphertext should fail GCM auth");
     }
 
     #[test]
@@ -1365,8 +1368,7 @@ mod tests {
         let cek = [0x42u8; 32];
         let plaintext = b"header test";
 
-        let token =
-            encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         let header = decode_header(&token).unwrap();
         assert_eq!(header.alg, "dir");
@@ -1378,8 +1380,7 @@ mod tests {
         let cek = [0x42u8; 32];
         let plaintext = b"";
 
-        let token =
-            encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1389,8 +1390,7 @@ mod tests {
         let cek = [0x42u8; 32];
         let plaintext: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
 
-        let token =
-            encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1426,8 +1426,7 @@ mod tests {
         jwk.alg = Some("RSA-OAEP-256".into());
         let plaintext = b"jwk-rsa-oaep";
 
-        let token =
-            encrypt_with_jwk(&jwk, plaintext, JweEncryption::A256GCM).unwrap();
+        let token = encrypt_with_jwk(&jwk, plaintext, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt_with_jwk(&jwk, &token).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1474,8 +1473,7 @@ mod tests {
         // Encrypt with dir, but JWK claims A256KW at decrypt time.
         let jwk_bytes = crate::jwk::generate_symmetric(32).unwrap();
         let k = crate::base64url::decode(jwk_bytes.k.as_ref().unwrap()).unwrap();
-        let token =
-            encrypt(&k, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&k, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         let mut jwk = jwk_bytes;
         jwk.alg = Some("A256KW".into());
@@ -1517,9 +1515,14 @@ mod tests {
     #[test]
     fn a256kw_rejects_wrong_size_kek_on_encrypt() {
         let too_small = [0x22u8; 16];
-        let err = encrypt(&too_small, b"p", JweAlgorithm::A256KW, JweEncryption::A128GCM)
-            .unwrap_err()
-            .to_string();
+        let err = encrypt(
+            &too_small,
+            b"p",
+            JweAlgorithm::A256KW,
+            JweEncryption::A128GCM,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("A256KW"), "unexpected error: {err}");
         assert!(err.contains("32 bytes"), "unexpected error: {err}");
     }
@@ -1529,8 +1532,7 @@ mod tests {
     fn aes_kw_rejects_wrong_size_kek_on_decrypt() {
         // Encrypt with a correct KEK...
         let kek = [0xABu8; 32];
-        let token =
-            encrypt(&kek, b"p", JweAlgorithm::A256KW, JweEncryption::A128GCM).unwrap();
+        let token = encrypt(&kek, b"p", JweAlgorithm::A256KW, JweEncryption::A128GCM).unwrap();
         // ...then attempt decryption with a wrong-size key.
         let wrong_size = [0xABu8; 16];
         let err = decrypt(&wrong_size, &token).unwrap_err().to_string();
@@ -1591,14 +1593,11 @@ mod tests {
     fn allow_list_rejects_wrong_alg() {
         // Token created with dir + A256GCM...
         let cek = [0x42u8; 32];
-        let token =
-            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         // ...but caller only accepts AES key-wrap algorithms.
-        let options = JweDecryptOptions::new(
-            vec![JweAlgorithm::A256KW],
-            vec![JweEncryption::A256GCM],
-        );
+        let options =
+            JweDecryptOptions::new(vec![JweAlgorithm::A256KW], vec![JweEncryption::A256GCM]);
         let result = decrypt_with_options(&cek, &token, &options);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1610,14 +1609,11 @@ mod tests {
     fn allow_list_rejects_wrong_enc() {
         // Token uses A256GCM...
         let cek = [0x42u8; 32];
-        let token =
-            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         // ...but caller only accepts CBC-HS.
-        let options = JweDecryptOptions::new(
-            vec![JweAlgorithm::Dir],
-            vec![JweEncryption::A256CbcHs512],
-        );
+        let options =
+            JweDecryptOptions::new(vec![JweAlgorithm::Dir], vec![JweEncryption::A256CbcHs512]);
         let result = decrypt_with_options(&cek, &token, &options);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1629,13 +1625,9 @@ mod tests {
     fn allow_list_accepts_permitted() {
         let cek = [0x42u8; 32];
         let plaintext = b"allow-listed";
-        let token =
-            encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
-        let options = JweDecryptOptions::new(
-            vec![JweAlgorithm::Dir],
-            vec![JweEncryption::A256GCM],
-        );
+        let options = JweDecryptOptions::new(vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM]);
         let recovered = decrypt_with_options(&cek, &token, &options).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -1644,15 +1636,12 @@ mod tests {
     #[test]
     fn nonempty_crit_rejected_on_decrypt() {
         let cek = [0x42u8; 32];
-        let token =
-            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let token = encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 
         // Rewrite the header to include a non-empty crit.
         let parts: Vec<&str> = token.splitn(5, '.').collect();
-        let mut header: JoseHeader = serde_json::from_slice(
-            &base64url::decode(parts[0]).unwrap(),
-        )
-        .unwrap();
+        let mut header: JoseHeader =
+            serde_json::from_slice(&base64url::decode(parts[0]).unwrap()).unwrap();
         header.crit = Some(vec!["myext".to_string()]);
         let new_header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
         let tampered_token = format!(
@@ -1672,8 +1661,13 @@ mod tests {
         let kek2 = [0xCDu8; 32];
         let plaintext = b"kek test";
 
-        let token =
-            encrypt(&kek1, plaintext, JweAlgorithm::A256KW, JweEncryption::A128GCM).unwrap();
+        let token = encrypt(
+            &kek1,
+            plaintext,
+            JweAlgorithm::A256KW,
+            JweEncryption::A128GCM,
+        )
+        .unwrap();
         let result = decrypt(&kek2, &token);
         assert!(result.is_err(), "wrong KEK should fail unwrap");
     }

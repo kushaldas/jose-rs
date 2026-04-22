@@ -149,10 +149,7 @@ pub fn sign_general(
 /// Entries with mismatched algorithms, `alg: "none"`, or a non-empty
 /// `crit` are skipped. Returns the decoded payload on the first
 /// successful cryptographic verification.
-pub fn verify_general(
-    verifier: &dyn kryptering::Verifier,
-    jws: &GeneralJws,
-) -> Result<Vec<u8>> {
+pub fn verify_general(verifier: &dyn kryptering::Verifier, jws: &GeneralJws) -> Result<Vec<u8>> {
     if jws.signatures.is_empty() {
         return Err(JoseError::InvalidToken("no signatures present".into()));
     }
@@ -185,7 +182,9 @@ pub fn verify_general(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kryptering::{HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier};
+    use kryptering::{
+        HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
+    };
 
     fn hmac_key(secret: &[u8]) -> SoftwareKey {
         SoftwareKey::Hmac(secret.to_vec())
@@ -286,8 +285,7 @@ mod tests {
         let payload = b"general payload";
 
         let signer_a = hmac_signer(KEY_A);
-        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> =
-            vec![(&signer_a, &header)];
+        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> = vec![(&signer_a, &header)];
 
         let jws = sign_general(&signers, payload).unwrap();
         let result = verify_general(&hmac_verifier(WRONG_KEY), &jws);
@@ -300,8 +298,7 @@ mod tests {
         let payload = b"json check general";
 
         let signer = hmac_signer(KEY_A);
-        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> =
-            vec![(&signer, &header)];
+        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> = vec![(&signer, &header)];
 
         let jws = sign_general(&signers, payload).unwrap();
         let json_str = serde_json::to_string(&jws).unwrap();
@@ -381,8 +378,7 @@ mod tests {
         let payload = b"roundtrip via json";
 
         let signer = hmac_signer(KEY_A);
-        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> =
-            vec![(&signer, &header)];
+        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> = vec![(&signer, &header)];
 
         let jws = sign_general(&signers, payload).unwrap();
 
