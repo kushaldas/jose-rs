@@ -246,6 +246,26 @@ mitigations described above. Any advisory that is **not** in the
 ignore list fails CI; the ignore file itself is the source of truth
 for "what are we accepting, and why".
 
+### Interop test vectors (RFC 7520)
+
+`tests/rfc7520.rs` verifies examples from
+[RFC 7520](https://www.rfc-editor.org/rfc/rfc7520.html) — these are the
+canonical worked vectors every JOSE implementation is expected to
+reproduce, which gives the library a cross-implementation interop
+baseline:
+
+- **JWS §4.1–4.4.** RS256, PS384, ES512 verify; HS256 as a full
+  byte-for-byte deterministic roundtrip (sign then byte-compare against
+  the RFC's published compact serialization).
+- **JWE §5.6, §5.8.** Direct encryption with A128GCM and A128KW + A128GCM
+  — decrypt the RFC's published JWE and check the recovered plaintext.
+- **JWE §5.2.** RSA-OAEP + A256GCM decrypt using the RFC's RSA-4096 key.
+  Runs only under `--features deprecated` because RSA-OAEP uses SHA-1.
+
+All vectors are embedded verbatim from `rfcs/rfc7520.txt` with their
+original indent-continuations intact; runtime whitespace-stripping
+eliminates transcription risk in 1000+-char RSA key material.
+
 ### Fuzzing
 
 `fuzz/` is a [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
