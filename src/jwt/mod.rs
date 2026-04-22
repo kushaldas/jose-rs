@@ -66,6 +66,9 @@ pub fn encode_nested(
 
 /// Decode a nested JWT: first decrypt the JWE, then verify the inner JWS and validate claims.
 ///
+/// Accepts any JWE algorithm the library supports. For strict deployments,
+/// use [`decode_nested_with_options`] to pin an allow-list.
+///
 /// - `decryption_key`: key material for JWE decryption (CEK, KEK, or RSA private key DER)
 /// - `verifier`: verifies the inner JWT signature
 /// - `token`: the JWE compact token containing a nested JWT
@@ -76,12 +79,29 @@ pub fn decode_nested(
     token: &str,
     validation: &Validation,
 ) -> Result<Claims> {
-    // Step 1: Decrypt the JWE to get the inner signed JWT
-    let inner_jwt_bytes = crate::jwe::compact::decrypt(decryption_key, token)?;
+    decode_nested_with_options(
+        decryption_key,
+        verifier,
+        token,
+        validation,
+        &crate::jwe::JweDecryptOptions::permissive(),
+    )
+}
+
+/// Decode a nested JWT, enforcing the caller's JWE algorithm allow-list.
+///
+/// See [`crate::jwe::JweDecryptOptions`] for how to build a strict allow-list.
+pub fn decode_nested_with_options(
+    decryption_key: &[u8],
+    verifier: &dyn kryptering::Verifier,
+    token: &str,
+    validation: &Validation,
+    jwe_options: &crate::jwe::JweDecryptOptions,
+) -> Result<Claims> {
+    let inner_jwt_bytes =
+        crate::jwe::compact::decrypt_with_options(decryption_key, token, jwe_options)?;
     let inner_jwt = std::str::from_utf8(&inner_jwt_bytes)
         .map_err(|e| JoseError::InvalidToken(format!("nested JWT is not valid UTF-8: {e}")))?;
-
-    // Step 2: Verify the inner JWS and validate claims
     decode(verifier, inner_jwt, validation)
 }
 

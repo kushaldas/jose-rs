@@ -52,11 +52,83 @@ pub fn encrypt(
 
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
 ///
+/// Accepts any key-management / content-encryption algorithm the library
+/// supports. For strict deployments, use [`decrypt_with_options`] to pin
+/// an explicit allow-list.
+///
 /// - For `dir`: `key` is the CEK.
 /// - For `A128KW` / `A192KW` / `A256KW`: `key` is the Key Encryption Key.
 /// - For `RSA-OAEP` / `RSA-OAEP-256`: `key` is the RSA private key in PKCS#8
 ///   DER format.
 pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
+    decrypt_with_options(key, token, &JweDecryptOptions::permissive())
+}
+
+/// Options controlling which JWE algorithms `decrypt_with_options` accepts.
+///
+/// Use [`JweDecryptOptions::new`] to pin an explicit allow-list of key
+/// management algorithms and content encryption algorithms. Tokens whose
+/// header advertises anything outside the allow-list are rejected before
+/// any cryptographic operation — the canonical defence against
+/// algorithm-substitution attacks when one key is reused across configs.
+#[derive(Debug, Clone, Default)]
+pub struct JweDecryptOptions {
+    allowed_alg: Vec<JweAlgorithm>,
+    allowed_enc: Vec<JweEncryption>,
+    allow_all: bool,
+}
+
+impl JweDecryptOptions {
+    /// Construct options pinning an explicit allow-list.
+    pub fn new(allowed_alg: Vec<JweAlgorithm>, allowed_enc: Vec<JweEncryption>) -> Self {
+        Self {
+            allowed_alg,
+            allowed_enc,
+            allow_all: false,
+        }
+    }
+
+    /// Permit every algorithm the library supports. Used internally by
+    /// [`decrypt`] for backwards compatibility — new code should prefer
+    /// [`JweDecryptOptions::new`].
+    pub fn permissive() -> Self {
+        Self {
+            allowed_alg: Vec::new(),
+            allowed_enc: Vec::new(),
+            allow_all: true,
+        }
+    }
+
+    fn check(&self, alg: JweAlgorithm, enc: JweEncryption) -> Result<()> {
+        if self.allow_all {
+            return Ok(());
+        }
+        if !self.allowed_alg.contains(&alg) {
+            return Err(JoseError::UnsupportedAlgorithm(format!(
+                "JWE alg {} is not in the caller's allow-list",
+                alg.as_str()
+            )));
+        }
+        if !self.allowed_enc.contains(&enc) {
+            return Err(JoseError::UnsupportedAlgorithm(format!(
+                "JWE enc {} is not in the caller's allow-list",
+                enc.as_str()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Decrypt a JWE Compact Serialization token, enforcing the caller's
+/// algorithm allow-list.
+///
+/// Rejects the token before any cryptographic operation if its `alg` or
+/// `enc` header is outside the allow-list supplied via `options`.
+pub fn decrypt_with_options(
+    key: &[u8],
+    token: &str,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
     // 1. Parse compact serialization.
     let parts: Vec<&str> = token.splitn(6, '.').collect();
     if parts.len() != 5 {
@@ -76,7 +148,6 @@ pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
     // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: reject unknown crit extensions.
-    // The library understands no JWE extensions, so any non-empty crit is rejected.
     if let Some(crit) = &header.crit {
         if !crit.is_empty() {
             return Err(JoseError::InvalidHeader(format!(
@@ -91,6 +162,9 @@ pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
         .as_deref()
         .ok_or_else(|| JoseError::InvalidHeader("missing enc field".into()))?;
     let enc = JweEncryption::from_str(enc_str)?;
+
+    // Enforce caller's allow-list before touching any key material.
+    options.check(alg, enc)?;
 
     // 3. Decode parts.
     let encrypted_key = base64url::decode(encrypted_key_b64)?;
@@ -641,28 +715,68 @@ fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
 }
 
 /// Remove PKCS#7 padding.
+///
+/// The padding bytes are validated in constant time over a fixed 16-byte
+/// window — the decision about padding validity does not branch on the
+/// trailing-byte value once the input length is known. Mitigated further
+/// upstream by encrypt-then-MAC (HMAC is verified before this function
+/// runs), but kept constant-time as defence in depth.
 fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
-    if data.is_empty() {
-        return Err(JoseError::Crypto(kryptering::Error::Crypto(
-            "empty data for PKCS#7 unpadding".into(),
-        )));
-    }
-    let pad_byte = *data.last().unwrap();
-    let pad_len = pad_byte as usize;
-    if pad_len == 0 || pad_len > 16 || pad_len > data.len() {
+    use subtle::ConstantTimeEq;
+
+    const BLOCK: usize = 16;
+
+    // Structural checks on the *length* of the buffer are not secret-dependent
+    // (the attacker already controls the ciphertext length) and are safe to
+    // branch on.
+    if data.is_empty() || data.len() % BLOCK != 0 {
         return Err(JoseError::Crypto(kryptering::Error::Crypto(
             "invalid PKCS#7 padding".into(),
         )));
     }
-    // Verify all padding bytes.
-    for &b in &data[data.len() - pad_len..] {
-        if b != pad_byte {
-            return Err(JoseError::Crypto(kryptering::Error::Crypto(
-                "invalid PKCS#7 padding".into(),
-            )));
-        }
+
+    let pad_byte = *data.last().unwrap();
+    let pad_len_u = pad_byte as u16;
+
+    // `good` accumulates validity as 0xFF (valid) or 0x00 (invalid).
+    let mut good: u8 = 0xFF;
+
+    // Branch-free length check. pad_len is valid iff 1 <= pad_byte <= BLOCK.
+    //   is_zero_bit : 1 iff pad_byte == 0     (from top bit of (p - 1))
+    //   over_block_bit : 1 iff pad_byte > BLOCK  (top bit of ((BLOCK + 1) - 1 - p) after widening)
+    let is_zero_bit: u16 = pad_len_u.wrapping_sub(1) >> 15;
+    let over_block_bit: u16 = ((BLOCK as u16).wrapping_sub(pad_len_u)) >> 15;
+    let invalid_bit: u16 = is_zero_bit | over_block_bit;
+    let invalid_mask: u8 = 0u8.wrapping_sub(invalid_bit as u8);
+    good &= !invalid_mask;
+
+    // Compare every byte of the final block against pad_byte. For positions
+    // whose distance from the end is strictly less than pad_len, the byte
+    // MUST equal pad_byte; otherwise the comparison contributes nothing.
+    let last_block = &data[data.len() - BLOCK..];
+    for (i, &b) in last_block.iter().enumerate() {
+        // distance_from_end in [1, BLOCK].
+        let dist = (BLOCK - i) as u16;
+        // in_region mask: 0xFF iff dist <= pad_len, else 0x00. Branch-free:
+        // dist - pad_len - 1 underflows (top bit = 1) when dist <= pad_len.
+        let in_region_bit: u16 = (dist.wrapping_sub(pad_len_u).wrapping_sub(1)) >> 15;
+        let in_region: u8 = 0u8.wrapping_sub(in_region_bit as u8);
+
+        // ct_eq → Choice → 0/1 → full-byte mask.
+        let eq_bit = b.ct_eq(&pad_byte).unwrap_u8();
+        let eq_mask: u8 = 0u8.wrapping_sub(eq_bit);
+
+        // Contribution is 0xFF unless we're in the region AND the byte disagrees.
+        let contribution = !in_region | eq_mask;
+        good &= contribution;
     }
-    Ok(data[..data.len() - pad_len].to_vec())
+
+    if good != 0xFF {
+        return Err(JoseError::Crypto(kryptering::Error::Crypto(
+            "invalid PKCS#7 padding".into(),
+        )));
+    }
+    Ok(data[..data.len() - pad_byte as usize].to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1223,108 @@ mod tests {
         let token =
             encrypt(&cek, &plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
         let recovered = decrypt(&cek, &token).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    /// Phase 2: direct unit tests for the constant-time PKCS#7 unpad implementation.
+    #[test]
+    fn pkcs7_unpad_valid_cases() {
+        // Single block with one pad byte.
+        let mut block = [0u8; 16];
+        block[15] = 0x01;
+        assert_eq!(pkcs7_unpad(&block).unwrap().len(), 15);
+
+        // Single block, all padding (pad_len == 16).
+        let block = [16u8; 16];
+        assert_eq!(pkcs7_unpad(&block).unwrap(), b"");
+
+        // Two blocks, pad_len = 5.
+        let mut buf = [0xAAu8; 32];
+        for b in &mut buf[27..] {
+            *b = 5;
+        }
+        let out = pkcs7_unpad(&buf).unwrap();
+        assert_eq!(out.len(), 27);
+    }
+
+    #[test]
+    fn pkcs7_unpad_rejects_zero_pad() {
+        let block = [0u8; 16]; // pad_byte = 0 → pad_len = 0 → invalid
+        assert!(pkcs7_unpad(&block).is_err());
+    }
+
+    #[test]
+    fn pkcs7_unpad_rejects_pad_len_over_16() {
+        let mut block = [0u8; 16];
+        block[15] = 17; // claims pad_len 17 in a 16-byte block
+        assert!(pkcs7_unpad(&block).is_err());
+    }
+
+    #[test]
+    fn pkcs7_unpad_rejects_mismatched_padding() {
+        let mut block = [0u8; 16];
+        // Claim pad_len = 4 but only the last byte is 4; prior bytes are 0.
+        block[15] = 4;
+        assert!(pkcs7_unpad(&block).is_err());
+    }
+
+    #[test]
+    fn pkcs7_unpad_rejects_empty_and_non_block_aligned() {
+        assert!(pkcs7_unpad(&[]).is_err());
+        assert!(pkcs7_unpad(&[0u8; 15]).is_err());
+    }
+
+    /// J-09 regression: a JWE whose alg is not in the caller's allow-list is rejected.
+    #[test]
+    fn allow_list_rejects_wrong_alg() {
+        // Token created with dir + A256GCM...
+        let cek = [0x42u8; 32];
+        let token =
+            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        // ...but caller only accepts AES key-wrap algorithms.
+        let options = JweDecryptOptions::new(
+            vec![JweAlgorithm::A256KW],
+            vec![JweEncryption::A256GCM],
+        );
+        let result = decrypt_with_options(&cek, &token, &options);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("allow-list"), "unexpected error: {err}");
+    }
+
+    /// J-09 regression: a JWE whose enc is not in the caller's allow-list is rejected.
+    #[test]
+    fn allow_list_rejects_wrong_enc() {
+        // Token uses A256GCM...
+        let cek = [0x42u8; 32];
+        let token =
+            encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        // ...but caller only accepts CBC-HS.
+        let options = JweDecryptOptions::new(
+            vec![JweAlgorithm::Dir],
+            vec![JweEncryption::A256CbcHs512],
+        );
+        let result = decrypt_with_options(&cek, &token, &options);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("allow-list"), "unexpected error: {err}");
+    }
+
+    /// J-09 regression: permitted combinations still succeed.
+    #[test]
+    fn allow_list_accepts_permitted() {
+        let cek = [0x42u8; 32];
+        let plaintext = b"allow-listed";
+        let token =
+            encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        let options = JweDecryptOptions::new(
+            vec![JweAlgorithm::Dir],
+            vec![JweEncryption::A256GCM],
+        );
+        let recovered = decrypt_with_options(&cek, &token, &options).unwrap();
         assert_eq!(recovered, plaintext);
     }
 

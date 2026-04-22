@@ -107,6 +107,24 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     let n = BigUint::from_bytes_be(&n_bytes);
     let e = BigUint::from_bytes_be(&e_bytes);
 
+    // Public exponent sanity: must be >= 3 and odd. RFC 7518 does not pin a
+    // value, but 65537 (AQAB) is the universal default. Reject values that
+    // could produce degenerate or insecure RSA instances.
+    let three = BigUint::from(3u32);
+    if e < three {
+        return Err(JoseError::Key(
+            "RSA public exponent is below the minimum of 3".into(),
+        ));
+    }
+    // Even exponents are invalid — they cannot be coprime to phi(n) for any
+    // usable modulus.
+    let is_even = e.to_bytes_be().last().copied().unwrap_or(0) & 1 == 0;
+    if is_even {
+        return Err(JoseError::Key(
+            "RSA public exponent must be odd".into(),
+        ));
+    }
+
     let public = RsaPublicKey::new(n.clone(), e.clone())
         .map_err(|err| JoseError::Key(format!("invalid RSA public key: {err}")))?;
 
@@ -714,6 +732,53 @@ mod tests {
             }
             _ => panic!("expected EcP256 key"),
         }
+    }
+
+    // ── RSA exponent validation ───────────────────────────────────
+
+    /// Phase 2: RSA exponent < 3 (e.g. "AQ" = 1) must be rejected.
+    #[test]
+    fn rsa_exponent_too_small_is_rejected() {
+        // Build a valid 2048-bit modulus but with e=1.
+        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let n_b64 = {
+            use rsa::traits::PublicKeyParts;
+            base64url::encode(&private_key.n().to_bytes_be())
+        };
+        let json = format!(
+            r#"{{"kty":"RSA","n":"{n_b64}","e":"AQ"}}"#
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("public exponent") || err.contains("below the minimum"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Phase 2: even RSA exponent (e.g. 4) must be rejected.
+    #[test]
+    fn rsa_exponent_even_is_rejected() {
+        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let n_b64 = {
+            use rsa::traits::PublicKeyParts;
+            base64url::encode(&private_key.n().to_bytes_be())
+        };
+        // e = 4 → base64url("BA") — wait, 4 is two bytes? No, 4 = 0x04 → one byte "BA"
+        // Actually base64url(0x04) — let's encode explicitly.
+        let e_b64 = base64url::encode(&[0x04]);
+        let json = format!(
+            r#"{{"kty":"RSA","n":"{n_b64}","e":"{e_b64}"}}"#
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("odd"), "unexpected error: {err}");
     }
 
     // ── Unsupported kty ────────────────────────────────────────────
