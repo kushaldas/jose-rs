@@ -109,6 +109,14 @@ pub fn decode_nested_with_options(
 }
 
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).
+///
+/// Emits a deprecation warning at every call site. The function is kept
+/// available for legitimate inspection use cases (e.g. logging a token's
+/// `kid` before deciding which verifier to use), but production code
+/// paths must call [`decode`] with a verifier and `Validation`.
+#[deprecated(
+    note = "decode_unverified bypasses signature verification; use jwt::decode with a verifier unless you truly need pre-verification inspection"
+)]
 pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
     let header = crate::jws::compact::decode_header(token)?;
     let parts: Vec<&str> = token.splitn(3, '.').collect();
@@ -302,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn decode_unverified_works() {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();

@@ -195,6 +195,19 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   contradicts its `kty` (e.g. `alg: "RS256"` on a `kty: "oct"` key, or
   `alg: "ES256"` on a `P-384` curve) is rejected at conversion time
   with a clear error, rather than failing opaquely downstream.
+- **HMAC key minimum length (RFC 7518 §3.2).** When an `oct` JWK
+  declares `alg: "HS256"`, `"HS384"`, or `"HS512"`, the `k` material
+  must be at least as long as the hash output (32, 48, or 64 bytes
+  respectively). Shorter keys are rejected at JWK import.
+- **Private JWK fields zeroize on drop.** `Jwk`'s `Drop` impl calls
+  `zeroize::Zeroize` on `d`, `p`, `q`, `dp`, `dq`, `qi`, and `k` when
+  present, so private material is wiped from the heap before the
+  allocation is returned to the allocator.
+- **`jwt::decode_unverified` is `#[deprecated]`.** Every call site now
+  emits a compiler warning pointing users to `jwt::decode`. The
+  function remains available for legitimate pre-verification
+  inspection (e.g. reading a token's `kid` to select the right
+  verifier).
 
 ## License
 

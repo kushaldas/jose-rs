@@ -113,6 +113,43 @@ impl JwkOp {
     }
 }
 
+/// Wipe the private-key components when a `Jwk` is dropped.
+///
+/// The struct stores RSA `d`/`p`/`q`/`dp`/`dq`/`qi` and symmetric `k` as
+/// `Option<String>`. On drop we call `zeroize::Zeroize` on each present
+/// value so the heap-backed `String` is overwritten before its allocation
+/// is returned to the allocator — defence against a heap-inspection bug
+/// or a core dump exposing secret material.
+///
+/// This does not change public behaviour; `Clone` still produces an
+/// independent copy (which will itself zeroize on its own drop).
+impl Drop for Jwk {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(s) = self.d.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.p.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.q.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.dp.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.dq.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.qi.as_mut() {
+            s.zeroize();
+        }
+        if let Some(s) = self.k.as_mut() {
+            s.zeroize();
+        }
+    }
+}
+
 impl std::fmt::Debug for Jwk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact any private-key component that is present, but still show
@@ -366,6 +403,31 @@ mod tests {
         // Public fields still appear.
         assert!(s.contains("publicN"));
         assert!(s.contains("log-leak-test"));
+    }
+
+    /// Phase 7: Drop zeroization is exercised — construct, clone, drop, repeat.
+    /// Runtime memory-inspection is out of scope, but this smoke-tests the Drop
+    /// impl so any panic or aliasing bug surfaces under `cargo test`.
+    #[test]
+    fn zeroize_on_drop_smoke() {
+        for _ in 0..8 {
+            let jwk = Jwk::from_json(
+                r#"{
+                    "kty":"RSA","n":"AA","e":"AQAB",
+                    "d":"d-value","p":"p-value","q":"q-value",
+                    "dp":"dp-v","dq":"dq-v","qi":"qi-v"
+                }"#,
+            )
+            .unwrap();
+            let _clone = jwk.clone();
+            // Both jwk and _clone drop here; Drop impl zeroizes each.
+        }
+
+        // Symmetric key path.
+        for _ in 0..8 {
+            let jwk = Jwk::from_json(r#"{"kty":"oct","k":"secret-k"}"#).unwrap();
+            let _clone = jwk.clone();
+        }
     }
 
     /// Phase 6: to_public_jwk strips RSA private components.

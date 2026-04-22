@@ -503,6 +503,22 @@ fn jwk_to_oct(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     // Otherwise fall back based on key length.
     if let Some(alg) = jwk.alg.as_deref() {
         if alg.starts_with("HS") {
+            // RFC 7518 §3.2: the HMAC key MUST be at least as long as the
+            // hash output. Reject shorter keys explicitly — otherwise a
+            // caller could mint an HS512 token signed with 8 bytes of
+            // attacker-brute-forceable entropy.
+            let min_len = match alg {
+                "HS256" => 32,
+                "HS384" => 48,
+                "HS512" => 64,
+                _ => 0,
+            };
+            if k_bytes.len() < min_len {
+                return Err(JoseError::Key(format!(
+                    "{alg} requires an HMAC key of at least {min_len} bytes, got {}",
+                    k_bytes.len()
+                )));
+            }
             return Ok(kryptering::SoftwareKey::Hmac(k_bytes));
         }
         if alg.starts_with('A')
@@ -872,6 +888,42 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("odd"), "unexpected error: {err}");
+    }
+
+    /// Phase 7: HS256 with a 16-byte HMAC key is rejected (RFC 7518 §3.2 requires 32).
+    #[test]
+    fn hs256_short_key_is_rejected() {
+        let k = base64url::encode(&[0u8; 16]);
+        let json = format!(r#"{{"kty":"oct","k":"{k}","alg":"HS256"}}"#);
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("HS256"), "unexpected: {err}");
+        assert!(err.contains("at least 32"), "unexpected: {err}");
+    }
+
+    /// Phase 7: HS512 with 32 bytes (one short of 64) is rejected.
+    #[test]
+    fn hs512_short_key_is_rejected() {
+        let k = base64url::encode(&[0u8; 32]);
+        let json = format!(r#"{{"kty":"oct","k":"{k}","alg":"HS512"}}"#);
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = match jwk_to_software_key(&jwk) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("at least 64"), "unexpected: {err}");
+    }
+
+    /// Phase 7: HS256 with exactly 32 bytes is accepted.
+    #[test]
+    fn hs256_at_minimum_length_accepted() {
+        let k = base64url::encode(&[0u8; 32]);
+        let json = format!(r#"{{"kty":"oct","k":"{k}","alg":"HS256"}}"#);
+        let jwk = Jwk::from_json(&json).unwrap();
+        jwk_to_software_key(&jwk).unwrap();
     }
 
     /// Phase 6: alg/kty mismatch is rejected with a clear error.
