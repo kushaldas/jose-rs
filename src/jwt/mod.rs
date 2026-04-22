@@ -122,6 +122,42 @@ pub fn encode_with_jwk(
     crate::jws::compact::sign_with_jwk(jwk, &payload, header)
 }
 
+/// Encode a nested JWT (sign then encrypt) using JWKs for both ops.
+///
+/// The inner JWT is signed with `signer_jwk` (which must have
+/// `check_op(Sign)` available and `alg` set); the resulting JWT string
+/// is then encrypted with `encryption_jwk` (which must have the
+/// appropriate op permitted and `alg` set). Mirror of
+/// [`encode_nested`] using the JWK-first API.
+pub fn encode_nested_with_jwk(
+    signer_jwk: &crate::jwk::Jwk,
+    jws_header: &JoseHeader,
+    claims: &Claims,
+    encryption_jwk: &crate::jwk::Jwk,
+    enc: crate::algorithm::JweEncryption,
+) -> Result<String> {
+    let signed = encode_with_jwk(signer_jwk, jws_header, claims)?;
+    crate::jwe::compact::encrypt_with_jwk(encryption_jwk, signed.as_bytes(), enc)
+}
+
+/// Decode a nested JWT (decrypt then verify and validate claims) using JWKs.
+///
+/// Mirror of [`decode_nested`] that enforces `check_op(Decrypt)` /
+/// `UnwrapKey` on `decryption_jwk` and `check_op(Verify)` on
+/// `verifier_jwk`, and cross-checks pinned `jwk.alg` values against
+/// the corresponding headers on both layers.
+pub fn decode_nested_with_jwk(
+    decryption_jwk: &crate::jwk::Jwk,
+    verifier_jwk: &crate::jwk::Jwk,
+    token: &str,
+    validation: &Validation,
+) -> Result<Claims> {
+    let inner = crate::jwe::compact::decrypt_with_jwk(decryption_jwk, token)?;
+    let inner_str = std::str::from_utf8(&inner)
+        .map_err(|e| JoseError::InvalidToken(format!("nested JWT is not valid UTF-8: {e}")))?;
+    decode_with_jwk(verifier_jwk, inner_str, validation)
+}
+
 /// Decode and validate a JWT using a JWK directly.
 ///
 /// One-shot alternative to [`decode`]: derives the verifier from the
@@ -577,6 +613,92 @@ mod tests {
         let decoded = decode_nested(&cek, &hmac_verifier(), &nested_token, &validation).unwrap();
 
         assert_eq!(decoded.iss.as_deref(), Some("cbc-nested"));
+    }
+
+    // ── Phase 10: nested JWT JWK API ──────────────────────────────
+
+    /// Nested JWT JWK roundtrip: HMAC sign + dir A256GCM encrypt, both via JWK.
+    #[test]
+    fn nested_jwt_jwk_roundtrip_dir() {
+        let mut signer_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        signer_jwk.alg = Some("HS256".into());
+
+        let mut enc_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        enc_jwk.alg = Some("dir".into());
+
+        let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
+        let mut claims = Claims::default();
+        claims.iss = Some("nested-jwk".into());
+        claims.exp = Some(now() + 3600);
+
+        let token = encode_nested_with_jwk(
+            &signer_jwk,
+            &jws_header,
+            &claims,
+            &enc_jwk,
+            crate::algorithm::JweEncryption::A256GCM,
+        )
+        .unwrap();
+
+        // Should be a JWE compact (5 parts).
+        assert_eq!(token.split('.').count(), 5);
+
+        let validation = Validation::new().with_issuer("nested-jwk");
+        let decoded =
+            decode_nested_with_jwk(&enc_jwk, &signer_jwk, &token, &validation).unwrap();
+        assert_eq!(decoded.iss.as_deref(), Some("nested-jwk"));
+    }
+
+    /// Nested JWT JWK rejects signer JWK with use=enc.
+    #[test]
+    fn nested_jwt_jwk_rejects_signer_use_enc() {
+        let mut signer_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        signer_jwk.alg = Some("HS256".into());
+        signer_jwk.use_ = Some("enc".into()); // wrong category for signing
+
+        let mut enc_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        enc_jwk.alg = Some("dir".into());
+
+        let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+
+        let err = encode_nested_with_jwk(
+            &signer_jwk,
+            &jws_header,
+            &claims,
+            &enc_jwk,
+            crate::algorithm::JweEncryption::A256GCM,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`use` is enc"), "unexpected: {err}");
+    }
+
+    /// Nested JWT JWK rejects encryption JWK with use=sig.
+    #[test]
+    fn nested_jwt_jwk_rejects_encryption_use_sig() {
+        let mut signer_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        signer_jwk.alg = Some("HS256".into());
+
+        let mut enc_jwk = crate::jwk::generate_symmetric(32).unwrap();
+        enc_jwk.alg = Some("dir".into());
+        enc_jwk.use_ = Some("sig".into()); // wrong category for encrypting
+
+        let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+
+        let err = encode_nested_with_jwk(
+            &signer_jwk,
+            &jws_header,
+            &claims,
+            &enc_jwk,
+            crate::algorithm::JweEncryption::A256GCM,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`use` is sig"), "unexpected: {err}");
     }
 
     // ── Phase 9: encode_with_jwk ───────────────────────────────────
