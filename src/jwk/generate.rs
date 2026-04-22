@@ -82,6 +82,69 @@ pub fn generate_symmetric(len: usize) -> Result<Jwk> {
     software_key_to_jwk(&sw)
 }
 
+/// Generate an ML-DSA (FIPS 204) key pair as a JWK with `kty = "AKP"`.
+///
+/// Returns a JWK carrying:
+/// - `alg`: `"ML-DSA-44"` / `"ML-DSA-65"` / `"ML-DSA-87"` (from `variant`)
+/// - `pub`: raw FIPS 204 encoded public key bytes (base64url)
+/// - `priv`: 32-byte FIPS 204 seed (base64url) — per
+///   draft-ietf-cose-dilithium, the seed is the serialized private key.
+///
+/// The long-term secret is the 32-byte seed; the expanded signing key is
+/// derived on demand. `Jwk`'s `Drop` impl zeroizes the seed when the
+/// struct goes out of scope.
+#[cfg(feature = "post-quantum")]
+pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
+    use rand::RngCore;
+    use zeroize::Zeroize;
+
+    let mut seed_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed_bytes);
+    let seed = ml_dsa::Seed::try_from(seed_bytes.as_slice())
+        .expect("seed length is 32 bytes");
+
+    fn public_bytes<P>(seed: &ml_dsa::Seed) -> Vec<u8>
+    where
+        P: ml_dsa::MlDsaParams,
+    {
+        let sk = ml_dsa::SigningKey::<P>::from_seed(seed);
+        sk.verifying_key().encode().to_vec()
+    }
+
+    let pub_raw = match variant {
+        kryptering::MlDsaVariant::MlDsa44 => public_bytes::<ml_dsa::MlDsa44>(&seed),
+        kryptering::MlDsaVariant::MlDsa65 => public_bytes::<ml_dsa::MlDsa65>(&seed),
+        kryptering::MlDsaVariant::MlDsa87 => public_bytes::<ml_dsa::MlDsa87>(&seed),
+    };
+
+    let jwk = Jwk {
+        kty: "AKP".into(),
+        use_: None,
+        key_ops: None,
+        alg: Some(variant.name().to_string()),
+        kid: None,
+        n: None,
+        e: None,
+        d: None,
+        p: None,
+        q: None,
+        dp: None,
+        dq: None,
+        qi: None,
+        crv: None,
+        x: None,
+        y: None,
+        k: None,
+        pub_: Some(crate::base64url::encode(&pub_raw)),
+        priv_: Some(crate::base64url::encode(&seed_bytes)),
+        extra: Default::default(),
+    };
+    // Wipe the local copy; the seed now also lives in jwk.priv_, which
+    // `Jwk::Drop` will wipe in turn.
+    seed_bytes.zeroize();
+    Ok(jwk)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +233,73 @@ mod tests {
         let jwk2 = generate_symmetric(32).unwrap();
         // Two generated keys should be different
         assert_ne!(jwk1.k, jwk2.k);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn generate_mldsa_44() {
+        use kryptering::MlDsaVariant;
+        let jwk = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        assert_eq!(jwk.kty, "AKP");
+        assert_eq!(jwk.alg.as_deref(), Some("ML-DSA-44"));
+
+        let pub_bytes = crate::base64url::decode(jwk.pub_.as_ref().unwrap()).unwrap();
+        assert_eq!(pub_bytes.len(), 1312, "ML-DSA-44 public key is 1312 bytes");
+
+        let priv_bytes = crate::base64url::decode(jwk.priv_.as_ref().unwrap()).unwrap();
+        assert_eq!(priv_bytes.len(), 32, "ML-DSA priv is a 32-byte seed");
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn generate_mldsa_65() {
+        use kryptering::MlDsaVariant;
+        let jwk = generate_mldsa(MlDsaVariant::MlDsa65).unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("ML-DSA-65"));
+        let pub_bytes = crate::base64url::decode(jwk.pub_.as_ref().unwrap()).unwrap();
+        assert_eq!(pub_bytes.len(), 1952);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn generate_mldsa_87() {
+        use kryptering::MlDsaVariant;
+        let jwk = generate_mldsa(MlDsaVariant::MlDsa87).unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("ML-DSA-87"));
+        let pub_bytes = crate::base64url::decode(jwk.pub_.as_ref().unwrap()).unwrap();
+        assert_eq!(pub_bytes.len(), 2592);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn mldsa_jwk_roundtrips_to_software_key() {
+        use kryptering::MlDsaVariant;
+        let jwk = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        match &sw {
+            kryptering::SoftwareKey::PostQuantum {
+                algorithm,
+                private_der,
+                public_der,
+            } => {
+                assert_eq!(
+                    *algorithm,
+                    kryptering::PqAlgorithm::MlDsa(MlDsaVariant::MlDsa44)
+                );
+                assert_eq!(private_der.as_ref().unwrap().len(), 32);
+                assert!(public_der.len() > 1312, "public is SPKI DER, not raw");
+            }
+            _ => panic!("expected PostQuantum variant"),
+        }
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn mldsa_jwk_seeds_are_unique() {
+        use kryptering::MlDsaVariant;
+        let a = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        let b = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        assert_ne!(a.priv_, b.priv_);
+        assert_ne!(a.pub_, b.pub_);
     }
 }

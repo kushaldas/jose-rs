@@ -13,6 +13,7 @@ which in turn wraps libFuzzer.
 | `jwk_thumbprint`          | RFC 7638 thumbprint computation over parsed JWKs       |
 | `jws_decode_header`       | `jws::compact::decode_header` (attacker-controlled)    |
 | `jws_verify`              | Full JWS compact verify pipeline (fixed HMAC verifier) |
+| `jws_verify_mldsa`        | Full JWS compact verify via `verify_with_jwk` over an ML-DSA-44 AKP JWK (post-quantum AKP parse + sign/verify dispatch) |
 | `jwe_decrypt`             | Full JWE compact decrypt pipeline (fixed dir CEK)      |
 | `jwt_decode_unverified`   | JWT header + claims parse without crypto               |
 

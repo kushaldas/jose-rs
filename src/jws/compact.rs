@@ -564,4 +564,73 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("crit"), "unexpected error: {err}");
     }
+
+    /// ML-DSA sign/verify round-trip via the JWK API.
+    ///
+    /// One test per variant — ML-DSA keypairs are large (the expanded
+    /// signing key for ML-DSA-87 is ~5 KiB), so looping all three in one
+    /// test function blows the default debug-build stack.
+    #[cfg(feature = "post-quantum")]
+    fn mldsa_roundtrip(variant: kryptering::MlDsaVariant) {
+        let jwk = crate::jwk::generate::generate_mldsa(variant).unwrap();
+        let header = JoseHeader::new(variant.name());
+        let payload = b"post-quantum JWS payload";
+
+        let token = sign_with_jwk(&jwk, payload, &header)
+            .unwrap_or_else(|e| panic!("{} sign failed: {e}", variant.name()));
+        assert_eq!(token.split('.').count(), 3);
+
+        let recovered = verify_with_jwk(&jwk, &token)
+            .unwrap_or_else(|e| panic!("{} verify failed: {e}", variant.name()));
+        assert_eq!(recovered, payload);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn sign_verify_mldsa_44_roundtrip() {
+        mldsa_roundtrip(kryptering::MlDsaVariant::MlDsa44);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn sign_verify_mldsa_65_roundtrip() {
+        mldsa_roundtrip(kryptering::MlDsaVariant::MlDsa65);
+    }
+
+    /// ML-DSA-87's expanded signing key is large enough that `from_seed`
+    /// + `sign_deterministic` blow the default debug-build test-thread
+    /// stack (2 MiB). Run this variant on a fresh 8 MiB thread so the
+    /// test actually completes. Release builds fit in the default stack,
+    /// so this is purely a test-harness concern.
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn sign_verify_mldsa_87_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| mldsa_roundtrip(kryptering::MlDsaVariant::MlDsa87))
+            .expect("spawn mldsa-87 test thread")
+            .join()
+            .expect("mldsa-87 test thread panicked");
+    }
+
+    /// ML-DSA alg-confusion regression: a token signed with ML-DSA-44 must
+    /// be rejected by a JWK pinned to ML-DSA-65. The phase-4 alg-binding
+    /// catches the mismatch before any crypto runs.
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn mldsa_variant_mismatch_is_rejected() {
+        use kryptering::MlDsaVariant;
+        let jwk_44 = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        let jwk_65 = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa65).unwrap();
+
+        let header = JoseHeader::new("ML-DSA-44");
+        let token = sign_with_jwk(&jwk_44, b"payload", &header).unwrap();
+
+        // Verifier pinned to ML-DSA-65 must refuse a ML-DSA-44 token.
+        let err = verify_with_jwk(&jwk_65, &token).unwrap_err().to_string();
+        assert!(
+            err.contains("does not match"),
+            "unexpected error: {err}"
+        );
+    }
 }

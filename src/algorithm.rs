@@ -38,6 +38,18 @@ pub enum JwsAlgorithm {
     EdDSA,
     /// ECDSA using secp256k1 and SHA-256
     ES256K,
+    /// ML-DSA-44 (FIPS 204) — post-quantum digital signature (draft-ietf-cose-dilithium)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-44")]
+    MlDsa44,
+    /// ML-DSA-65 (FIPS 204) — post-quantum digital signature (draft-ietf-cose-dilithium)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-65")]
+    MlDsa65,
+    /// ML-DSA-87 (FIPS 204) — post-quantum digital signature (draft-ietf-cose-dilithium)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-87")]
+    MlDsa87,
     /// No digital signature (DANGEROUS -- only available with the `deprecated` feature)
     #[cfg(feature = "deprecated")]
     None,
@@ -77,6 +89,18 @@ impl JwsAlgorithm {
             Self::ES256K => Err(JoseError::UnsupportedAlgorithm(
                 "ES256K (secp256k1) is not yet supported by kryptering".into(),
             )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44 => Ok(SignatureAlgorithm::MlDsa(
+                kryptering::MlDsaVariant::MlDsa44,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65 => Ok(SignatureAlgorithm::MlDsa(
+                kryptering::MlDsaVariant::MlDsa65,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87 => Ok(SignatureAlgorithm::MlDsa(
+                kryptering::MlDsaVariant::MlDsa87,
+            )),
             #[cfg(feature = "deprecated")]
             Self::None => Err(JoseError::UnsupportedAlgorithm(
                 "\"none\" algorithm has no cryptographic operation".into(),
@@ -101,6 +125,12 @@ impl JwsAlgorithm {
             "ES512" => Ok(Self::ES512),
             "EdDSA" => Ok(Self::EdDSA),
             "ES256K" => Ok(Self::ES256K),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-44" => Ok(Self::MlDsa44),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-65" => Ok(Self::MlDsa65),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-87" => Ok(Self::MlDsa87),
             #[cfg(feature = "deprecated")]
             "none" => Ok(Self::None),
             other => Err(JoseError::UnsupportedAlgorithm(other.to_string())),
@@ -124,6 +154,12 @@ impl JwsAlgorithm {
             Self::ES512 => "ES512",
             Self::EdDSA => "EdDSA",
             Self::ES256K => "ES256K",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44 => "ML-DSA-44",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65 => "ML-DSA-65",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87 => "ML-DSA-87",
             #[cfg(feature = "deprecated")]
             Self::None => "none",
         }

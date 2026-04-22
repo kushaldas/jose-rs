@@ -6,6 +6,8 @@ pub mod thumbprint;
 
 pub use convert::{jwk_to_software_key, software_key_to_jwk};
 pub use generate::{generate_ec, generate_ed25519, generate_rsa, generate_symmetric};
+#[cfg(feature = "post-quantum")]
+pub use generate::generate_mldsa;
 
 // Re-export JwkOp at the crate root pattern.
 
@@ -88,6 +90,16 @@ pub struct Jwk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub k: Option<String>,
 
+    // Algorithm Key Pair (AKP) parameters — draft-ietf-cose-dilithium, kty="AKP".
+    // Used for post-quantum signatures (ML-DSA). Carried only when the
+    // `post-quantum` feature is enabled at the kryptering layer but kept
+    // unconditionally in the struct so JWKs round-trip through the
+    // deserializer regardless of which features a consumer picked.
+    #[serde(rename = "pub", skip_serializing_if = "Option::is_none")]
+    pub pub_: Option<String>,
+    #[serde(rename = "priv", skip_serializing_if = "Option::is_none")]
+    pub priv_: Option<String>,
+
     // Catch-all for additional parameters
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -166,6 +178,9 @@ impl Drop for Jwk {
         if let Some(s) = self.k.as_mut() {
             s.zeroize();
         }
+        if let Some(s) = self.priv_.as_mut() {
+            s.zeroize();
+        }
         for value in self.extra.values_mut() {
             zeroize_json_value(value);
         }
@@ -196,6 +211,8 @@ impl std::fmt::Debug for Jwk {
             .field("x", &self.x)
             .field("y", &self.y)
             .field("k", &redact(&self.k))
+            .field("pub_", &self.pub_)
+            .field("priv_", &redact(&self.priv_))
             .field(
                 "extra",
                 &if self.extra.is_empty() {
@@ -226,7 +243,8 @@ impl Jwk {
 
     /// Return a copy of this JWK with all private-key components removed.
     ///
-    /// Wipes `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`. From the flattened
+    /// Wipes `d`, `p`, `q`, `dp`, `dq`, `qi`, `k`, and the AKP `priv`
+    /// member. The AKP `pub` member survives. From the flattened
     /// `extra` parameters, preserves only the RFC 7517 §4.6–§4.9 X.509
     /// public parameters (`x5c`, `x5t`, `x5t#S256`, `x5u`) and drops
     /// everything else — any unrecognised field, including the RFC 7517
@@ -269,6 +287,8 @@ impl Jwk {
             x: self.x.clone(),
             y: self.y.clone(),
             k: None,
+            pub_: self.pub_.clone(),
+            priv_: None,
             extra,
         }
     }
