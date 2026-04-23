@@ -263,22 +263,27 @@ private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
   wire format may shift before publication — do not use this feature
   for long-lived signed artifacts that you cannot re-issue later.
 
-- **`ml-dsa` crate CVEs (Jan 2026).** The RustCrypto `ml-dsa` crate
-  (`0.1.0-rc.7`, pinned via kryptering) currently has three open
-  advisories, all moderate severity:
+- **`ml-dsa` crate history.** The RustCrypto `ml-dsa` crate shipped
+  three moderate-severity advisories during its 0.1.0 release-candidate
+  series. All three are fixed in versions earlier than our pin, and
+  `cargo audit` is clean against `ml-dsa 0.1.0-rc.8`:
 
-  | Advisory | Summary |
-  |---|---|
-  | [GHSA-5x2r-hc65-25f9](https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9) | `Decompose` timing side-channel during signing |
-  | [GHSA-hcp2-x6j4-29j7](https://github.com/RustCrypto/signatures/security/advisories/GHSA-hcp2-x6j4-29j7) | Repeated hint indices in signatures |
-  | [GHSA-9cv2-w3vj-h6q3](https://github.com/RustCrypto/signatures/security/advisories/GHSA-9cv2-w3vj-h6q3) | `UseHint` off-by-two |
+  | Advisory | Summary | Patched from |
+  |---|---|---|
+  | [GHSA-hcp2-x6j4-29j7](https://github.com/RustCrypto/signatures/security/advisories/GHSA-hcp2-x6j4-29j7) | `Decompose` timing side-channel during signing | `>= 0.1.0-rc.3` |
+  | [GHSA-5x2r-hc65-25f9](https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9) | Repeated hint indices (signature malleability) | `>= 0.1.0-rc.4` |
+  | [GHSA-h37v-hp6w-2pp8](https://github.com/RustCrypto/signatures/security/advisories/GHSA-h37v-hp6w-2pp8) | `UseHint` off-by-two | `>= 0.1.0-rc.5` |
 
-  Upgrade once the RustCrypto `ml-dsa 0.1.0` stable release ships with
-  fixes. The `=0.1.0-rc.7` pin makes that bump an explicit lockfile event.
+  Because the pin is `=0.1.0-rc.8`, any future `ml-dsa` advisory will
+  surface as an explicit lockfile event — consult `cargo audit` before
+  bumping, and track [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
+  for the `ml-dsa 0.1.0` stable release.
 
-- **Default signing mode is hedged.** ML-DSA sign uses real randomness
-  per FIPS 204 Algorithm 2. Deterministic signing (equivalent to a
-  zero `rnd`) is not currently exposed.
+- **Default signing mode is randomized (hedged).** ML-DSA sign uses real
+  randomness per FIPS 204 Algorithm 2, so repeated signatures over the
+  same message and key are expected to differ while still verifying.
+  The optional deterministic signing variant (equivalent to a zero
+  `rnd`) is not currently exposed.
 
 - **ML-DSA-87 test note.** The expanded signing key (~5 KiB) exceeds
   the default 2 MiB debug-build test-thread stack; the ML-DSA-87
