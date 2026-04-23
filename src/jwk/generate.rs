@@ -90,58 +90,17 @@ pub fn generate_symmetric(len: usize) -> Result<Jwk> {
 /// - `priv`: 32-byte FIPS 204 seed (base64url) — per
 ///   draft-ietf-cose-dilithium, the seed is the serialized private key.
 ///
-/// The long-term secret is the 32-byte seed; the expanded signing key is
-/// derived on demand. `Jwk`'s `Drop` impl zeroizes the seed when the
-/// struct goes out of scope.
+/// Delegates to [`kryptering::generate_ml_dsa`] for the actual key
+/// material so the crate keeps a single post-quantum RNG policy
+/// (`getrandom::SysRng`, matching the signing path). jose-rs only
+/// translates the resulting `SoftwareKey::PostQuantum` into the AKP
+/// JWK wire format. `Jwk::Drop` still zeroizes `priv`, and
+/// `SoftwareKey::Drop` still zeroizes the seed, at both sides of
+/// the boundary.
 #[cfg(feature = "post-quantum")]
 pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
-    use rand::RngCore;
-    use zeroize::Zeroize;
-
-    let mut seed_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut seed_bytes);
-    let seed = ml_dsa::Seed::try_from(seed_bytes.as_slice()).expect("seed length is 32 bytes");
-
-    fn public_bytes<P>(seed: &ml_dsa::Seed) -> Vec<u8>
-    where
-        P: ml_dsa::MlDsaParams,
-    {
-        let sk = ml_dsa::ExpandedSigningKey::<P>::from_seed(seed);
-        sk.verifying_key().encode().to_vec()
-    }
-
-    let pub_raw = match variant {
-        kryptering::MlDsaVariant::MlDsa44 => public_bytes::<ml_dsa::MlDsa44>(&seed),
-        kryptering::MlDsaVariant::MlDsa65 => public_bytes::<ml_dsa::MlDsa65>(&seed),
-        kryptering::MlDsaVariant::MlDsa87 => public_bytes::<ml_dsa::MlDsa87>(&seed),
-    };
-
-    let jwk = Jwk {
-        kty: "AKP".into(),
-        use_: None,
-        key_ops: None,
-        alg: Some(variant.name().to_string()),
-        kid: None,
-        n: None,
-        e: None,
-        d: None,
-        p: None,
-        q: None,
-        dp: None,
-        dq: None,
-        qi: None,
-        crv: None,
-        x: None,
-        y: None,
-        k: None,
-        pub_: Some(crate::base64url::encode(&pub_raw)),
-        priv_: Some(crate::base64url::encode(&seed_bytes)),
-        extra: Default::default(),
-    };
-    // Wipe the local copy; the seed now also lives in jwk.priv_, which
-    // `Jwk::Drop` will wipe in turn.
-    seed_bytes.zeroize();
-    Ok(jwk)
+    let sw = kryptering::generate_ml_dsa(variant).map_err(JoseError::Crypto)?;
+    software_key_to_jwk(&sw)
 }
 
 #[cfg(test)]

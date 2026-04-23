@@ -697,4 +697,37 @@ mod tests {
         let json2 = jwk.to_json().unwrap();
         assert!(json2.contains("custom_field"));
     }
+
+    /// `to_public_jwk` on an AKP JWK must strip `priv` (the 32-byte
+    /// FIPS 204 seed) and preserve `pub` (the raw public key). This
+    /// is the JWK-Set-publication shape — callers rely on it to hand
+    /// a key to a public endpoint without leaking the seed.
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn to_public_jwk_strips_akp_priv_preserves_pub() {
+        use kryptering::MlDsaVariant;
+        let jwk = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        assert!(
+            jwk.priv_.is_some() && jwk.pub_.is_some(),
+            "precondition: generate_mldsa must produce both pub and priv"
+        );
+
+        let public = jwk.to_public_jwk();
+        assert!(public.priv_.is_none(), "priv must be stripped");
+        assert_eq!(
+            public.pub_, jwk.pub_,
+            "pub must survive to_public_jwk byte-for-byte"
+        );
+        assert_eq!(public.kty, "AKP");
+        assert_eq!(public.alg.as_deref(), Some("ML-DSA-44"));
+
+        // Serialized JWK must not contain a "priv" key at all.
+        let json = public.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = value
+            .as_object()
+            .unwrap_or_else(|| panic!("serialized JWK is not a JSON object: {json}"));
+        assert!(!obj.contains_key("priv"), "priv leaked in JSON: {json}");
+        assert!(obj.contains_key("pub"), "pub missing from JSON: {json}");
+    }
 }
