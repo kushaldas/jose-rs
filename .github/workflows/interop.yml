@@ -59,9 +59,15 @@ jobs:
         run: |
           node --version
           node -e "
-            const v = process.versions.openssl.split('.').map(Number);
-            const ok = v[0] > 3 || (v[0] === 3 && v[1] >= 5);
-            console.log('openssl', process.versions.openssl, ok ? '(ok)' : '(too old)');
+            const raw = process.versions.openssl;
+            // Node may report OpenSSL versions with suffixes like '+quic'
+            // or '-beta1'; strip anything after the first non-numeric char
+            // in each component before comparing.
+            const m = raw.match(/^(\d+)\.(\d+)\.(\d+)/);
+            if (!m) { console.error('unparseable openssl version', raw); process.exit(2); }
+            const [maj, min] = [Number(m[1]), Number(m[2])];
+            const ok = maj > 3 || (maj === 3 && min >= 5);
+            console.log('openssl', raw, ok ? '(ok)' : '(too old)');
             process.exit(ok ? 0 : 1);
           "
 

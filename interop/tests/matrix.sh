@@ -7,9 +7,11 @@
 #   4. js-keygen  -> rust-roundtrip (Rust signs with JS-generated key, then verifies)
 #
 # Writes interop/interop-results.json with one entry per cell.
-# Always exits 0 — run-interop.sh reads the results file to produce CI
-# output. The individual-cell invocation `matrix.sh --cell <name>` exits
-# non-zero on failure so `just interop-cell` surfaces it.
+# Exit status:
+#   - Full matrix run: 0 even when cells fail (the results file is the signal);
+#     2 if prerequisites are missing (jq, built Rust harness, JS deps).
+#   - --cell invocation: 0 if that cell passed, 1 if it failed, 2 on missing
+#     prerequisites. This lets `just interop-cell` surface pass/fail directly.
 
 set -u -o pipefail
 
