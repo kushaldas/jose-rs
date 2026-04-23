@@ -1,6 +1,6 @@
 [package]
 name = "jose-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
@@ -18,7 +18,7 @@ deprecated = ["kryptering/legacy"]
 pkcs11 = ["kryptering/pkcs11"]
 
 [dependencies]
-kryptering = { version = "0.2", path = "../kryptering", default-features = false }
+kryptering = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
