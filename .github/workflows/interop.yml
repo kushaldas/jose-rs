@@ -1,0 +1,135 @@
+name: Interop (panva/jose)
+
+# Exercises the wire format of ML-DSA-44/65/87 (and an Ed25519/ES256 baseline)
+# by round-tripping JWS / JWT between jose-rs and the npm `jose` package
+# (panva/jose). The job is allowed to fail — its purpose is signal, not
+# gating — but failures still render red and the per-cell summary pinpoints
+# where the two libraries disagree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: interop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+
+jobs:
+  interop:
+    name: jose-rs <-> panva/jose
+    runs-on: ubuntu-latest
+    # Job-level continue-on-error: failures are visible but do not block
+    # required checks. Marking individual steps would hide genuine
+    # infra breakage (toolchain install, etc.).
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cargo cache (interop harness)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: interop/rust-harness -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # ML-DSA in panva/jose requires Node >=24.7 (links OpenSSL >=3.5).
+          node-version: '24.7'
+          cache: npm
+          cache-dependency-path: interop/js-harness/package-lock.json
+
+      - name: Verify Node + OpenSSL version
+        run: |
+          node --version
+          node -e "
+            const raw = process.versions.openssl;
+            // Node may report OpenSSL versions with suffixes like '+quic'
+            // or '-beta1'; strip anything after the first non-numeric char
+            // in each component before comparing.
+            const m = raw.match(/^(\d+)\.(\d+)\.(\d+)/);
+            if (!m) { console.error('unparseable openssl version', raw); process.exit(2); }
+            const [maj, min] = [Number(m[1]), Number(m[2])];
+            const ok = maj > 3 || (maj === 3 && min >= 5);
+            console.log('openssl', raw, ok ? '(ok)' : '(too old)');
+            process.exit(ok ? 0 : 1);
+          "
+
+      - name: Build Rust harness
+        run: cargo build --locked --release --manifest-path interop/rust-harness/Cargo.toml
+
+      - name: Install JS deps
+        run: npm ci --prefix interop/js-harness
+
+      - name: Run interop matrix
+        run: interop/run-interop.sh
+
+      - name: Upload results and vectors
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-results
+          # Explicitly exclude *.priv.json — these are fresh throwaway keys,
+          # but uploading private material from a public repo's action
+          # artifacts is bad hygiene regardless of value. Failure stderr
+          # captured in interop-results.json is enough to diagnose issues.
+          path: |
+            interop/interop-results.json
+            interop/vectors/*.pub.json
+            interop/vectors/*.signed.json
+          retention-days: 14
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ ! -f interop/interop-results.json ]; then
+            echo "No interop-results.json produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Interop matrix"
+            echo ""
+            jq -r '
+              group_by(.result)
+              | map({(.[0].result): length})
+              | add
+              | to_entries
+              | map("- **\(.key)**: \(.value)")
+              | .[]
+            ' interop/interop-results.json
+            echo ""
+            echo "| direction | alg | format | result |"
+            echo "|---|---|---|---|"
+            jq -r '.[] | "| \(.direction) | \(.alg) | \(.format) | \(.result) |"' \
+              interop/interop-results.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job if any cell failed
+        if: always()
+        run: |
+          if [ ! -f interop/interop-results.json ]; then
+            echo "no results file"; exit 1
+          fi
+          fails=$(jq '[.[] | select(.result=="fail")] | length' interop/interop-results.json)
+          echo "failing cells: $fails"
+          if [ "$fails" -gt 0 ]; then
+            jq -r '.[] | select(.result=="fail") | "--- \(.cell) ---\n\(.stderr)"' \
+              interop/interop-results.json
+            exit 1
+          fi

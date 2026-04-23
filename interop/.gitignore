@@ -1,0 +1,5 @@
+interop-results.json
+interop-results.json.tmp
+vectors/
+rust-harness/target/
+js-harness/node_modules/
