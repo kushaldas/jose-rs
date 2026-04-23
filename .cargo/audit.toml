@@ -25,4 +25,16 @@ ignore = [
     # Operational guidance: rate-limit JWE decryption failures on the
     # caller side when RSA-OAEP is in use.
     "RUSTSEC-2023-0071",
+
+    # `paste` is unmaintained. Not a vulnerability; informational
+    # advisory flagged because `paste` no longer has an active upstream.
+    # Reached transitively via:
+    #   jose-rs → kryptering → cryptoki → paste
+    # `cryptoki` uses `paste` as a proc-macro for PKCS#11 FFI binding
+    # glue; removing the dependency requires an upstream `cryptoki`
+    # change. jose-rs does not invoke `paste` macros directly.
+    #
+    # Review on each cryptoki bump: if a future cryptoki release drops
+    # the `paste` dep, remove this ignore.
+    "RUSTSEC-2024-0436",
 ]
