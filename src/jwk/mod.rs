@@ -723,7 +723,11 @@ mod tests {
 
         // Serialized JWK must not contain a "priv" key at all.
         let json = public.to_json().unwrap();
-        assert!(!json.contains("\"priv\""), "priv leaked in JSON: {json}");
-        assert!(json.contains("\"pub\""), "pub missing from JSON: {json}");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = value
+            .as_object()
+            .unwrap_or_else(|| panic!("serialized JWK is not a JSON object: {json}"));
+        assert!(!obj.contains_key("priv"), "priv leaked in JSON: {json}");
+        assert!(obj.contains_key("pub"), "pub missing from JSON: {json}");
     }
 }
