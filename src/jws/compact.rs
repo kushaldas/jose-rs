@@ -628,9 +628,6 @@ mod tests {
 
         // Verifier pinned to ML-DSA-65 must refuse a ML-DSA-44 token.
         let err = verify_with_jwk(&jwk_65, &token).unwrap_err().to_string();
-        assert!(
-            err.contains("does not match"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("does not match"), "unexpected error: {err}");
     }
 }

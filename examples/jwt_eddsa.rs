@@ -24,10 +24,12 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("ed25519-issuer".into());
-    claims.sub = Some("alice".into());
-    claims.exp = Some(now + 600);
+    let claims = Claims {
+        iss: Some("ed25519-issuer".into()),
+        sub: Some("alice".into()),
+        exp: Some(now + 600),
+        ..Default::default()
+    };
 
     let header = JoseHeader::jwt("EdDSA");
     let token = jose_rs::jwt::encode(&signer, &header, &claims)?;

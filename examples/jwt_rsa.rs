@@ -26,12 +26,14 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("auth.example.com".into());
-    claims.sub = Some("user@example.com".into());
-    claims.aud = Some(Audience::Single("api.example.com".into()));
-    claims.exp = Some(now + 3600);
-    claims.iat = Some(now);
+    let claims = Claims {
+        iss: Some("auth.example.com".into()),
+        sub: Some("user@example.com".into()),
+        aud: Some(Audience::Single("api.example.com".into())),
+        exp: Some(now + 3600),
+        iat: Some(now),
+        ..Default::default()
+    };
 
     // Sign
     let header = JoseHeader::jwt("RS256");

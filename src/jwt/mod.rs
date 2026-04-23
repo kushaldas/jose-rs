@@ -236,6 +236,7 @@ pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use kryptering::{

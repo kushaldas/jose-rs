@@ -562,9 +562,7 @@ fn jwk_to_akp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         "ML-DSA-65" => kryptering::MlDsaVariant::MlDsa65,
         "ML-DSA-87" => kryptering::MlDsaVariant::MlDsa87,
         other => {
-            return Err(JoseError::Key(format!(
-                "unsupported AKP alg: {other}"
-            )));
+            return Err(JoseError::Key(format!("unsupported AKP alg: {other}")));
         }
     };
 
@@ -644,18 +642,13 @@ fn mldsa_public_key_len(variant: kryptering::MlDsaVariant) -> usize {
 }
 
 #[cfg(feature = "post-quantum")]
-fn mldsa_raw_public_to_spki_der(
-    variant: kryptering::MlDsaVariant,
-    raw: &[u8],
-) -> Result<Vec<u8>> {
+fn mldsa_raw_public_to_spki_der(variant: kryptering::MlDsaVariant, raw: &[u8]) -> Result<Vec<u8>> {
     use pkcs8_pq::spki::EncodePublicKey;
 
     fn encode<P>(raw: &[u8]) -> Result<Vec<u8>>
     where
         P: ml_dsa::MlDsaParams,
-        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<
-            Params = pkcs8_pq::der::AnyRef<'static>,
-        >,
+        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
     {
         let enc = ml_dsa::EncodedVerifyingKey::<P>::try_from(raw)
             .map_err(|_| JoseError::Key("ML-DSA public key length mismatch".into()))?;
@@ -674,18 +667,13 @@ fn mldsa_raw_public_to_spki_der(
 }
 
 #[cfg(feature = "post-quantum")]
-fn mldsa_spki_der_to_raw_public(
-    variant: kryptering::MlDsaVariant,
-    der: &[u8],
-) -> Result<Vec<u8>> {
+fn mldsa_spki_der_to_raw_public(variant: kryptering::MlDsaVariant, der: &[u8]) -> Result<Vec<u8>> {
     use pkcs8_pq::spki::DecodePublicKey;
 
     fn decode<P>(der: &[u8]) -> Result<Vec<u8>>
     where
         P: ml_dsa::MlDsaParams,
-        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<
-            Params = pkcs8_pq::der::AnyRef<'static>,
-        >,
+        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
     {
         let vk = ml_dsa::VerifyingKey::<P>::from_public_key_der(der)
             .map_err(|e| JoseError::Key(format!("parse ML-DSA SPKI: {e}")))?;
@@ -1173,7 +1161,10 @@ mod tests {
         );
         let jwk = Jwk::from_json(&jwk_json).unwrap();
         let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
-        assert!(err.contains("must be 1312 bytes"), "unexpected error: {err}");
+        assert!(
+            err.contains("must be 1312 bytes"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "post-quantum")]
@@ -1185,14 +1176,11 @@ mod tests {
         let jwk_json = format!(
             r#"{{"kty":"AKP","alg":"ML-DSA-44","pub":"{}","priv":"{}"}}"#,
             gen.pub_.as_deref().unwrap(),
-            crate::base64url::encode(&vec![0u8; 64])
+            crate::base64url::encode(&[0u8; 64])
         );
         let jwk = Jwk::from_json(&jwk_json).unwrap();
         let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
-        assert!(
-            err.contains("must be 32 bytes"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("must be 32 bytes"), "unexpected error: {err}");
     }
 
     #[cfg(feature = "post-quantum")]

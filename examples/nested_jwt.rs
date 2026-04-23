@@ -38,10 +38,12 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("secure-service".into());
-    claims.sub = Some("confidential-user".into());
-    claims.exp = Some(now + 3600);
+    let mut claims = Claims {
+        iss: Some("secure-service".into()),
+        sub: Some("confidential-user".into()),
+        exp: Some(now + 3600),
+        ..Default::default()
+    };
     claims
         .extra
         .insert("role".into(), serde_json::json!("admin"));

@@ -31,10 +31,12 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("ml-dsa-issuer".into());
-    claims.sub = Some("alice".into());
-    claims.exp = Some(now + 600);
+    let claims = Claims {
+        iss: Some("ml-dsa-issuer".into()),
+        sub: Some("alice".into()),
+        exp: Some(now + 600),
+        ..Default::default()
+    };
 
     let header = JoseHeader::jwt("ML-DSA-65");
     let token = jose_rs::jwt::encode_with_jwk(&private_jwk, &header, &claims)?;

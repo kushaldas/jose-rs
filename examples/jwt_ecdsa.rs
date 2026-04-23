@@ -24,11 +24,13 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("mobile-app".into());
-    claims.sub = Some("device-abc123".into());
-    claims.exp = Some(now + 300); // 5 minutes
-    claims.iat = Some(now);
+    let claims = Claims {
+        iss: Some("mobile-app".into()),
+        sub: Some("device-abc123".into()),
+        exp: Some(now + 300), // 5 minutes
+        iat: Some(now),
+        ..Default::default()
+    };
 
     let header = JoseHeader::jwt("ES256");
     let token = jose_rs::jwt::encode(&signer, &header, &claims)?;

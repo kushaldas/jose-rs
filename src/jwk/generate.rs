@@ -100,8 +100,7 @@ pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
 
     let mut seed_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed_bytes);
-    let seed = ml_dsa::Seed::try_from(seed_bytes.as_slice())
-        .expect("seed length is 32 bytes");
+    let seed = ml_dsa::Seed::try_from(seed_bytes.as_slice()).expect("seed length is 32 bytes");
 
     fn public_bytes<P>(seed: &ml_dsa::Seed) -> Vec<u8>
     where

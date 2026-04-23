@@ -90,17 +90,11 @@ impl JwsAlgorithm {
                 "ES256K (secp256k1) is not yet supported by kryptering".into(),
             )),
             #[cfg(feature = "post-quantum")]
-            Self::MlDsa44 => Ok(SignatureAlgorithm::MlDsa(
-                kryptering::MlDsaVariant::MlDsa44,
-            )),
+            Self::MlDsa44 => Ok(SignatureAlgorithm::MlDsa(kryptering::MlDsaVariant::MlDsa44)),
             #[cfg(feature = "post-quantum")]
-            Self::MlDsa65 => Ok(SignatureAlgorithm::MlDsa(
-                kryptering::MlDsaVariant::MlDsa65,
-            )),
+            Self::MlDsa65 => Ok(SignatureAlgorithm::MlDsa(kryptering::MlDsaVariant::MlDsa65)),
             #[cfg(feature = "post-quantum")]
-            Self::MlDsa87 => Ok(SignatureAlgorithm::MlDsa(
-                kryptering::MlDsaVariant::MlDsa87,
-            )),
+            Self::MlDsa87 => Ok(SignatureAlgorithm::MlDsa(kryptering::MlDsaVariant::MlDsa87)),
             #[cfg(feature = "deprecated")]
             Self::None => Err(JoseError::UnsupportedAlgorithm(
                 "\"none\" algorithm has no cryptographic operation".into(),
