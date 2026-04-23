@@ -17,10 +17,11 @@ import {
   decodeProtectedHeader,
 } from 'jose'
 
-// Silence Node's "ExperimentalWarning: ML-DSA-* Web Crypto API algorithm…"
-// so CI logs stay readable. The API is stable enough for panva/jose to ship
-// it; we're deliberately tracking that surface.
-process.removeAllListeners('warning')
+// Node's "ExperimentalWarning: ML-DSA-* Web Crypto API algorithm…" is
+// suppressed by the driver (run-interop.sh sets
+// NODE_OPTIONS=--disable-warning=ExperimentalWarning). A process-level
+// 'warning' listener does NOT replace Node's default printer, so this
+// has to be set before the process starts.
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv

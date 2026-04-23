@@ -79,9 +79,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: interop-results
+          # Explicitly exclude *.priv.json — these are fresh throwaway keys,
+          # but uploading private material from a public repo's action
+          # artifacts is bad hygiene regardless of value. Failure stderr
+          # captured in interop-results.json is enough to diagnose issues.
           path: |
             interop/interop-results.json
-            interop/vectors/**
+            interop/vectors/*.pub.json
+            interop/vectors/*.signed.json
           retention-days: 14
 
       - name: Job summary

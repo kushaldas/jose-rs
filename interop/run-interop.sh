@@ -14,4 +14,11 @@ cd "$HERE"
 export NPM_CONFIG_FUND=false
 export NPM_CONFIG_AUDIT=false
 
+# Suppress Node's ExperimentalWarning for the ML-DSA Web Crypto API. A
+# process.on('warning', ...) listener inside the JS harness does NOT
+# replace Node's default stderr printer, so this must be set before Node
+# starts. Scoped to ExperimentalWarning so deprecations still surface.
+# (Requires Node >=21.3 for --disable-warning; we require >=24.7 anyway.)
+export NODE_OPTIONS="--disable-warning=ExperimentalWarning ${NODE_OPTIONS:-}"
+
 exec ./tests/matrix.sh "$@"

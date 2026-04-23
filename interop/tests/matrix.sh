@@ -23,10 +23,6 @@ RESULTS="$ROOT/interop-results.json"
 mkdir -p "$VECTORS"
 : > "$RESULTS.tmp"
 
-# ML-DSA-87 is excluded from the JWT-format rows because its ~4.6 KB
-# signatures inflate JWTs past what some OIDC stacks accept; JWS compact
-# still exercises the same code paths. Flip this if the JWT path needs
-# coverage for completeness.
 ALGS_PQ=("ML-DSA-44" "ML-DSA-65" "ML-DSA-87")
 ALGS_CLASSICAL=("EdDSA" "ES256")
 FORMATS=("compact" "jwt")
@@ -58,7 +54,9 @@ js() { "$NODE" "$JS_SCRIPT" "$@"; }
 
 # Canned payloads/claims so every cell sends the same bytes.
 PAYLOAD_TEXT="interop payload $(date -u +%FT%TZ)"
-PAYLOAD_B64U="$(printf '%s' "$PAYLOAD_TEXT" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+# Portable base64url: `base64 -w0` is GNU-only, so strip newlines with tr
+# for macOS/BSD parity. (GNU wraps at 76 chars by default; BSD doesn't wrap.)
+PAYLOAD_B64U="$(printf '%s' "$PAYLOAD_TEXT" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
 CLAIMS='{"iss":"interop","sub":"matrix","foo":"bar"}'
 
 record() {
