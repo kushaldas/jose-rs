@@ -236,6 +236,7 @@ pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use kryptering::{
@@ -840,5 +841,52 @@ mod tests {
 
         let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
         assert!(decode_with_jwkset(&set, &token, &Validation::new()).is_err());
+    }
+
+    // ── Phase 11: post-quantum ML-DSA JWT round-trips ──────────────
+
+    /// JWT encode/decode round-trip using ML-DSA-65 as the signature
+    /// algorithm. Covers the full JWK-based one-shot API:
+    /// `encode_with_jwk` + `decode_with_jwk` with kty="AKP".
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn jwt_mldsa_65_jwk_roundtrip() {
+        use kryptering::MlDsaVariant;
+        let mut jwk = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa65).unwrap();
+        jwk.kid = Some("pq-1".into());
+
+        let header = JoseHeader::jwt("ML-DSA-65");
+        let mut claims = Claims::default();
+        claims.iss = Some("pq-issuer".into());
+        claims.exp = Some(now() + 3600);
+
+        let token = encode_with_jwk(&jwk, &header, &claims).unwrap();
+        let validation = Validation::new().with_issuer("pq-issuer");
+        let decoded = decode_with_jwk(&jwk, &token, &validation).unwrap();
+        assert_eq!(decoded.iss.as_deref(), Some("pq-issuer"));
+    }
+
+    /// JWT decode_with_jwkset kid-based selection works for ML-DSA keys.
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn jwt_mldsa_jwkset_kid_selection() {
+        use kryptering::MlDsaVariant;
+        let mut jwk_a = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        jwk_a.kid = Some("pq-a".into());
+        let mut jwk_b = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        jwk_b.kid = Some("pq-b".into());
+
+        let mut header = JoseHeader::jwt("ML-DSA-44");
+        header.kid = Some("pq-b".into());
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+
+        let token = encode_with_jwk(&jwk_b, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![jwk_a, jwk_b],
+        };
+        let decoded = decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+        assert_eq!(decoded.exp, claims.exp);
     }
 }

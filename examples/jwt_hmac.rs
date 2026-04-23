@@ -28,11 +28,13 @@ fn main() -> jose_rs::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut claims = Claims::default();
-    claims.iss = Some("example-service".into());
-    claims.sub = Some("user-42".into());
-    claims.iat = Some(now);
-    claims.exp = Some(now + 3600);
+    let claims = Claims {
+        iss: Some("example-service".into()),
+        sub: Some("user-42".into()),
+        iat: Some(now),
+        exp: Some(now + 3600),
+        ..Default::default()
+    };
 
     // Sign
     let header = JoseHeader::jwt("HS256");

@@ -16,6 +16,8 @@ pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         "EC" => jwk_to_ec(jwk),
         "OKP" => jwk_to_okp(jwk),
         "oct" => jwk_to_oct(jwk),
+        #[cfg(feature = "post-quantum")]
+        "AKP" => jwk_to_akp(jwk),
         other => Err(JoseError::Key(format!("unsupported kty: {other}"))),
     }
 }
@@ -41,6 +43,8 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         "ES256" | "ES384" | "ES512" | "ES256K" => &["EC"],
         // EdDSA.
         "EdDSA" => &["OKP"],
+        // Post-quantum ML-DSA (draft-ietf-cose-dilithium).
+        "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" => &["AKP"],
         // JWE key wrap, direct, PBES2 — all symmetric.
         "A128KW" | "A192KW" | "A256KW" | "dir" | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW"
         | "PBES2-HS512+A256KW" => &["oct"],
@@ -108,6 +112,12 @@ pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
         }
         kryptering::SoftwareKey::Hmac(bytes) => oct_to_jwk(bytes),
         kryptering::SoftwareKey::Aes(bytes) => oct_to_jwk(bytes),
+        #[cfg(feature = "post-quantum")]
+        kryptering::SoftwareKey::PostQuantum {
+            algorithm,
+            private_der,
+            public_der,
+        } => akp_to_jwk(*algorithm, public_der, private_der.as_deref()),
         _ => Err(JoseError::Key(
             "unsupported SoftwareKey variant for JWK conversion".into(),
         )),
@@ -180,6 +190,8 @@ fn new_jwk(kty: &str) -> Jwk {
         x: None,
         y: None,
         k: None,
+        pub_: None,
+        priv_: None,
         extra: Default::default(),
     }
 }
@@ -529,6 +541,151 @@ fn oct_to_jwk(bytes: &[u8]) -> Result<Jwk> {
     let mut jwk = new_jwk("oct");
     jwk.k = Some(base64url::encode(bytes));
     Ok(jwk)
+}
+
+// ── AKP (post-quantum ML-DSA) ──────────────────────────────────────────
+//
+// draft-ietf-cose-dilithium: `kty="AKP"` with base64url members `pub`
+// (the raw FIPS 204 public key bytes) and `priv` (the 32-byte seed).
+// Kryptering's `SoftwareKey::PostQuantum` stores the public key as SPKI
+// DER and the private key as either PKCS#8 DER or a raw 32-byte seed;
+// this module translates between the two.
+
+#[cfg(feature = "post-quantum")]
+fn jwk_to_akp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
+    let alg = jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("AKP JWK requires `alg`".into()))?;
+    let variant = match alg {
+        "ML-DSA-44" => kryptering::MlDsaVariant::MlDsa44,
+        "ML-DSA-65" => kryptering::MlDsaVariant::MlDsa65,
+        "ML-DSA-87" => kryptering::MlDsaVariant::MlDsa87,
+        other => {
+            return Err(JoseError::Key(format!("unsupported AKP alg: {other}")));
+        }
+    };
+
+    let pub_b64 = jwk
+        .pub_
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("AKP JWK missing `pub`".into()))?;
+    let pub_raw = base64url::decode(pub_b64)?;
+    let expected_pub_len = mldsa_public_key_len(variant);
+    if pub_raw.len() != expected_pub_len {
+        return Err(JoseError::Key(format!(
+            "{} `pub` must be {expected_pub_len} bytes, got {}",
+            variant.name(),
+            pub_raw.len()
+        )));
+    }
+    let public_der = mldsa_raw_public_to_spki_der(variant, &pub_raw)?;
+
+    let private_der = match jwk.priv_.as_deref() {
+        Some(s) => {
+            let seed = base64url::decode(s)?;
+            if seed.len() != 32 {
+                return Err(JoseError::Key(format!(
+                    "AKP `priv` must be 32 bytes (seed), got {}",
+                    seed.len()
+                )));
+            }
+            Some(seed)
+        }
+        None => None,
+    };
+
+    Ok(kryptering::SoftwareKey::PostQuantum {
+        algorithm: kryptering::PqAlgorithm::MlDsa(variant),
+        private_der,
+        public_der,
+    })
+}
+
+#[cfg(feature = "post-quantum")]
+fn akp_to_jwk(
+    pq: kryptering::PqAlgorithm,
+    public_der: &[u8],
+    private: Option<&[u8]>,
+) -> Result<Jwk> {
+    let variant = match pq {
+        kryptering::PqAlgorithm::MlDsa(v) => v,
+        kryptering::PqAlgorithm::SlhDsa(_) => {
+            return Err(JoseError::Key(
+                "SLH-DSA JWK export not yet implemented".into(),
+            ));
+        }
+    };
+    let pub_raw = mldsa_spki_der_to_raw_public(variant, public_der)?;
+    let mut jwk = new_jwk("AKP");
+    jwk.alg = Some(variant.name().to_string());
+    jwk.pub_ = Some(base64url::encode(&pub_raw));
+    if let Some(priv_bytes) = private {
+        if priv_bytes.len() != 32 {
+            return Err(JoseError::Key(format!(
+                "AKP JWK export requires 32-byte seed (FIPS 204 priv format), got {} bytes",
+                priv_bytes.len()
+            )));
+        }
+        jwk.priv_ = Some(base64url::encode(priv_bytes));
+    }
+    Ok(jwk)
+}
+
+#[cfg(feature = "post-quantum")]
+fn mldsa_public_key_len(variant: kryptering::MlDsaVariant) -> usize {
+    match variant {
+        kryptering::MlDsaVariant::MlDsa44 => 1312,
+        kryptering::MlDsaVariant::MlDsa65 => 1952,
+        kryptering::MlDsaVariant::MlDsa87 => 2592,
+    }
+}
+
+#[cfg(feature = "post-quantum")]
+fn mldsa_raw_public_to_spki_der(variant: kryptering::MlDsaVariant, raw: &[u8]) -> Result<Vec<u8>> {
+    use pkcs8_pq::spki::EncodePublicKey;
+
+    fn encode<P>(raw: &[u8]) -> Result<Vec<u8>>
+    where
+        P: ml_dsa::MlDsaParams,
+        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
+    {
+        let enc = ml_dsa::EncodedVerifyingKey::<P>::try_from(raw)
+            .map_err(|_| JoseError::Key("ML-DSA public key length mismatch".into()))?;
+        let vk = ml_dsa::VerifyingKey::<P>::decode(&enc);
+        let der = vk
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("SPKI encode: {e}")))?;
+        Ok(der.as_bytes().to_vec())
+    }
+
+    match variant {
+        kryptering::MlDsaVariant::MlDsa44 => encode::<ml_dsa::MlDsa44>(raw),
+        kryptering::MlDsaVariant::MlDsa65 => encode::<ml_dsa::MlDsa65>(raw),
+        kryptering::MlDsaVariant::MlDsa87 => encode::<ml_dsa::MlDsa87>(raw),
+    }
+}
+
+#[cfg(feature = "post-quantum")]
+fn mldsa_spki_der_to_raw_public(variant: kryptering::MlDsaVariant, der: &[u8]) -> Result<Vec<u8>> {
+    use pkcs8_pq::spki::DecodePublicKey;
+
+    fn decode<P>(der: &[u8]) -> Result<Vec<u8>>
+    where
+        P: ml_dsa::MlDsaParams,
+        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
+    {
+        let vk = ml_dsa::VerifyingKey::<P>::from_public_key_der(der)
+            .map_err(|e| JoseError::Key(format!("parse ML-DSA SPKI: {e}")))?;
+        let encoded: ml_dsa::EncodedVerifyingKey<P> = vk.encode();
+        Ok(encoded.to_vec())
+    }
+
+    match variant {
+        kryptering::MlDsaVariant::MlDsa44 => decode::<ml_dsa::MlDsa44>(der),
+        kryptering::MlDsaVariant::MlDsa65 => decode::<ml_dsa::MlDsa65>(der),
+        kryptering::MlDsaVariant::MlDsa87 => decode::<ml_dsa::MlDsa87>(der),
+    }
 }
 
 #[cfg(test)]
@@ -977,5 +1134,65 @@ mod tests {
             }
             Ok(_) => panic!("expected error for unsupported kty"),
         }
+    }
+
+    // ── AKP (ML-DSA) ────────────────────────────────────────────────
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_missing_alg_rejected() {
+        // 1312-byte pub (ML-DSA-44 size), but no alg to select a variant.
+        let jwk_json = format!(
+            r#"{{"kty":"AKP","pub":"{}"}}"#,
+            crate::base64url::encode(&vec![0u8; 1312])
+        );
+        let jwk = Jwk::from_json(&jwk_json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(err.contains("requires `alg`"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_wrong_pub_length_rejected() {
+        // ML-DSA-44 expects 1312 bytes, we give 1200.
+        let jwk_json = format!(
+            r#"{{"kty":"AKP","alg":"ML-DSA-44","pub":"{}"}}"#,
+            crate::base64url::encode(&vec![0u8; 1200])
+        );
+        let jwk = Jwk::from_json(&jwk_json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(
+            err.contains("must be 1312 bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_wrong_priv_length_rejected() {
+        // Valid ML-DSA-44 public but priv is 64 bytes instead of 32-byte seed.
+        use kryptering::MlDsaVariant;
+        let gen = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
+        let jwk_json = format!(
+            r#"{{"kty":"AKP","alg":"ML-DSA-44","pub":"{}","priv":"{}"}}"#,
+            gen.pub_.as_deref().unwrap(),
+            crate::base64url::encode(&[0u8; 64])
+        );
+        let jwk = Jwk::from_json(&jwk_json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(err.contains("must be 32 bytes"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_alg_kty_mismatch_rejected() {
+        // ML-DSA alg with kty="RSA" should fail consistency check.
+        let jwk_json = r#"{"kty":"RSA","alg":"ML-DSA-44","n":"AA","e":"AQAB"}"#;
+        let jwk = Jwk::from_json(jwk_json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(
+            err.contains("incompatible with kty"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. re-pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt + clippy + test, feature matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Build + clippy across every feature combination so conditional
+      # cfg(feature = "…") blocks don't bit-rot. jose-rs's feature matrix:
+      # default = pkcs11; deprecated re-exposes alg:"none" + RSA1_5 for
+      # legacy interop; post-quantum enables ML-DSA-44/65/87 (FIPS 204)
+      # via kryptering's post-quantum backend.
+      - name: cargo clippy (no-default-features)
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+
+      - name: cargo clippy (default, pkcs11)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo clippy (deprecated)
+        run: cargo clippy --locked --no-default-features --features deprecated --all-targets -- -D warnings
+
+      - name: cargo clippy (post-quantum)
+        run: cargo clippy --locked --no-default-features --features post-quantum --all-targets -- -D warnings
+
+      - name: cargo clippy (all-features)
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings
+
+      # Unit tests — pure JOSE crypto paths. pkcs11 only needs libloading
+      # at build time; no runtime PKCS#11 module is needed because jose's
+      # HSM paths are exercised via downstream integration suites.
+      - name: cargo test (no-default-features)
+        run: cargo test --locked --no-default-features --lib
+
+      - name: cargo test (default, pkcs11)
+        run: cargo test --locked --lib
+
+      - name: cargo test (deprecated)
+        run: cargo test --locked --no-default-features --features deprecated --lib
+
+      - name: cargo test (post-quantum)
+        run: cargo test --locked --no-default-features --features post-quantum --lib
+
+      - name: cargo test (all-features)
+        run: cargo test --locked --all-features --lib
+
+      - name: cargo doc
+        run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"

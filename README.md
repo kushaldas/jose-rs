@@ -16,6 +16,8 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 
 **JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, EdDSA
 
+**JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 / ML-DSA-87 (FIPS 204), enabled with `--features post-quantum`. See *Post-quantum signatures* below.
+
 **JWE key management**: dir, A128KW/A192KW/A256KW, RSA-OAEP, RSA-OAEP-256
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
@@ -224,6 +226,70 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   `decode_with_jwkset` is the canonical OIDC flow (kid-lookup with
   fall-through to each key in the set).
 
+## Post-quantum signatures (experimental)
+
+ML-DSA support is available behind the opt-in `post-quantum` feature:
+
+```toml
+[dependencies]
+jose-rs = { version = "0.1", features = ["post-quantum"] }
+```
+
+Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's
+post-quantum backend, and adds three `JwsAlgorithm` variants corresponding
+to the IANA-registered identifiers `ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`
+(FIPS 204).
+
+### JWK wire format (`kty = "AKP"`)
+
+Per `draft-ietf-cose-dilithium`, ML-DSA keys use the new `"AKP"`
+("Algorithm Key Pair") key type with two base64url members:
+
+- `pub` — the raw FIPS 204 encoded public key (1312 / 1952 / 2592 bytes
+  for the three security levels).
+- `priv` — the 32-byte FIPS 204 **seed** (not an expanded private key).
+  The expanded signing key is derived on demand via
+  `ML-DSA.KeyGen_internal(seed)`.
+
+`Jwk.priv` is zeroized on `Drop` alongside the existing RSA/EC/oct
+private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
+`pub`, which is the correct shape for a JWK Set endpoint.
+
+### Status and caveats
+
+- **Draft-spec, not yet RFC.** The authoritative spec is
+  [`draft-ietf-cose-dilithium-11`](https://datatracker.ietf.org/doc/draft-ietf-cose-dilithium/)
+  (active, submitted to IESG, expected to publish as an RFC in 2026). The
+  wire format may shift before publication — do not use this feature
+  for long-lived signed artifacts that you cannot re-issue later.
+
+- **`ml-dsa` crate history.** The RustCrypto `ml-dsa` crate shipped
+  three moderate-severity advisories during its 0.1.0 release-candidate
+  series. All three are fixed in versions earlier than our pin, and
+  `cargo audit` is clean against `ml-dsa 0.1.0-rc.8`:
+
+  | Advisory | Summary | Patched from |
+  |---|---|---|
+  | [GHSA-hcp2-x6j4-29j7](https://github.com/RustCrypto/signatures/security/advisories/GHSA-hcp2-x6j4-29j7) | `Decompose` timing side-channel during signing | `>= 0.1.0-rc.3` |
+  | [GHSA-5x2r-hc65-25f9](https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9) | Repeated hint indices (signature malleability) | `>= 0.1.0-rc.4` |
+  | [GHSA-h37v-hp6w-2pp8](https://github.com/RustCrypto/signatures/security/advisories/GHSA-h37v-hp6w-2pp8) | `UseHint` off-by-two | `>= 0.1.0-rc.5` |
+
+  Because the pin is `=0.1.0-rc.8`, any future `ml-dsa` advisory will
+  surface as an explicit lockfile event — consult `cargo audit` before
+  bumping, and track [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
+  for the `ml-dsa 0.1.0` stable release.
+
+- **Default signing mode is randomized (hedged).** ML-DSA sign uses real
+  randomness per FIPS 204 Algorithm 2, so repeated signatures over the
+  same message and key are expected to differ while still verifying.
+  The optional deterministic signing variant (equivalent to a zero
+  `rnd`) is not currently exposed.
+
+- **ML-DSA-87 test note.** The expanded signing key (~5 KiB) exceeds
+  the default 2 MiB debug-build test-thread stack; the ML-DSA-87
+  round-trip test spawns itself on a larger-stack thread. Release
+  builds have smaller stack frames and are unaffected.
+
 ## Development tooling
 
 ### Dependency audit
@@ -269,10 +335,10 @@ eliminates transcription risk in 1000+-char RSA key material.
 ### Fuzzing
 
 `fuzz/` is a [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
-project with seven targets covering the attacker-controlled parse and
+project with eight targets covering the attacker-controlled parse and
 verify paths (base64url, JWK JSON, thumbprint, JWS decode/verify, JWE
-decrypt, JWT header/claims). See `fuzz/README.md` for the per-target
-breakdown.
+decrypt, JWT header/claims, and post-quantum JWS verify via
+`jws_verify_mldsa`). See `fuzz/README.md` for the per-target breakdown.
 
 ```
 rustup toolchain install nightly

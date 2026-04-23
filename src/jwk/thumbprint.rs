@@ -71,6 +71,23 @@ pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
             required.insert("kty", "OKP");
             required.insert("x", x);
         }
+        // draft-ietf-cose-dilithium: AKP thumbprint canonicalises
+        // {alg, kty, pub} in lexicographic order. Unlike the other key
+        // types, `alg` is required because AKP is generic across
+        // post-quantum algorithms and `alg` is what distinguishes them.
+        "AKP" => {
+            let alg = jwk
+                .alg
+                .as_deref()
+                .ok_or_else(|| JoseError::Key("missing alg".into()))?;
+            let pub_ = jwk
+                .pub_
+                .as_deref()
+                .ok_or_else(|| JoseError::Key("missing pub".into()))?;
+            required.insert("alg", alg);
+            required.insert("kty", "AKP");
+            required.insert("pub", pub_);
+        }
         other => {
             return Err(JoseError::Key(format!(
                 "unsupported kty for thumbprint: {other}"
@@ -181,6 +198,8 @@ mod tests {
             crv: None,
             x: None,
             y: None,
+            pub_: None,
+            priv_: None,
             extra: Default::default(),
         };
         let b = Jwk {
@@ -201,6 +220,8 @@ mod tests {
             crv: None,
             x: None,
             y: None,
+            pub_: None,
+            priv_: None,
             extra: Default::default(),
         };
         let tp_a = thumbprint_sha256(&a).unwrap();
@@ -216,5 +237,79 @@ mod tests {
         let err = thumbprint_sha256(&jwk).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing n"));
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_thumbprint_deterministic_and_depends_on_alg() {
+        use kryptering::MlDsaVariant;
+        let jwk = crate::jwk::generate::generate_mldsa(MlDsaVariant::MlDsa65).unwrap();
+
+        // Deterministic: same JWK hashes to the same thumbprint twice.
+        let tp1 = thumbprint_sha256(&jwk).unwrap();
+        let tp2 = thumbprint_sha256(&jwk).unwrap();
+        assert_eq!(tp1, tp2);
+        assert!(!tp1.is_empty());
+        assert!(!tp1.contains('='));
+
+        // Changing alg changes the thumbprint (alg is a required member).
+        let mut modified = jwk.clone();
+        modified.alg = Some("ML-DSA-87".into());
+        let tp_modified = thumbprint_sha256(&modified).unwrap();
+        assert_ne!(tp1, tp_modified);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn akp_thumbprint_requires_alg_and_pub() {
+        let without_alg = Jwk {
+            kty: "AKP".into(),
+            pub_: Some("AA".into()),
+            use_: None,
+            key_ops: None,
+            alg: None,
+            kid: None,
+            n: None,
+            e: None,
+            d: None,
+            p: None,
+            q: None,
+            dp: None,
+            dq: None,
+            qi: None,
+            crv: None,
+            x: None,
+            y: None,
+            k: None,
+            priv_: None,
+            extra: Default::default(),
+        };
+        let err = thumbprint_sha256(&without_alg).unwrap_err().to_string();
+        assert!(err.contains("missing alg"), "unexpected: {err}");
+
+        let without_pub = Jwk {
+            kty: "AKP".into(),
+            alg: Some("ML-DSA-44".into()),
+            use_: None,
+            key_ops: None,
+            kid: None,
+            n: None,
+            e: None,
+            d: None,
+            p: None,
+            q: None,
+            dp: None,
+            dq: None,
+            qi: None,
+            crv: None,
+            x: None,
+            y: None,
+            k: None,
+            pub_: None,
+            priv_: None,
+            extra: Default::default(),
+        };
+        let err = thumbprint_sha256(&without_pub).unwrap_err().to_string();
+        assert!(err.contains("missing pub"), "unexpected: {err}");
     }
 }

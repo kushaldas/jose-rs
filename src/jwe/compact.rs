@@ -112,11 +112,12 @@ fn jwk_to_jwe_key_bytes(
 
 fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
     let sw = crate::jwk::jwk_to_software_key(jwk)?;
-    match sw {
+    match &sw {
         kryptering::SoftwareKey::Rsa { public, private } => {
             if for_decrypt {
                 use rsa::pkcs8::EncodePrivateKey;
                 let pk = private
+                    .as_ref()
                     .ok_or_else(|| JoseError::Key("JWK lacks RSA private components".into()))?;
                 Ok(pk
                     .to_pkcs8_der()
