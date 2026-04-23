@@ -1,0 +1,14 @@
+{
+  "name": "jose-interop-js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "JS side of the jose-rs <-> panva/jose interop harness",
+  "license": "BSD-2-Clause",
+  "engines": {
+    "node": ">=24.7.0"
+  },
+  "dependencies": {
+    "jose": "^6.1.0"
+  }
+}

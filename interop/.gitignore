@@ -1,0 +1,3 @@
+interop-results.json
+rust-harness/target/
+js-harness/node_modules/
