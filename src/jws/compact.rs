@@ -597,8 +597,8 @@ mod tests {
         mldsa_roundtrip(kryptering::MlDsaVariant::MlDsa65);
     }
 
-    /// ML-DSA-87's expanded signing key is large enough that `from_seed`
-    /// + `sign_deterministic` blow the default debug-build test-thread
+    /// ML-DSA-87's expanded signing key is large enough that seed expansion
+    /// plus ML-DSA signing blow the default debug-build test-thread
     /// stack (2 MiB). Run this variant on a fresh 8 MiB thread so the
     /// test actually completes. Release builds fit in the default stack,
     /// so this is purely a test-harness concern.

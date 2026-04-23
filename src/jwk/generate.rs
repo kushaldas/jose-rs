@@ -107,7 +107,7 @@ pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
     where
         P: ml_dsa::MlDsaParams,
     {
-        let sk = ml_dsa::SigningKey::<P>::from_seed(seed);
+        let sk = ml_dsa::ExpandedSigningKey::<P>::from_seed(seed);
         sk.verifying_key().encode().to_vec()
     }
 
