@@ -64,7 +64,15 @@ pub fn encode_nested(
     let signed_jwt = encode(signer, jws_header, claims)?;
 
     // Step 2: Encrypt the signed JWT inside a JWE
-    crate::jwe::compact::encrypt(encryption_key, signed_jwt.as_bytes(), alg, enc)
+    let mut header = crate::header::JoseHeader::for_jwe(alg, enc);
+    header.cty = Some("JWT".to_string());
+    crate::jwe::compact::encrypt_with_header(
+        header,
+        encryption_key,
+        signed_jwt.as_bytes(),
+        alg,
+        enc,
+    )
 }
 
 /// Decode a nested JWT: first decrypt the JWE, then verify the inner JWS and validate claims.
@@ -137,7 +145,14 @@ pub fn encode_nested_with_jwk(
     enc: crate::algorithm::JweEncryption,
 ) -> Result<String> {
     let signed = encode_with_jwk(signer_jwk, jws_header, claims)?;
-    crate::jwe::compact::encrypt_with_jwk(encryption_jwk, signed.as_bytes(), enc)
+    let encryption_alg_str = encryption_jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("JWK alg must be set for nested JWE encryption".into()))?;
+    let encryption_alg = crate::algorithm::JweAlgorithm::from_str(encryption_alg_str)?;
+    let mut header = crate::header::JoseHeader::for_jwe(encryption_alg, enc);
+    header.cty = Some("JWT".to_string());
+    crate::jwe::compact::encrypt_with_jwk_header(encryption_jwk, header, signed.as_bytes(), enc)
 }
 
 /// Decode a nested JWT (decrypt then verify and validate claims) using JWKs.
@@ -512,6 +527,8 @@ mod tests {
 
         // Should be 5 parts (JWE compact)
         assert_eq!(nested_token.split('.').count(), 5);
+        let outer_header = crate::jwe::compact::decode_header(&nested_token).unwrap();
+        assert_eq!(outer_header.cty.as_deref(), Some("JWT"));
 
         // Decrypt and verify
         let validation = Validation::new().with_issuer("nested-issuer");
@@ -652,6 +669,8 @@ mod tests {
 
         // Should be a JWE compact (5 parts).
         assert_eq!(token.split('.').count(), 5);
+        let outer_header = crate::jwe::compact::decode_header(&token).unwrap();
+        assert_eq!(outer_header.cty.as_deref(), Some("JWT"));
 
         let validation = Validation::new().with_issuer("nested-jwk");
         let decoded = decode_nested_with_jwk(&enc_jwk, &signer_jwk, &token, &validation).unwrap();

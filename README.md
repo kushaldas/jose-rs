@@ -10,7 +10,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 | JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact serialization |
 | JWK | [7517](https://www.rfc-editor.org/rfc/rfc7517) | All key types, JWK Sets, Thumbprints ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638)), key generation |
 | JWT | [7519](https://www.rfc-editor.org/rfc/rfc7519) | Claims, validation (exp/nbf/iss/aud/sub), nested JWT |
-| JWA | [7518](https://www.rfc-editor.org/rfc/rfc7518) | All standard signature, encryption, and key management algorithms |
+| JWA | [7518](https://www.rfc-editor.org/rfc/rfc7518) | Implemented signature, encryption, and key management algorithms |
 
 ## Supported algorithms
 
@@ -18,7 +18,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 
 **JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 / ML-DSA-87 (FIPS 204), enabled with `--features post-quantum`. See *Post-quantum signatures* below.
 
-**JWE key management**: dir, A128KW/A192KW/A256KW, RSA-OAEP, RSA-OAEP-256
+**JWE key management**: dir, A128KW/A192KW/A256KW, RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 
@@ -27,7 +27,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 | Feature | Default | Description |
 |---|---|---|
 | `pkcs11` | Yes | PKCS#11 HSM key support via kryptering |
-| `post-quantum` | No | ML-DSA, SLH-DSA algorithms |
+| `post-quantum` | No | ML-DSA algorithms |
 | `deprecated` | No | Legacy algorithms (RSA1_5, none) |
 
 ## Usage
