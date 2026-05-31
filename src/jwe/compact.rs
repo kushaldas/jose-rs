@@ -37,21 +37,43 @@ pub fn encrypt(
     alg: JweAlgorithm,
     enc: JweEncryption,
 ) -> Result<String> {
-    // 1. Build protected header.
-    let mut header = JoseHeader::new(alg.as_str());
-    header.enc = Some(enc.as_str().to_string());
+    encrypt_with_header(JoseHeader::for_jwe(alg, enc), key, plaintext, alg, enc)
+}
+
+pub(crate) fn encrypt_with_header(
+    header: JoseHeader,
+    key: &[u8],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<String> {
+    if header.alg != alg.as_str() {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header alg {} does not match JWE algorithm {}",
+            header.alg,
+            alg.as_str()
+        )));
+    }
+    if header.enc.as_deref() != Some(enc.as_str()) {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header enc {:?} does not match JWE encryption {}",
+            header.enc,
+            enc.as_str()
+        )));
+    }
+
     let header_json = serde_json::to_vec(&header)?;
     let header_b64 = base64url::encode(&header_json);
 
-    // 2. Generate or use CEK, produce encrypted key.
+    // 1. Generate or use CEK, produce encrypted key.
     let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
 
-    // 3. Content encryption.
+    // 2. Content encryption.
     // AAD = ASCII(BASE64URL(header)) per RFC 7516 Section 5.1 step 14.
     let aad = header_b64.as_bytes();
     let (iv, ciphertext, tag) = content_encrypt(enc, &cek, plaintext, aad)?;
 
-    // 4. Assemble compact serialization.
+    // 3. Assemble compact serialization.
     let encrypted_key_b64 = base64url::encode(&encrypted_key);
     let iv_b64 = base64url::encode(&iv);
     let ciphertext_b64 = base64url::encode(&ciphertext);
@@ -155,7 +177,29 @@ pub fn encrypt_with_jwk(
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt(&key_bytes, plaintext, alg, enc)
+    encrypt_with_header(
+        JoseHeader::for_jwe(alg, enc),
+        &key_bytes,
+        plaintext,
+        alg,
+        enc,
+    )
+}
+
+pub(crate) fn encrypt_with_jwk_header(
+    jwk: &crate::jwk::Jwk,
+    header: JoseHeader,
+    plaintext: &[u8],
+    enc: JweEncryption,
+) -> Result<String> {
+    let jwk_alg_str = jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
+    let alg = JweAlgorithm::from_str(jwk_alg_str)?;
+    jwk.check_op(jwe_alg_encrypt_op(alg))?;
+    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
+    encrypt_with_header(header, &key_bytes, plaintext, alg, enc)
 }
 
 /// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.

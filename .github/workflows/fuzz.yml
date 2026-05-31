@@ -1,21 +1,7 @@
 name: Fuzz Build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'fuzz/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/fuzz.yml'
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'fuzz/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/fuzz.yml'
+  workflow_dispatch:
 
 jobs:
   fuzz-build:
