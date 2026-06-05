@@ -265,8 +265,10 @@ private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
 
 - **`ml-dsa` crate history.** The RustCrypto `ml-dsa` crate shipped
   three moderate-severity advisories during its 0.1.0 release-candidate
-  series. All three are fixed in versions earlier than our pin, and
-  `cargo audit` is clean against `ml-dsa 0.1.0-rc.8`:
+  series. jose now tracks the stable **`ml-dsa 0.1.0`** (and `pkcs8 0.11.0`)
+  releases via caret ranges, matching kryptering. All three advisories were
+  fixed in release candidates earlier than the stable release, so
+  `cargo audit` is clean against `ml-dsa 0.1.0`:
 
   | Advisory | Summary | Patched from |
   |---|---|---|
@@ -274,10 +276,11 @@ private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
   | [GHSA-5x2r-hc65-25f9](https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9) | Repeated hint indices (signature malleability) | `>= 0.1.0-rc.4` |
   | [GHSA-h37v-hp6w-2pp8](https://github.com/RustCrypto/signatures/security/advisories/GHSA-h37v-hp6w-2pp8) | `UseHint` off-by-two | `>= 0.1.0-rc.5` |
 
-  Because the pin is `=0.1.0-rc.8`, any future `ml-dsa` advisory will
-  surface as an explicit lockfile event — consult `cargo audit` before
-  bumping, and track [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
-  for the `ml-dsa 0.1.0` stable release.
+  Because the dependency now uses a caret range (`0.1.0`), any future
+  `ml-dsa` advisory will surface as an explicit lockfile event — consult
+  `cargo audit` before bumping, and track
+  [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
+  for further `ml-dsa` releases.
 
 - **Default signing mode is randomized (hedged).** ML-DSA sign uses real
   randomness per FIPS 204 Algorithm 2, so repeated signatures over the
