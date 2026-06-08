@@ -276,11 +276,11 @@ private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
   | [GHSA-5x2r-hc65-25f9](https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9) | Repeated hint indices (signature malleability) | `>= 0.1.0-rc.4` |
   | [GHSA-h37v-hp6w-2pp8](https://github.com/RustCrypto/signatures/security/advisories/GHSA-h37v-hp6w-2pp8) | `UseHint` off-by-two | `>= 0.1.0-rc.5` |
 
-  Because the dependency now uses a caret range (`0.1.0`), any future
-  `ml-dsa` advisory will surface as an explicit lockfile event — consult
-  `cargo audit` before bumping, and track
-  [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
-  for further `ml-dsa` releases.
+  Because the dependency now uses a caret range (`0.1.0`), any future `ml-dsa`
+  advisory will be reported by `cargo audit`; remediation may require a
+  `Cargo.lock` update — consult `cargo audit` before bumping, and track
+  [RustCrypto/signatures](https://github.com/RustCrypto/signatures) for further
+  `ml-dsa` releases.
 
 - **Default signing mode is randomized (hedged).** ML-DSA sign uses real
   randomness per FIPS 204 Algorithm 2, so repeated signatures over the
