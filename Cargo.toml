@@ -1,6 +1,6 @@
 [package]
 name = "jose-rs"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
@@ -18,7 +18,7 @@ deprecated = ["kryptering/legacy"]
 pkcs11 = ["kryptering/pkcs11"]
 
 [dependencies]
-kryptering = { version = "0.2", default-features = false }
+kryptering = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -42,8 +42,8 @@ subtle = "2"
 zeroize = "1"
 
 # Post-quantum (optional)
-ml-dsa = { version = "=0.1.0-rc.8", features = ["pkcs8"], optional = true }
-pkcs8-pq = { package = "pkcs8", version = "=0.11.0-rc.11", optional = true }
+ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core"], optional = true }
+pkcs8-pq = { package = "pkcs8", version = "0.11.0", optional = true }
 
 [[example]]
 name = "jwt_ml_dsa"
