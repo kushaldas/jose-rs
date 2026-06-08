@@ -8,7 +8,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 |---|---|---|
 | JWS | [7515](https://www.rfc-editor.org/rfc/rfc7515) | Compact + Flattened JSON + General JSON serialization |
 | JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact serialization |
-| JWK | [7517](https://www.rfc-editor.org/rfc/rfc7517) | All key types, JWK Sets, Thumbprints ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638)), key generation |
+| JWK | [7517](https://www.rfc-editor.org/rfc/rfc7517) | RSA / EC / oct / OKP / AKP key types (see *Supported algorithms* for curve coverage), JWK Sets, Thumbprints ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638)), key generation |
 | JWT | [7519](https://www.rfc-editor.org/rfc/rfc7519) | Claims, validation (exp/nbf/iss/aud/sub), nested JWT |
 | JWA | [7518](https://www.rfc-editor.org/rfc/rfc7518) | Implemented signature, encryption, and key management algorithms |
 
@@ -28,7 +28,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 |---|---|---|
 | `pkcs11` | Yes | PKCS#11 HSM key support via kryptering |
 | `post-quantum` | No | ML-DSA algorithms |
-| `deprecated` | No | Legacy algorithms (RSA1_5, none) |
+| `deprecated` | No | Legacy algorithms (RSA-OAEP with SHA-1, none) |
 
 ## Usage
 
@@ -232,7 +232,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.1", features = ["post-quantum"] }
+jose-rs = { version = "0.3", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's
