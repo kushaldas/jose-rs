@@ -218,13 +218,20 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
     `jwt::decode_with_jwk`, `jwt::decode_with_jwkset`.
   - Encrypt/decrypt: `jwe::encrypt_with_jwk`, `jwe::decrypt_with_jwk`.
 
-  Each derives the algorithm from the JWK (or the token header, on the
-  receive side), enforces `Jwk::check_op` for the intended operation
-  (`Sign`/`Verify`/`Encrypt`/`Decrypt`/`WrapKey`/`UnwrapKey`), requires
-  any pinned `jwk.alg` to agree with the token's header, and constructs
+  Signing and verification derive the algorithm from the JWK or token
+  header as appropriate. JWE encryption and decryption require `jwk.alg`
+  to be pinned explicitly (breaking change from 0.3.x): `jwe::encrypt_with_jwk`
+  reads the key-management algorithm from the JWK, and `jwe::decrypt_with_jwk`
+  rejects tokens whose header `alg` does not match that pinned value. This prevents
+  algorithm-substitution when one key is reused across configurations.
+
+  Each API enforces `Jwk::check_op` for the intended operation
+  (`Sign`/`Verify`/`Encrypt`/`Decrypt`/`WrapKey`/`UnwrapKey`) and constructs
   the underlying signer/verifier or key-material form internally.
   `decode_with_jwkset` is the canonical OIDC flow (kid-lookup with
-  fall-through to each key in the set).
+  fall-through to each key in the set). For new symmetric JWKs, prefer
+  `jwk::generate_symmetric_for_alg(...)` or `jwk::generate_direct_symmetric(...)`
+  so `alg` and `use` are pinned at creation time.
 
 ## Post-quantum signatures (experimental)
 
@@ -232,7 +239,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.3", features = ["post-quantum"] }
+jose-rs = { version = "0.4", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's

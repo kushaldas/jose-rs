@@ -326,6 +326,14 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         let d_bytes = require(jwk, "d")?;
         let signing_key = p256::ecdsa::SigningKey::from_slice(&d_bytes)
             .map_err(|e| JoseError::Key(format!("invalid P-256 private key: {e}")))?;
+        // The public point (x, y) and the private scalar d are imported
+        // independently; reject a JWK whose halves disagree so a caller
+        // cannot publish one identity while signing under another.
+        if signing_key.verifying_key() != &verifying_key {
+            return Err(JoseError::Key(
+                "P-256 private key d does not match the public point (x, y)".into(),
+            ));
+        }
         Some(signing_key)
     } else {
         None
@@ -361,6 +369,11 @@ fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         let d_bytes = require(jwk, "d")?;
         let signing_key = p384::ecdsa::SigningKey::from_slice(&d_bytes)
             .map_err(|e| JoseError::Key(format!("invalid P-384 private key: {e}")))?;
+        if signing_key.verifying_key() != &verifying_key {
+            return Err(JoseError::Key(
+                "P-384 private key d does not match the public point (x, y)".into(),
+            ));
+        }
         Some(signing_key)
     } else {
         None
@@ -390,6 +403,14 @@ fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         let d_bytes = require(jwk, "d")?;
         let signing_key = p521::ecdsa::SigningKey::from_slice(&d_bytes)
             .map_err(|e| JoseError::Key(format!("invalid P-521 private key: {e}")))?;
+        // p521's VerifyingKey does not implement PartialEq; compare the
+        // uncompressed SEC1 encodings of the supplied and derived points.
+        let derived = p521::ecdsa::VerifyingKey::from(&signing_key);
+        if derived.to_encoded_point(false) != verifying_key.to_encoded_point(false) {
+            return Err(JoseError::Key(
+                "P-521 private key d does not match the public point (x, y)".into(),
+            ));
+        }
         Some(signing_key)
     } else {
         None
@@ -477,7 +498,15 @@ fn jwk_to_okp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         let secret: [u8; 32] = d_bytes
             .try_into()
             .map_err(|_| JoseError::Key("Ed25519 private key length mismatch".into()))?;
-        Some(ed25519_dalek::SigningKey::from_bytes(&secret))
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+        // Reject a JWK whose private seed does not derive the supplied public
+        // key — the two are imported from independent fields (`d` and `x`).
+        if signing_key.verifying_key() != public {
+            return Err(JoseError::Key(
+                "Ed25519 private key d does not match the public key x".into(),
+            ));
+        }
+        Some(signing_key)
     } else {
         None
     };
@@ -526,14 +555,47 @@ fn jwk_to_oct(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         if alg.starts_with('A')
             && (alg.contains("KW") || alg.contains("GCM") || alg.contains("CBC"))
         {
+            // Reject under-length symmetric keys for AES-based algorithms.
+            // Otherwise a JWKS- or `jwk`-header-supplied `oct` key could
+            // weaken content encryption below the algorithm's security level.
+            if let Some(expected) = aes_oct_key_len(alg) {
+                if k_bytes.len() != expected {
+                    return Err(JoseError::Key(format!(
+                        "{alg} requires a {expected}-byte key, got {}",
+                        k_bytes.len()
+                    )));
+                }
+            }
             return Ok(kryptering::SoftwareKey::Aes(k_bytes));
         }
     }
 
-    // Default heuristic: standard AES key lengths -> Aes, otherwise -> Hmac
+    // Default heuristic (no `alg` pinned): standard AES key lengths -> Aes,
+    // any other length is treated as HMAC and must meet the smallest HMAC
+    // requirement (HS256 -> 32 bytes). Shorter keys cannot satisfy any
+    // supported algorithm and are rejected rather than silently accepted.
     match k_bytes.len() {
         16 | 24 | 32 => Ok(kryptering::SoftwareKey::Aes(k_bytes)),
-        _ => Ok(kryptering::SoftwareKey::Hmac(k_bytes)),
+        n if n >= 32 => Ok(kryptering::SoftwareKey::Hmac(k_bytes)),
+        n => Err(JoseError::Key(format!(
+            "oct key of {n} bytes is too short: with no `alg` pinned it must be \
+             a valid AES length (16/24/32) or at least 32 bytes for HMAC"
+        ))),
+    }
+}
+
+/// Expected byte length of an `oct` key for an AES-based JOSE algorithm,
+/// or `None` for an unrecognized identifier (left to downstream validation).
+fn aes_oct_key_len(alg: &str) -> Option<usize> {
+    match alg {
+        "A128KW" | "A128GCM" => Some(16),
+        "A192KW" | "A192GCM" => Some(24),
+        "A256KW" | "A256GCM" => Some(32),
+        // CBC-HS content encryption uses a double-length key (MAC || ENC).
+        "A128CBC-HS256" => Some(32),
+        "A192CBC-HS384" => Some(48),
+        "A256CBC-HS512" => Some(64),
+        _ => None,
     }
 }
 
@@ -933,6 +995,113 @@ mod tests {
                 assert_eq!(bytes, &key_bytes);
             }
             _ => panic!("expected Aes key"),
+        }
+    }
+
+    // ── Tier-2 hardening: key-consistency + oct length ─────────────
+
+    /// A P-256 JWK whose private scalar `d` does not derive the public
+    /// point `(x, y)` must be rejected at import.
+    #[test]
+    fn ec_p256_mismatched_d_rejected() {
+        let a = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let b = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let a_jwk = software_key_to_jwk(&kryptering::SoftwareKey::EcP256 {
+            private: Some(a.clone()),
+            public: *a.verifying_key(),
+        })
+        .unwrap();
+        let b_jwk = software_key_to_jwk(&kryptering::SoftwareKey::EcP256 {
+            private: Some(b.clone()),
+            public: *b.verifying_key(),
+        })
+        .unwrap();
+
+        // x/y from A, but d from B.
+        let mut mixed = a_jwk;
+        mixed.d = b_jwk.d.clone();
+        let err = jwk_to_software_key(&mixed).err().unwrap().to_string();
+        assert!(
+            err.contains("does not match the public point"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// An Ed25519 JWK whose seed `d` does not derive the public key `x`
+    /// must be rejected at import.
+    #[test]
+    fn ed25519_mismatched_d_rejected() {
+        let a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let a_jwk = software_key_to_jwk(&kryptering::SoftwareKey::Ed25519 {
+            private: Some(a.clone()),
+            public: a.verifying_key(),
+        })
+        .unwrap();
+        let b_jwk = software_key_to_jwk(&kryptering::SoftwareKey::Ed25519 {
+            private: Some(b.clone()),
+            public: b.verifying_key(),
+        })
+        .unwrap();
+
+        let mut mixed = a_jwk;
+        mixed.d = b_jwk.d.clone();
+        let err = jwk_to_software_key(&mixed).err().unwrap().to_string();
+        assert!(
+            err.contains("does not match the public key"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// An `oct` key whose length is wrong for its pinned AES `alg` is
+    /// rejected (here: A128GCM needs 16 bytes, given 8).
+    #[test]
+    fn oct_aes_wrong_length_rejected() {
+        let json = format!(
+            r#"{{"kty":"oct","alg":"A128GCM","k":"{}"}}"#,
+            crate::base64url::encode(&[0u8; 8])
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(err.contains("requires a 16-byte key"), "unexpected: {err}");
+    }
+
+    /// A correctly-sized AES key wrap `oct` key still imports.
+    #[test]
+    fn oct_a128kw_correct_length_ok() {
+        let json = format!(
+            r#"{{"kty":"oct","alg":"A128KW","k":"{}"}}"#,
+            crate::base64url::encode(&[0u8; 16])
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        assert!(jwk_to_software_key(&jwk).is_ok());
+    }
+
+    /// A short `oct` key with no pinned `alg` cannot satisfy any supported
+    /// algorithm and is rejected rather than silently treated as HMAC.
+    #[test]
+    fn oct_short_no_alg_rejected() {
+        let json = format!(
+            r#"{{"kty":"oct","k":"{}"}}"#,
+            crate::base64url::encode(&[0u8; 8])
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let err = jwk_to_software_key(&jwk).err().unwrap().to_string();
+        assert!(err.contains("too short"), "unexpected: {err}");
+    }
+
+    /// A 64-byte `oct` key with no `alg` is a valid HMAC key (HS512) and imports.
+    #[test]
+    fn oct_long_no_alg_is_hmac() {
+        let json = format!(
+            r#"{{"kty":"oct","k":"{}"}}"#,
+            crate::base64url::encode(&[0u8; 64])
+        );
+        let jwk = Jwk::from_json(&json).unwrap();
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        match &sw {
+            kryptering::SoftwareKey::Hmac(b) => assert_eq!(b.len(), 64),
+            _ => panic!("expected Hmac key"),
         }
     }
 

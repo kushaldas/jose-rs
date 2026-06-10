@@ -7,7 +7,12 @@ use crate::jwt::claims::Claims;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Validation configuration for JWT decoding.
+///
+/// Construct this via [`Validation::new`] or [`Default::default`]. The type is
+/// non-exhaustive so future validation toggles can be added without another
+/// semver break.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Validation {
     /// Required issuer. If set, `iss` claim must match.
     pub issuer: Option<String>,
@@ -33,6 +38,13 @@ pub struct Validation {
     pub validate_nbf: bool,
     /// Whether to reject tokens whose `iat` is in the future (default: true).
     pub validate_iat_not_future: bool,
+    /// Whether to reject tokens that carry no `exp` claim (default: false).
+    ///
+    /// `exp` is optional in RFC 7519, so a token without it never expires.
+    /// Enabling this closes that footgun by requiring the claim to be present.
+    pub require_exp: bool,
+    /// Whether to reject tokens that carry no `nbf` claim (default: false).
+    pub require_nbf: bool,
 }
 
 impl Default for Validation {
@@ -48,6 +60,8 @@ impl Default for Validation {
             validate_exp: true,
             validate_nbf: true,
             validate_iat_not_future: true,
+            require_exp: false,
+            require_nbf: false,
         }
     }
 }
@@ -91,6 +105,19 @@ impl Validation {
     /// Bounds replay windows on long-lived tokens.
     pub fn with_max_age(mut self, seconds: u64) -> Self {
         self.max_age = Some(seconds);
+        self
+    }
+
+    /// Require the `exp` claim to be present. Without it, a token that omits
+    /// `exp` is treated as never-expiring (RFC 7519 makes `exp` optional).
+    pub fn require_exp(mut self) -> Self {
+        self.require_exp = true;
+        self
+    }
+
+    /// Require the `nbf` claim to be present.
+    pub fn require_nbf(mut self) -> Self {
+        self.require_nbf = true;
         self
     }
 
@@ -148,6 +175,19 @@ impl Validation {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| JoseError::InvalidClaims("system clock is before UNIX_EPOCH".into()))?
             .as_secs();
+
+        // Presence requirements run before value checks: a token that omits
+        // a required claim is rejected outright rather than silently passing.
+        if self.require_exp && claims.exp.is_none() {
+            return Err(JoseError::InvalidClaims(
+                "missing required exp claim".into(),
+            ));
+        }
+        if self.require_nbf && claims.nbf.is_none() {
+            return Err(JoseError::InvalidClaims(
+                "missing required nbf claim".into(),
+            ));
+        }
 
         // Check expiration — use saturating_add so an attacker-controlled exp
         // near u64::MAX cannot wrap and falsely satisfy the comparison.
@@ -347,6 +387,43 @@ mod tests {
 
         let v_wrong = Validation::new().with_subject("bob");
         assert!(v_wrong.validate(&claims).is_err());
+    }
+
+    /// require_exp rejects a token that omits `exp`.
+    #[test]
+    fn require_exp_rejects_missing_exp() {
+        let claims = Claims::default(); // no exp
+        let validation = Validation::new().require_exp();
+        let err = validation.validate(&claims).unwrap_err().to_string();
+        assert!(err.contains("missing required exp"), "unexpected: {err}");
+    }
+
+    /// require_exp accepts a token that carries a (valid) `exp`.
+    #[test]
+    fn require_exp_accepts_present_exp() {
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        Validation::new().require_exp().validate(&claims).unwrap();
+    }
+
+    /// require_nbf rejects a token that omits `nbf`.
+    #[test]
+    fn require_nbf_rejects_missing_nbf() {
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let err = Validation::new()
+            .require_nbf()
+            .validate(&claims)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing required nbf"), "unexpected: {err}");
+    }
+
+    /// Default validation still accepts a token with no exp (back-compat).
+    #[test]
+    fn default_accepts_missing_exp() {
+        let claims = Claims::default();
+        Validation::new().validate(&claims).unwrap();
     }
 
     /// J-12 regression: exp near u64::MAX with a non-zero leeway must not

@@ -11,7 +11,7 @@
 //!   examples/keys/ed25519-private.jwk  Ed25519 private key
 //!   examples/keys/ed25519-public.jwk   Ed25519 public key
 //!   examples/keys/hmac.jwk           256-bit HMAC symmetric key
-//!   examples/keys/aes.jwk            256-bit AES symmetric key
+//!   examples/keys/aes.jwk            256-bit AES Key Wrap symmetric key
 
 use jose_rs::jwk;
 
@@ -64,8 +64,8 @@ fn main() -> jose_rs::Result<()> {
     println!("  -> {dir}/hmac.jwk");
 
     // AES (256-bit symmetric)
-    println!("Generating 256-bit AES key...");
-    let aes = jwk::generate_symmetric(32)?;
+    println!("Generating 256-bit AES Key Wrap key...");
+    let aes = jwk::generate_symmetric_for_alg("A256KW")?;
     std::fs::write(format!("{dir}/aes.jwk"), aes.to_json_pretty()?).unwrap();
     println!("  -> {dir}/aes.jwk");
 
