@@ -153,7 +153,6 @@ pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algorithm::JweEncryption;
     use crate::jwk::convert::jwk_to_software_key;
 
     #[test]

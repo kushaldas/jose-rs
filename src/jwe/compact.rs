@@ -1538,6 +1538,21 @@ mod tests {
         assert!(err.contains("`use` is sig"), "unexpected: {err}");
     }
 
+    /// Hardening regression: decrypt_with_jwk hard-requires `jwk.alg` so the
+    /// key-management algorithm is bound to the key, not taken from the
+    /// attacker-controlled token header. A JWK with no `alg` must be rejected
+    /// before any key material is touched.
+    #[test]
+    fn jwk_decrypt_requires_alg() {
+        // Build a valid dir/A256GCM token with raw bytes.
+        let jwk = crate::jwk::generate_symmetric(32).unwrap(); // no alg set
+        let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let token = encrypt(&k, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        let err = decrypt_with_jwk(&jwk, &token).unwrap_err().to_string();
+        assert!(err.contains("alg must be set"), "unexpected: {err}");
+    }
+
     /// Phase 9: decrypt_with_jwk rejects alg mismatch between JWK and token.
     #[test]
     fn jwk_decrypt_pinned_alg_mismatch() {
