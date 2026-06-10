@@ -220,9 +220,9 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 
   Signing and verification derive the algorithm from the JWK or token
   header as appropriate. JWE encryption and decryption require `jwk.alg`
-  to be pinned explicitly: `jwe::encrypt_with_jwk` reads the key-management
-  algorithm from the JWK, and `jwe::decrypt_with_jwk` rejects tokens whose
-  header `alg` does not match that pinned value. This prevents
+  to be pinned explicitly (breaking change from 0.3.x): `jwe::encrypt_with_jwk`
+  reads the key-management algorithm from the JWK, and `jwe::decrypt_with_jwk`
+  rejects tokens whose header `alg` does not match that pinned value. This prevents
   algorithm-substitution when one key is reused across configurations.
 
   Each API enforces `Jwk::check_op` for the intended operation
