@@ -204,8 +204,11 @@ pub(crate) fn encrypt_with_jwk_header(
 
 /// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.
 ///
-/// The key management algorithm is read from the token's protected
-/// header (and cross-checked against `jwk.alg` if pinned).
+/// The JWK MUST pin `alg`: the key-management algorithm is bound to the
+/// key, not taken from the attacker-controlled token header. The token's
+/// header `alg` must agree with `jwk.alg`, and the decrypt path is run
+/// through an allow-list pinned to that single algorithm so a substituted
+/// header `alg` is rejected before any key material is touched.
 /// `Jwk::check_op` is enforced: `Decrypt` for `dir`, `UnwrapKey` for
 /// `A*KW` / `RSA-OAEP*`.
 pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
@@ -213,19 +216,28 @@ pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
     let header = decode_header(token)?;
     let alg = JweAlgorithm::from_str(&header.alg)?;
 
-    // If the JWK pins an alg, it must agree with the token.
-    if let Some(jwk_alg) = jwk.alg.as_deref() {
-        if jwk_alg != header.alg {
-            return Err(JoseError::InvalidToken(format!(
-                "JWK alg {jwk_alg} does not match token header alg {}",
-                header.alg
-            )));
-        }
+    // The JWK must pin alg — otherwise the key-management algorithm would be
+    // dictated entirely by the token header (algorithm-substitution risk when
+    // a single key is reused across configurations).
+    let jwk_alg = jwk
+        .alg
+        .as_deref()
+        .ok_or_else(|| JoseError::Key("JWK alg must be set for decrypt_with_jwk".into()))?;
+    if jwk_alg != header.alg {
+        return Err(JoseError::InvalidToken(format!(
+            "JWK alg {jwk_alg} does not match token header alg {}",
+            header.alg
+        )));
     }
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
-    decrypt(&key_bytes, token)
+
+    // Pin the key-management algorithm to the JWK's alg. Content encryption
+    // (`enc`) stays flexible — its key length is bound to the CEK size and
+    // re-validated in `recover_cek` — so we permit every supported `enc`.
+    let options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
+    decrypt_with_options(&key_bytes, token, &options)
 }
 
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
@@ -295,6 +307,20 @@ impl JweDecryptOptions {
         }
         Ok(())
     }
+}
+
+/// Every content-encryption algorithm the library supports. Used by the
+/// JWK-first decrypt path, which pins `alg` to the JWK but leaves `enc`
+/// flexible (the CEK length is bound to `enc` and re-validated downstream).
+fn all_enc_algorithms() -> Vec<JweEncryption> {
+    vec![
+        JweEncryption::A128CbcHs256,
+        JweEncryption::A192CbcHs384,
+        JweEncryption::A256CbcHs512,
+        JweEncryption::A128GCM,
+        JweEncryption::A192GCM,
+        JweEncryption::A256GCM,
+    ]
 }
 
 /// Decrypt a JWE Compact Serialization token, enforcing the caller's

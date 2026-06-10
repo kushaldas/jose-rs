@@ -1,5 +1,6 @@
 //! JWK key generation.
 
+use crate::algorithm::JweEncryption;
 use crate::error::{JoseError, Result};
 use crate::jwk::convert::software_key_to_jwk;
 use crate::jwk::Jwk;
@@ -82,6 +83,52 @@ pub fn generate_symmetric(len: usize) -> Result<Jwk> {
     software_key_to_jwk(&sw)
 }
 
+/// Generate a symmetric (oct) key pinned to a specific JOSE algorithm.
+///
+/// This is the migration path for the JWK-first APIs that require `jwk.alg`
+/// to be set explicitly. The returned JWK also pins `use` to `sig` for HMAC
+/// algorithms and `enc` for JWE algorithms.
+pub fn generate_symmetric_for_alg(alg: &str) -> Result<Jwk> {
+    let (len, use_) = match alg {
+        "HS256" => (32, "sig"),
+        "HS384" => (48, "sig"),
+        "HS512" => (64, "sig"),
+        "A128KW" | "A128GCM" => (16, "enc"),
+        "A192KW" | "A192GCM" => (24, "enc"),
+        "A256KW" | "A256GCM" => (32, "enc"),
+        "A128CBC-HS256" => (32, "enc"),
+        "A192CBC-HS384" => (48, "enc"),
+        "A256CBC-HS512" => (64, "enc"),
+        "dir" => {
+            return Err(JoseError::Key(
+                "direct JWE keys depend on `enc`; use generate_direct_symmetric(enc)".into(),
+            ))
+        }
+        other => {
+            return Err(JoseError::Key(format!(
+                "unsupported symmetric algorithm for key generation: {other}"
+            )))
+        }
+    };
+
+    let mut jwk = generate_symmetric(len)?;
+    jwk.alg = Some(alg.into());
+    jwk.use_ = Some(use_.into());
+    Ok(jwk)
+}
+
+/// Generate a symmetric direct-encryption JWK pinned to `alg = "dir"`.
+///
+/// The key length is derived from the chosen content-encryption algorithm,
+/// because direct encryption uses the JWK's `k` bytes as the CEK.
+pub fn generate_direct_symmetric(enc: JweEncryption) -> Result<Jwk> {
+    let len = enc.cek_size();
+    let mut jwk = generate_symmetric(len)?;
+    jwk.alg = Some("dir".into());
+    jwk.use_ = Some("enc".into());
+    Ok(jwk)
+}
+
 /// Generate an ML-DSA (FIPS 204) key pair as a JWK with `kty = "AKP"`.
 ///
 /// Returns a JWK carrying:
@@ -106,6 +153,7 @@ pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algorithm::JweEncryption;
     use crate::jwk::convert::jwk_to_software_key;
 
     #[test]
@@ -191,6 +239,39 @@ mod tests {
         let jwk2 = generate_symmetric(32).unwrap();
         // Two generated keys should be different
         assert_ne!(jwk1.k, jwk2.k);
+    }
+
+    #[test]
+    fn generate_symmetric_for_alg_sets_alg_and_use() {
+        let jwk = generate_symmetric_for_alg("A256KW").unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("A256KW"));
+        assert_eq!(jwk.use_.as_deref(), Some("enc"));
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        match &sw {
+            kryptering::SoftwareKey::Aes(bytes) => assert_eq!(bytes.len(), 32),
+            _ => panic!("expected AES key"),
+        }
+    }
+
+    #[test]
+    fn generate_direct_symmetric_sets_dir_alg() {
+        let jwk = generate_direct_symmetric(JweEncryption::A128GCM).unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("dir"));
+        assert_eq!(jwk.use_.as_deref(), Some("enc"));
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        match &sw {
+            kryptering::SoftwareKey::Aes(bytes) => assert_eq!(bytes.len(), 16),
+            _ => panic!("expected AES key"),
+        }
+    }
+
+    #[test]
+    fn generate_symmetric_for_alg_rejects_dir() {
+        let err = generate_symmetric_for_alg("dir").unwrap_err().to_string();
+        assert!(
+            err.contains("generate_direct_symmetric"),
+            "unexpected: {err}"
+        );
     }
 
     #[cfg(feature = "post-quantum")]
