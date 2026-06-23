@@ -227,6 +227,7 @@ pub fn verify_flattened_opts(
     opts: &VerifyOptions,
 ) -> Result<Vec<u8>> {
     crate::jws::compact::ensure_token_size(&jws.protected)?;
+    crate::jws::compact::ensure_token_size(&jws.signature)?;
     if let Some(p) = &jws.payload {
         crate::jws::compact::ensure_token_size(p)?;
     }
@@ -279,7 +280,7 @@ pub fn sign_general(
     signers: &[(&dyn kryptering::Signer, &JoseHeader)],
     payload: &[u8],
 ) -> Result<GeneralJws> {
-    let entries: Vec<GeneralSigner> = signers
+    let entries: Vec<GeneralSigner<'_>> = signers
         .iter()
         .map(|(s, h)| GeneralSigner::new(*s, h))
         .collect();
@@ -293,7 +294,7 @@ pub fn sign_general(
 /// omitted). All entries must agree on the effective `b64` value (they sign
 /// over a shared payload, so a mixed encoding would be ambiguous).
 pub fn sign_general_full(
-    signers: &[GeneralSigner],
+    signers: &[GeneralSigner<'_>],
     payload: &[u8],
     embed_payload: bool,
 ) -> Result<GeneralJws> {
@@ -416,6 +417,24 @@ fn verify_general_inner(
 ) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
     if let Some(p) = &jws.payload {
         crate::jws::compact::ensure_token_size(p)?;
+    }
+
+    let mut shared_b64: Option<bool> = None;
+    for entry in &jws.signatures {
+        crate::jws::compact::ensure_token_size(&entry.protected)?;
+        crate::jws::compact::ensure_token_size(&entry.signature)?;
+        let Ok(b64) = validate_header_opts(&entry.protected, verifier, opts) else {
+            continue;
+        };
+        if let Some(expected) = shared_b64 {
+            if b64 != expected {
+                return Err(JoseError::InvalidToken(
+                    "all signatures in a General JWS must agree on the b64 setting".into(),
+                ));
+            }
+        } else {
+            shared_b64 = Some(b64);
+        }
     }
 
     // The b64 setting is per-protected-header, but the payload member is
@@ -843,5 +862,124 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn flattened_oversize_signature_rejected() {
+        let header = JoseHeader::new("HS256");
+        let jws = FlattenedJws {
+            payload: Some(base64url::encode(b"p")),
+            protected: base64url::encode(&serde_json::to_vec(&header).unwrap()),
+            header: None,
+            signature: "a".repeat(crate::MAX_TOKEN_BYTES + 1),
+        };
+        let err = verify_flattened(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn general_oversize_signature_rejected() {
+        let header = JoseHeader::new("HS256");
+        let jws = GeneralJws {
+            payload: Some(base64url::encode(b"p")),
+            signatures: vec![JwsSignature {
+                protected: base64url::encode(&serde_json::to_vec(&header).unwrap()),
+                header: None,
+                signature: "a".repeat(crate::MAX_TOKEN_BYTES + 1),
+            }],
+        };
+        let err = verify_general(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MAX_TOKEN_BYTES"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn general_sign_rejects_mixed_b64_entries() {
+        let payload = b"shared-payload";
+        let signer = hmac_signer(KEY_A);
+
+        let header_b64_true = JoseHeader::new("HS256");
+        let entry_b64_true = GeneralSigner::new(&signer, &header_b64_true);
+
+        let mut header_b64_false = JoseHeader::new("HS256");
+        header_b64_false.crit = Some(vec!["b64".to_string()]);
+        header_b64_false
+            .extra
+            .insert("b64".to_string(), serde_json::json!(false));
+        let entry_b64_false = GeneralSigner {
+            signer: &signer,
+            protected: &header_b64_false,
+            unprotected: None,
+            options: SignOptions {
+                b64: false,
+                understood_crit: Vec::new(),
+            },
+        };
+
+        let jws = sign_general_full(&[entry_b64_true, entry_b64_false], payload, true).unwrap_err();
+        assert!(
+            jws.to_string().contains("agree on the b64 setting"),
+            "unexpected: {jws}"
+        );
+    }
+
+    #[test]
+    fn general_verify_rejects_mixed_b64_entries() {
+        let payload = b"shared-payload";
+        let signer = hmac_signer(KEY_A);
+
+        let header_b64_true = JoseHeader::new("HS256");
+        let b64_true = sign_flattened_detached_opts(
+            &signer,
+            payload,
+            &header_b64_true,
+            None,
+            &SignOptions::new(),
+        )
+        .unwrap();
+
+        let mut header_b64_false = JoseHeader::new("HS256");
+        header_b64_false.crit = Some(vec!["b64".to_string()]);
+        header_b64_false
+            .extra
+            .insert("b64".to_string(), serde_json::json!(false));
+        let b64_false = sign_flattened_detached_opts(
+            &signer,
+            payload,
+            &header_b64_false,
+            None,
+            &SignOptions {
+                b64: false,
+                understood_crit: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let jws = GeneralJws {
+            payload: Some(base64url::encode(payload)),
+            signatures: vec![
+                JwsSignature {
+                    protected: b64_true.protected,
+                    header: None,
+                    signature: b64_true.signature,
+                },
+                JwsSignature {
+                    protected: b64_false.protected,
+                    header: None,
+                    signature: b64_false.signature,
+                },
+            ],
+        };
+
+        let err = verify_general(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("agree on the b64 setting"),
+            "unexpected: {err}"
+        );
     }
 }
