@@ -1,6 +1,6 @@
 [package]
 name = "jose-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
@@ -32,8 +32,8 @@ rand = "0.8.6"
 rsa = "0.9"
 pkcs8 = "0.10"
 digest = "0.10"
-p256 = { version = "0.13", features = ["ecdsa"] }
-p384 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
 num-bigint-dig = { version = "0.8", features = ["prime"] }

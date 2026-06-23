@@ -150,8 +150,13 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   paths must call `jwt::decode` with a real verifier and `Validation`.
 - **Algorithm binding.** `jws`/`jwt` verify functions reject tokens whose
   `alg` header does not match the verifier's algorithm and always reject
-  `alg: "none"` — even with the `deprecated` feature enabled. Non-empty
-  `crit` headers are rejected per RFC 7515 §4.1.11.
+  `alg: "none"` — even with the `deprecated` feature enabled. A `crit`
+  header is rejected if it names any parameter outside the union of the
+  library's understood set (`b64`) and the caller-supplied
+  `understood_crit` allow-list (RFC 7515 §4.1.11); an empty `crit` array
+  is itself rejected. RFC 7797 unencoded payloads (`b64: false`) are
+  supported via `sign_with_options` / `verify_with_options`, and `b64`,
+  when present, must be listed in `crit` (RFC 7797 §6).
 - **RSA minimum key size.** Keys below 2048 bits are rejected at parse
   and at generation time (RFC 7518 §3.3 / §4.2).
 - **AES-GCM nonce collision bound.** Content encryption with A128GCM /
@@ -178,8 +183,9 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 - **Signing-side algorithm binding.** Symmetric to the verify path,
   the `jws`/`jwt` sign functions reject a header whose `alg` does not
   match the signer's algorithm, refuse `alg: "none"`, and refuse a
-  non-empty `crit`. This prevents emitting malformed tokens whose
-  header advertises a different algorithm than the one actually used.
+  `crit` naming an extension outside the understood allow-list. This
+  prevents emitting malformed tokens whose header advertises a
+  different algorithm than the one actually used.
 - **JWT Best Current Practices (RFC 8725).** `Validation` supports
   pinning the `typ` header (`with_typ`), capping token age via `iat`
   (`with_max_age`), rejecting future-dated `iat` by default, and
@@ -220,9 +226,9 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 
   Signing and verification derive the algorithm from the JWK or token
   header as appropriate. JWE encryption and decryption require `jwk.alg`
-  to be pinned explicitly (breaking change from 0.3.x): `jwe::encrypt_with_jwk`
-  reads the key-management algorithm from the JWK, and `jwe::decrypt_with_jwk`
-  rejects tokens whose header `alg` does not match that pinned value. This prevents
+  to be pinned explicitly: `jwe::encrypt_with_jwk` reads the key-management
+  algorithm from the JWK, and `jwe::decrypt_with_jwk` rejects tokens whose
+  header `alg` does not match that pinned value. This prevents
   algorithm-substitution when one key is reused across configurations.
 
   Each API enforces `Jwk::check_op` for the intended operation
