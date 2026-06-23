@@ -435,12 +435,24 @@ fn verify_general_inner(
         }
     }
 
-    // The b64 setting is per-protected-header, but the payload member is
-    // shared, so resolve the payload using the first decodable header's b64.
-    // For the common (all-b64-true) case this is exactly the classic
-    // behaviour. We compute it lazily below per entry to keep raw bytes.
+    // All entries that pass header validation agree on `b64` (enforced
+    // above) and the payload member is shared, so resolve the effective
+    // payload exactly once instead of decoding/reallocating it per signature
+    // (which would be O(n * payload_size) for an n-signature JWS). When no
+    // entry validated (`shared_b64` is `None`) nothing signs over the payload,
+    // so there is nothing to resolve. A payload-resolution problem is fatal
+    // for the whole JWS, mirroring the previous per-entry behaviour.
+    let shared_payload = match shared_b64 {
+        Some(b64) => Some(resolve_payload(
+            jws.payload.as_deref(),
+            detached_payload,
+            b64,
+        )?),
+        None => None,
+    };
+
     let mut results = Vec::with_capacity(jws.signatures.len());
-    let mut resolved_payload: Option<Vec<u8>> = None;
+    let mut any_verified = false;
 
     for (index, entry) in jws.signatures.iter().enumerate() {
         let mut result = SignatureResult {
@@ -467,15 +479,13 @@ fn verify_general_inner(
             }
         };
 
-        let payload = match resolve_payload(jws.payload.as_deref(), detached_payload, b64) {
-            Ok(p) => p,
-            Err(e) => {
-                // A payload-resolution problem is fatal for the whole JWS.
-                return Err(e);
-            }
-        };
+        // A validated entry implies `shared_b64` (and therefore the shared
+        // payload) was resolved above; the per-entry `b64` equals `shared_b64`.
+        let payload = shared_payload
+            .as_deref()
+            .expect("a validated signature entry implies the shared payload was resolved");
 
-        let input = signing_input(&entry.protected, &payload, b64);
+        let input = signing_input(&entry.protected, payload, b64);
         let sig = match base64url::decode(&entry.signature) {
             Ok(s) => s,
             Err(e) => {
@@ -487,7 +497,7 @@ fn verify_general_inner(
         match verifier.verify(&input, &sig) {
             Ok(true) => {
                 result.verified = true;
-                resolved_payload = Some(payload);
+                any_verified = true;
             }
             Ok(false) => {
                 result.error = Some("signature verification failed".into());
@@ -506,6 +516,7 @@ fn verify_general_inner(
     // Return the payload only when a signature actually verified. A verification
     // API must never hand back payload bytes that nothing authenticated, so a
     // caller cannot accidentally consume unsigned data.
+    let resolved_payload = if any_verified { shared_payload } else { None };
     Ok((results, resolved_payload))
 }
 

@@ -26,6 +26,10 @@ use crate::jwk::Jwk;
 // pulled from a const-oid database feature so the set we accept is explicit
 // and auditable.
 const OID_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+// RSASSA-PSS (RFC 8017 §A.2.3). Keys for PS* JWS algorithms are sometimes
+// wrapped under this OID instead of plain rsaEncryption; the inner key
+// material is the same PKCS#1 structure.
+const OID_RSA_PSS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const OID_ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 
@@ -51,9 +55,19 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
         .map_err(|e| JoseError::Key(format!("invalid PKCS#8 DER: {e}")))?;
     let oid = info.algorithm.oid;
 
-    let sw = if oid == OID_RSA {
-        let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
-            .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
+    let sw = if oid == OID_RSA || oid == OID_RSA_PSS {
+        // rsaEncryption-wrapped keys decode through the standard PKCS#8 path.
+        // rsassaPss-wrapped keys carry the same PKCS#1 `RSAPrivateKey` in the
+        // `privateKey` field, but the rsa crate's PKCS#8 decoder only accepts
+        // the rsaEncryption OID, so parse the inner PKCS#1 structure directly.
+        let key = if oid == OID_RSA {
+            rsa::RsaPrivateKey::from_pkcs8_der(der)
+                .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?
+        } else {
+            use rsa::pkcs1::DecodeRsaPrivateKey;
+            rsa::RsaPrivateKey::from_pkcs1_der(info.private_key)
+                .map_err(|e| JoseError::Key(format!("invalid RSA-PSS PKCS#8 key: {e}")))?
+        };
         let public = key.to_public_key();
         kryptering::SoftwareKey::Rsa {
             private: Some(key),
@@ -97,9 +111,21 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
         .map_err(|e| JoseError::Key(format!("invalid SPKI DER: {e}")))?;
     let oid = spki.algorithm.oid;
 
-    let sw = if oid == OID_RSA {
-        let key = rsa::RsaPublicKey::from_public_key_der(der)
-            .map_err(|e| JoseError::Key(format!("invalid RSA SPKI key: {e}")))?;
+    let sw = if oid == OID_RSA || oid == OID_RSA_PSS {
+        // As on the private side: rsaEncryption decodes through the SPKI path,
+        // while an rssaPss-wrapped SPKI carries the same PKCS#1 `RSAPublicKey`
+        // in its BIT STRING, which the rsa crate's SPKI decoder rejects.
+        let key = if oid == OID_RSA {
+            rsa::RsaPublicKey::from_public_key_der(der)
+                .map_err(|e| JoseError::Key(format!("invalid RSA SPKI key: {e}")))?
+        } else {
+            use rsa::pkcs1::DecodeRsaPublicKey;
+            let inner = spki.subject_public_key.as_bytes().ok_or_else(|| {
+                JoseError::Key("RSA-PSS SPKI public key is not byte-aligned".into())
+            })?;
+            rsa::RsaPublicKey::from_pkcs1_der(inner)
+                .map_err(|e| JoseError::Key(format!("invalid RSA-PSS SPKI key: {e}")))?
+        };
         kryptering::SoftwareKey::Rsa {
             private: None,
             public: key,
@@ -238,6 +264,46 @@ mod tests {
         der_roundtrip("RS256", priv_der.as_bytes(), pub_der.as_bytes());
         der_roundtrip("PS256", priv_der.as_bytes(), pub_der.as_bytes());
         der_roundtrip("PS512", priv_der.as_bytes(), pub_der.as_bytes());
+    }
+
+    /// RSASSA-PSS-wrapped keys (OID 1.2.840.113549.1.1.10) import as RSA and
+    /// round-trip through a PS256 sign/verify. The rsa crate's PKCS#8/SPKI
+    /// decoders reject this OID, so the importer parses the inner PKCS#1.
+    #[test]
+    fn rsa_pss_oid_wrapped_keys_import() {
+        use pkcs8::der::{asn1::BitStringRef, Encode};
+        use pkcs8::spki::SubjectPublicKeyInfoRef;
+        use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfo};
+        use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+
+        let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let pk = sk.to_public_key();
+
+        // Wrap the PKCS#1 RSAPrivateKey in a PKCS#8 PrivateKeyInfo bearing the
+        // rsassaPss OID.
+        let pkcs1_priv = sk.to_pkcs1_der().unwrap();
+        let priv_info = PrivateKeyInfo {
+            algorithm: AlgorithmIdentifierRef {
+                oid: OID_RSA_PSS,
+                parameters: None,
+            },
+            private_key: pkcs1_priv.as_bytes(),
+            public_key: None,
+        };
+        let priv_der = priv_info.to_der().unwrap();
+
+        // Wrap the PKCS#1 RSAPublicKey in an SPKI bearing the rsassaPss OID.
+        let pkcs1_pub = pk.to_pkcs1_der().unwrap();
+        let spki = SubjectPublicKeyInfoRef {
+            algorithm: AlgorithmIdentifierRef {
+                oid: OID_RSA_PSS,
+                parameters: None,
+            },
+            subject_public_key: BitStringRef::from_bytes(pkcs1_pub.as_bytes()).unwrap(),
+        };
+        let pub_der = spki.to_der().unwrap();
+
+        der_roundtrip("PS256", &priv_der, &pub_der);
     }
 
     #[test]

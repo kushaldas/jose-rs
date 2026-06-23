@@ -110,7 +110,19 @@ fn validate_crit(crit: Option<&Vec<String>>, understood_extra: &[String]) -> Res
 /// must be listed in `crit`. Returns the effective `b64` value.
 fn resolve_b64(header: &JoseHeader, crit_listed_b64: bool) -> Result<bool> {
     match header.extra.get("b64") {
-        None => Ok(true),
+        None => {
+            // RFC 7515 §4.1.11: every parameter named in `crit` MUST be
+            // present in the header. A `crit` listing `b64` with no `b64`
+            // param is non-conformant and must be rejected (on both the sign
+            // and verify sides) rather than silently defaulting to `true`.
+            if crit_listed_b64 {
+                return Err(JoseError::InvalidHeader(
+                    "b64 is listed in crit but no b64 header param is present (RFC 7515 §4.1.11)"
+                        .into(),
+                ));
+            }
+            Ok(true)
+        }
         Some(value) => {
             let b = value.as_bool().ok_or_else(|| {
                 JoseError::InvalidHeader("b64 header param must be a boolean".into())
@@ -833,6 +845,35 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("must be listed in crit"), "unexpected: {err}");
+    }
+
+    /// RFC 7515 §4.1.11: `crit` listing `b64` with no `b64` header param is
+    /// non-conformant — the sign side must refuse to emit such a token.
+    #[test]
+    fn crit_lists_b64_without_param_is_rejected_on_sign() {
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["b64".to_string()]);
+        // No b64 param in extra.
+        let err = sign_with_options(&PanicSigner, b"p", &header, &SignOptions::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no b64 header param"), "unexpected: {err}");
+    }
+
+    /// RFC 7515 §4.1.11: the verify side likewise rejects a `crit` naming
+    /// `b64` when the header omits the `b64` param.
+    #[test]
+    fn crit_lists_b64_without_param_is_rejected_on_verify() {
+        use kryptering::Signer;
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["b64".to_string()]);
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64url::encode(b"p");
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_signer().sign(signing_input.as_bytes()).unwrap();
+        let token = format!("{signing_input}.{}", base64url::encode(&sig));
+        let err = verify(&hmac_verifier(), &token).unwrap_err().to_string();
+        assert!(err.contains("no b64 header param"), "unexpected: {err}");
     }
 
     /// An unencoded compact payload containing a dot is rejected (RFC 7797
