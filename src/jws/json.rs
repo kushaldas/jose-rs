@@ -365,14 +365,12 @@ pub fn verify_general_opts(
     if jws.signatures.is_empty() {
         return Err(JoseError::InvalidToken("no signatures present".into()));
     }
-    let (results, payload) = verify_general_inner(verifier, jws, detached_payload, opts)?;
-    if results.iter().any(|r| r.verified) {
-        Ok(payload)
-    } else {
-        Err(JoseError::InvalidToken(
-            "no signature verified successfully".into(),
-        ))
-    }
+    // Short-circuit on the first signature that verifies: `verify_general`
+    // only needs one valid signature, so there is no reason to run the verifier
+    // over the remaining (caller-supplied) entries. Exhaustive per-signature
+    // reporting is available via `verify_general_all`.
+    let (_results, payload) = verify_general_inner(verifier, jws, detached_payload, opts, true)?;
+    payload.ok_or_else(|| JoseError::InvalidToken("no signature verified successfully".into()))
 }
 
 /// Verify **every** signature in a General JWS against the given verifier and
@@ -384,30 +382,38 @@ pub fn verify_general_opts(
 /// not match the verifier are reported as `verified: false` with an
 /// explanatory `error` rather than silently skipped.
 ///
-/// The returned tuple's second element is the resolved payload (so the
-/// caller does not have to base64url-decode it again). An error is returned
-/// only for whole-JWS problems (no signatures, payload resolution failure);
-/// individual signature failures are reported in the results vector.
+/// The returned tuple's second element is `Some(payload)` when **at least one**
+/// signature verified (so the caller does not have to base64url-decode it
+/// again), and `None` when no signature verified — the API never hands back
+/// payload bytes that nothing authenticated. An error is returned only for
+/// whole-JWS problems (no signatures, payload resolution failure); individual
+/// signature failures are reported in the results vector.
 pub fn verify_general_all(
     verifier: &dyn kryptering::Verifier,
     jws: &GeneralJws,
     detached_payload: Option<&[u8]>,
     opts: &VerifyOptions,
-) -> Result<(Vec<SignatureResult>, Vec<u8>)> {
+) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
     if jws.signatures.is_empty() {
         return Err(JoseError::InvalidToken("no signatures present".into()));
     }
-    verify_general_inner(verifier, jws, detached_payload, opts)
+    verify_general_inner(verifier, jws, detached_payload, opts, false)
 }
 
-/// Shared core for the General-JWS verify paths. Resolves the payload once,
-/// then attempts every signature, collecting per-entry results.
+/// Shared core for the General-JWS verify paths. Attempts each signature,
+/// collecting per-entry results, and returns the payload only if at least one
+/// signature verified (`None` otherwise).
+///
+/// When `stop_on_first_valid` is true the loop returns as soon as a signature
+/// verifies (used by `verify_general`, which needs only one valid signature);
+/// when false every signature is attempted (used by `verify_general_all`).
 fn verify_general_inner(
     verifier: &dyn kryptering::Verifier,
     jws: &GeneralJws,
     detached_payload: Option<&[u8]>,
     opts: &VerifyOptions,
-) -> Result<(Vec<SignatureResult>, Vec<u8>)> {
+    stop_on_first_valid: bool,
+) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
     if let Some(p) = &jws.payload {
         crate::jws::compact::ensure_token_size(p)?;
     }
@@ -473,21 +479,17 @@ fn verify_general_inner(
                 result.error = Some(format!("verifier error: {e}"));
             }
         }
+        let verified = result.verified;
         results.push(result);
+        if stop_on_first_valid && verified {
+            break;
+        }
     }
 
-    // If nothing verified, still resolve the payload (best-effort) so the
-    // caller gets it. Fall back to the first entry's b64 = true assumption.
-    let payload = match resolved_payload {
-        Some(p) => p,
-        None => {
-            // No signature verified — resolve the payload as base64url
-            // (b64=true) if embedded, else from detached bytes.
-            resolve_payload(jws.payload.as_deref(), detached_payload, true).unwrap_or_default()
-        }
-    };
-
-    Ok((results, payload))
+    // Return the payload only when a signature actually verified. A verification
+    // API must never hand back payload bytes that nothing authenticated, so a
+    // caller cannot accidentally consume unsigned data.
+    Ok((results, resolved_payload))
 }
 
 #[cfg(test)]
@@ -689,7 +691,26 @@ mod tests {
         assert!(results[0].verified, "entry 0 (KEY_A) should verify");
         assert!(!results[1].verified, "entry 1 (KEY_B) should not verify");
         assert!(results[1].error.is_some());
-        assert_eq!(recovered, payload);
+        assert_eq!(recovered.as_deref(), Some(&payload[..]));
+    }
+
+    /// `verify_general_all` must NOT return payload bytes when no signature
+    /// verifies, so a caller cannot accidentally consume unauthenticated data.
+    #[test]
+    fn general_all_yields_no_payload_when_nothing_verifies() {
+        let header = JoseHeader::new("HS256");
+        let signer = hmac_signer(KEY_A);
+        let signers: Vec<(&dyn kryptering::Signer, &JoseHeader)> = vec![(&signer, &header)];
+        let jws = sign_general(&signers, b"top secret").unwrap();
+
+        // Verify with the wrong key: the single signature fails.
+        let (results, payload) =
+            verify_general_all(&hmac_verifier(KEY_B), &jws, None, &VerifyOptions::new()).unwrap();
+        assert!(!results[0].verified);
+        assert!(
+            payload.is_none(),
+            "no payload may be returned when nothing verified"
+        );
     }
 
     /// Per-signature unprotected header is reported back in the results.
