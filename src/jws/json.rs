@@ -147,7 +147,6 @@ pub fn sign_flattened_opts(
     unprotected: Option<serde_json::Value>,
     opts: &SignOptions,
 ) -> Result<FlattenedJws> {
-    let detached = sign_flattened_detached_opts(signer, payload, header, unprotected, opts)?;
     // Attached form: embed the payload member.
     let payload_member = if opts.b64 {
         base64url::encode(payload)
@@ -156,10 +155,9 @@ pub fn sign_flattened_opts(
             JoseError::InvalidToken("unencoded (b64=false) payload must be valid UTF-8".into())
         })?
     };
-    Ok(FlattenedJws {
-        payload: Some(payload_member),
-        ..detached
-    })
+    let mut jws = sign_flattened_detached_opts(signer, payload, header, unprotected, opts)?;
+    jws.payload = Some(payload_member);
+    Ok(jws)
 }
 
 /// Create a **detached** Flattened JWS JSON (the `payload` member is
@@ -312,6 +310,19 @@ pub fn sign_general_full(
         ));
     }
 
+    let payload_member = if embed_payload {
+        let member = if shared_b64 {
+            base64url::encode(payload)
+        } else {
+            String::from_utf8(payload.to_vec()).map_err(|_| {
+                JoseError::InvalidToken("unencoded (b64=false) payload must be valid UTF-8".into())
+            })?
+        };
+        Some(member)
+    } else {
+        None
+    };
+
     let mut signatures = Vec::with_capacity(signers.len());
     for entry in signers {
         let b64 = validate_sign_header_opts(entry.protected, entry.signer, &entry.options)?;
@@ -325,19 +336,6 @@ pub fn sign_general_full(
             signature: base64url::encode(&sig),
         });
     }
-
-    let payload_member = if embed_payload {
-        let member = if shared_b64 {
-            base64url::encode(payload)
-        } else {
-            String::from_utf8(payload.to_vec()).map_err(|_| {
-                JoseError::InvalidToken("unencoded (b64=false) payload must be valid UTF-8".into())
-            })?
-        };
-        Some(member)
-    } else {
-        None
-    };
 
     Ok(GeneralJws {
         payload: payload_member,
@@ -518,6 +516,18 @@ mod tests {
         HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
     };
 
+    struct PanicSigner;
+
+    impl kryptering::Signer for PanicSigner {
+        fn algorithm(&self) -> SignatureAlgorithm {
+            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256)
+        }
+
+        fn sign(&self, _data: &[u8]) -> kryptering::Result<Vec<u8>> {
+            panic!("signer must not be called before payload validation")
+        }
+    }
+
     fn hmac_key(secret: &[u8]) -> SoftwareKey {
         SoftwareKey::Hmac(secret.to_vec())
     }
@@ -536,6 +546,22 @@ mod tests {
             hmac_key(secret),
         )
         .unwrap()
+    }
+
+    fn b64_false_header() -> JoseHeader {
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["b64".to_string()]);
+        header
+            .extra
+            .insert("b64".to_string(), serde_json::json!(false));
+        header
+    }
+
+    fn b64_false_options() -> SignOptions {
+        SignOptions {
+            b64: false,
+            understood_crit: Vec::new(),
+        }
     }
 
     const KEY_A: &[u8] = b"my-secret-key-at-least-32-bytes!";
@@ -630,6 +656,16 @@ mod tests {
         assert_eq!(jws.header.as_ref(), Some(&unprotected));
         // Still verifies (unprotected header is not signed).
         assert!(verify_flattened(&hmac_verifier(KEY_A), &jws).is_ok());
+    }
+
+    #[test]
+    fn flattened_attached_b64_false_non_utf8_payload_is_rejected_before_signing() {
+        let header = b64_false_header();
+        let opts = b64_false_options();
+        let err = sign_flattened_opts(&PanicSigner, &[0xff], &header, None, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("valid UTF-8"), "unexpected: {err}");
     }
 
     // -----------------------------------------------------------------------
@@ -771,6 +807,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn general_attached_b64_false_non_utf8_payload_is_rejected_before_signing() {
+        let header = b64_false_header();
+        let opts = b64_false_options();
+        let entry = GeneralSigner {
+            signer: &PanicSigner,
+            protected: &header,
+            unprotected: None,
+            options: opts,
+        };
+        let err = sign_general_full(std::slice::from_ref(&entry), &[0xff], true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("valid UTF-8"), "unexpected: {err}");
     }
 
     /// J-01 regression: Flattened verify rejects alg-header mismatch.

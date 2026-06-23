@@ -144,6 +144,14 @@ pub(crate) fn signing_input(protected_b64: &str, payload: &[u8], b64: bool) -> V
     input
 }
 
+fn signing_input_from_payload_segment(protected_b64: &str, payload_segment: &str) -> Vec<u8> {
+    let mut input = Vec::with_capacity(protected_b64.len() + 1 + payload_segment.len());
+    input.extend_from_slice(protected_b64.as_bytes());
+    input.push(b'.');
+    input.extend_from_slice(payload_segment.as_bytes());
+    input
+}
+
 pub(crate) fn ensure_token_size(token: &str) -> Result<()> {
     if token.len() > crate::MAX_TOKEN_BYTES {
         return Err(JoseError::InvalidToken(format!(
@@ -221,12 +229,9 @@ pub fn sign_with_options(
     let b64 = validate_sign_header_opts(header, signer, opts)?;
     let header_json = serde_json::to_vec(header)?;
     let header_b64 = base64url::encode(&header_json);
-    let input = signing_input(&header_b64, payload, b64);
-    let signature = signer.sign(&input).map_err(JoseError::Crypto)?;
-    let sig_b64 = base64url::encode(&signature);
-    if b64 {
-        let payload_b64 = base64url::encode(payload);
-        Ok(format!("{header_b64}.{payload_b64}.{sig_b64}"))
+
+    let payload_segment = if b64 {
+        base64url::encode(payload)
     } else {
         // RFC 7797 §5.2: an unencoded compact payload must not contain a dot.
         if payload.contains(&b'.') {
@@ -239,8 +244,13 @@ pub fn sign_with_options(
                 "unencoded (b64=false) compact payload must be valid UTF-8".into(),
             )
         })?;
-        Ok(format!("{header_b64}.{payload_str}.{sig_b64}"))
-    }
+        payload_str.to_string()
+    };
+
+    let input = signing_input_from_payload_segment(&header_b64, &payload_segment);
+    let signature = signer.sign(&input).map_err(JoseError::Crypto)?;
+    let sig_b64 = base64url::encode(&signature);
+    Ok(format!("{header_b64}.{payload_segment}.{sig_b64}"))
 }
 
 /// Validate a protected header against the verifier and the
@@ -415,6 +425,18 @@ mod tests {
         HashAlgorithm, SignatureAlgorithm, SoftwareKey, SoftwareSigner, SoftwareVerifier,
     };
 
+    struct PanicSigner;
+
+    impl kryptering::Signer for PanicSigner {
+        fn algorithm(&self) -> SignatureAlgorithm {
+            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256)
+        }
+
+        fn sign(&self, _data: &[u8]) -> kryptering::Result<Vec<u8>> {
+            panic!("signer must not be called before payload validation")
+        }
+    }
+
     fn hmac_key() -> SoftwareKey {
         SoftwareKey::Hmac(b"my-secret-key-at-least-32-bytes!".to_vec())
     }
@@ -425,6 +447,15 @@ mod tests {
 
     fn hmac_verifier() -> SoftwareVerifier {
         SoftwareVerifier::new(SignatureAlgorithm::Hmac(HashAlgorithm::Sha256), hmac_key()).unwrap()
+    }
+
+    fn b64_false_header() -> JoseHeader {
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["b64".to_string()]);
+        header
+            .extra
+            .insert("b64".to_string(), serde_json::Value::Bool(false));
+        header
     }
 
     #[test]
@@ -767,11 +798,7 @@ mod tests {
     /// RFC 7797 round-trip: sign and verify with an unencoded payload.
     #[test]
     fn b64_false_roundtrip() {
-        let mut header = JoseHeader::new("HS256");
-        header.crit = Some(vec!["b64".to_string()]);
-        header
-            .extra
-            .insert("b64".to_string(), serde_json::Value::Bool(false));
+        let header = b64_false_header();
 
         let payload = b"unencoded RFC 7797 payload";
         let opts = SignOptions {
@@ -812,11 +839,7 @@ mod tests {
     /// §5.2 — it would collide with the segment separator).
     #[test]
     fn b64_false_dotted_payload_is_rejected() {
-        let mut header = JoseHeader::new("HS256");
-        header.crit = Some(vec!["b64".to_string()]);
-        header
-            .extra
-            .insert("b64".to_string(), serde_json::Value::Bool(false));
+        let header = b64_false_header();
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
@@ -825,6 +848,32 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("must not contain"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn b64_false_dotted_payload_is_rejected_before_signing() {
+        let header = b64_false_header();
+        let opts = SignOptions {
+            b64: false,
+            understood_crit: vec![],
+        };
+        let err = sign_with_options(&PanicSigner, b"a.b", &header, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not contain"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn b64_false_non_utf8_payload_is_rejected_before_signing() {
+        let header = b64_false_header();
+        let opts = SignOptions {
+            b64: false,
+            understood_crit: vec![],
+        };
+        let err = sign_with_options(&PanicSigner, &[0xff], &header, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("valid UTF-8"), "unexpected: {err}");
     }
 
     /// A caller-supplied understood crit param (JAdES-style) is accepted.
