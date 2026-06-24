@@ -23,13 +23,21 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jws::compact::{
-    signing_input, signing_input_from_segment, validate_header_opts, validate_sign_header_opts,
+    signing_input, signing_input_from_segment, validate_header_b64_opts, validate_header_opts,
+    validate_sign_header_opts,
 };
 use crate::jws::{SignOptions, VerifyOptions};
 
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
+
+/// Maximum number of signature entries accepted in a General JWS.
+///
+/// A General JWS is attacker-controlled input on verify. Keeping this bounded
+/// prevents unbounded per-signature header parsing, result allocation, and
+/// verifier attempts while remaining well above normal multi-signature use.
+pub const MAX_GENERAL_SIGNATURES: usize = 64;
 
 /// Flattened JWS JSON Serialization (RFC 7515 Section 7.2.2).
 ///
@@ -113,6 +121,15 @@ impl PayloadSource<'_> {
             Self::Detached(payload) => Ok(payload.to_vec()),
         }
     }
+}
+
+fn ensure_general_signature_count(count: usize) -> Result<()> {
+    if count > MAX_GENERAL_SIGNATURES {
+        return Err(JoseError::InvalidToken(format!(
+            "General JWS signature count {count} exceeds MAX_GENERAL_SIGNATURES ({MAX_GENERAL_SIGNATURES})"
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_payload_for_verify<'a>(
@@ -327,6 +344,7 @@ pub fn sign_general_full(
             "at least one signer is required".into(),
         ));
     }
+    ensure_general_signature_count(signers.len())?;
 
     // Determine the shared b64 from the first entry and require agreement.
     let shared_b64 = signers[0].options.b64;
@@ -461,6 +479,8 @@ fn verify_general_inner(
     opts: &VerifyOptions,
     stop_on_first_valid: bool,
 ) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
+    ensure_general_signature_count(jws.signatures.len())?;
+
     if let Some(p) = &jws.payload {
         crate::jws::compact::ensure_token_size(p)?;
     }
@@ -469,7 +489,7 @@ fn verify_general_inner(
     for entry in &jws.signatures {
         crate::jws::compact::ensure_token_size(&entry.protected)?;
         crate::jws::compact::ensure_token_size(&entry.signature)?;
-        let Ok(b64) = validate_header_opts(&entry.protected, verifier, opts) else {
+        let Ok(b64) = validate_header_b64_opts(&entry.protected, opts) else {
             continue;
         };
         if let Some(expected) = shared_b64 {
@@ -594,29 +614,33 @@ mod tests {
         SoftwareKey::Hmac(secret.to_vec())
     }
 
+    fn hmac_signer_with_hash(secret: &[u8], hash: HashAlgorithm) -> SoftwareSigner {
+        SoftwareSigner::new(SignatureAlgorithm::Hmac(hash), hmac_key(secret)).unwrap()
+    }
+
     fn hmac_signer(secret: &[u8]) -> SoftwareSigner {
-        SoftwareSigner::new(
-            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-            hmac_key(secret),
-        )
-        .unwrap()
+        hmac_signer_with_hash(secret, HashAlgorithm::Sha256)
+    }
+
+    fn hmac_verifier_with_hash(secret: &[u8], hash: HashAlgorithm) -> SoftwareVerifier {
+        SoftwareVerifier::new(SignatureAlgorithm::Hmac(hash), hmac_key(secret)).unwrap()
     }
 
     fn hmac_verifier(secret: &[u8]) -> SoftwareVerifier {
-        SoftwareVerifier::new(
-            SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-            hmac_key(secret),
-        )
-        .unwrap()
+        hmac_verifier_with_hash(secret, HashAlgorithm::Sha256)
     }
 
-    fn b64_false_header() -> JoseHeader {
-        let mut header = JoseHeader::new("HS256");
+    fn b64_false_header_for_alg(alg: &str) -> JoseHeader {
+        let mut header = JoseHeader::new(alg);
         header.crit = Some(vec!["b64".to_string()]);
         header
             .extra
             .insert("b64".to_string(), serde_json::json!(false));
         header
+    }
+
+    fn b64_false_header() -> JoseHeader {
+        b64_false_header_for_alg("HS256")
     }
 
     fn b64_false_options() -> SignOptions {
@@ -628,6 +652,7 @@ mod tests {
 
     const KEY_A: &[u8] = b"my-secret-key-at-least-32-bytes!";
     const KEY_B: &[u8] = b"another-key-that-is-32-bytes-xx!";
+    const KEY_C: &[u8] = b"another-key-that-is-at-least-48-bytes-for-hs384!";
     const WRONG_KEY: &[u8] = b"wrong-key-that-is-also-32-bytes!";
 
     // -----------------------------------------------------------------------
@@ -1087,6 +1112,20 @@ mod tests {
     }
 
     #[test]
+    fn general_sign_rejects_too_many_signers() {
+        let signer = hmac_signer(KEY_A);
+        let header = JoseHeader::new("HS256");
+        let entries: Vec<_> = (0..=MAX_GENERAL_SIGNATURES)
+            .map(|_| GeneralSigner::new(&signer, &header))
+            .collect();
+
+        let err = sign_general_full(&entries, b"p", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature count"), "unexpected: {err}");
+    }
+
+    #[test]
     fn general_verify_rejects_mixed_b64_entries() {
         let payload = b"shared-payload";
         let signer = hmac_signer(KEY_A);
@@ -1141,5 +1180,79 @@ mod tests {
             err.contains("agree on the b64 setting"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn general_verify_rejects_mixed_b64_across_algorithms() {
+        let payload = b"shared-payload";
+        let hs256_signer = hmac_signer(KEY_A);
+        let hs384_signer = hmac_signer_with_hash(KEY_C, HashAlgorithm::Sha384);
+
+        let b64_true = sign_flattened_detached_opts(
+            &hs256_signer,
+            payload,
+            &JoseHeader::new("HS256"),
+            None,
+            &SignOptions::new(),
+        )
+        .unwrap();
+
+        let b64_false = sign_flattened_detached_opts(
+            &hs384_signer,
+            payload,
+            &b64_false_header_for_alg("HS384"),
+            None,
+            &SignOptions {
+                b64: false,
+                understood_crit: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let jws = GeneralJws {
+            payload: Some(base64url::encode(payload)),
+            signatures: vec![
+                JwsSignature {
+                    protected: b64_true.protected,
+                    header: None,
+                    signature: b64_true.signature,
+                },
+                JwsSignature {
+                    protected: b64_false.protected,
+                    header: None,
+                    signature: b64_false.signature,
+                },
+            ],
+        };
+
+        let err = verify_general(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("agree on the b64 setting"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn general_verify_rejects_too_many_signatures() {
+        let payload = b"shared-payload";
+        let signer = hmac_signer(KEY_A);
+        let flattened =
+            sign_flattened_detached(&signer, payload, &JoseHeader::new("HS256")).unwrap();
+        let signature = JwsSignature {
+            protected: flattened.protected,
+            header: None,
+            signature: flattened.signature,
+        };
+        let jws = GeneralJws {
+            payload: Some(base64url::encode(payload)),
+            signatures: vec![signature; MAX_GENERAL_SIGNATURES + 1],
+        };
+
+        let err = verify_general(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature count"), "unexpected: {err}");
     }
 }

@@ -24,7 +24,7 @@ pub struct Validation {
     /// protected header's `typ` field must equal this string.
     pub required_typ: Option<String>,
     /// Maximum acceptable age (seconds) between the `iat` claim and now.
-    /// If set and `iat` is present, tokens older than this are rejected.
+    /// If set, `iat` is required and tokens older than this are rejected.
     pub max_age: Option<u64>,
     /// Allow-list of JwsAlgorithm values. If non-empty, the token's
     /// header `alg` must map to one of these. Empty means no restriction
@@ -45,6 +45,11 @@ pub struct Validation {
     pub require_exp: bool,
     /// Whether to reject tokens that carry no `nbf` claim (default: false).
     pub require_nbf: bool,
+    /// Whether to reject tokens that carry no `iat` claim (default: false).
+    ///
+    /// `with_max_age` enables this automatically because a max-age policy
+    /// cannot be evaluated without an issued-at timestamp.
+    pub require_iat: bool,
 }
 
 impl Default for Validation {
@@ -62,6 +67,7 @@ impl Default for Validation {
             validate_iat_not_future: true,
             require_exp: false,
             require_nbf: false,
+            require_iat: false,
         }
     }
 }
@@ -101,10 +107,11 @@ impl Validation {
         self
     }
 
-    /// Reject tokens older than `seconds` when `iat` is present.
+    /// Reject tokens older than `seconds` and require the `iat` claim.
     /// Bounds replay windows on long-lived tokens.
     pub fn with_max_age(mut self, seconds: u64) -> Self {
         self.max_age = Some(seconds);
+        self.require_iat = true;
         self
     }
 
@@ -118,6 +125,12 @@ impl Validation {
     /// Require the `nbf` claim to be present.
     pub fn require_nbf(mut self) -> Self {
         self.require_nbf = true;
+        self
+    }
+
+    /// Require the `iat` claim to be present.
+    pub fn require_iat(mut self) -> Self {
+        self.require_iat = true;
         self
     }
 
@@ -186,6 +199,11 @@ impl Validation {
         if self.require_nbf && claims.nbf.is_none() {
             return Err(JoseError::InvalidClaims(
                 "missing required nbf claim".into(),
+            ));
+        }
+        if (self.require_iat || self.max_age.is_some()) && claims.iat.is_none() {
+            return Err(JoseError::InvalidClaims(
+                "missing required iat claim".into(),
             ));
         }
 
@@ -354,6 +372,17 @@ mod tests {
         validation.validate(&claims).unwrap();
     }
 
+    /// max_age cannot be evaluated without iat, so missing iat is rejected.
+    #[test]
+    fn max_age_rejects_missing_iat() {
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+
+        let validation = Validation::new().with_max_age(60);
+        let err = validation.validate(&claims).unwrap_err().to_string();
+        assert!(err.contains("missing required iat"), "unexpected: {err}");
+    }
+
     /// Phase 5: iat in the future (beyond leeway) is rejected.
     #[test]
     fn iat_in_future_rejected() {
@@ -417,6 +446,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing required nbf"), "unexpected: {err}");
+    }
+
+    /// require_iat rejects a token that omits `iat`.
+    #[test]
+    fn require_iat_rejects_missing_iat() {
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let err = Validation::new()
+            .require_iat()
+            .validate(&claims)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing required iat"), "unexpected: {err}");
+    }
+
+    /// require_iat accepts a token that carries a non-future `iat`.
+    #[test]
+    fn require_iat_accepts_present_iat() {
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        claims.iat = Some(now());
+        Validation::new().require_iat().validate(&claims).unwrap();
     }
 
     /// Default validation still accepts a token with no exp (back-compat).

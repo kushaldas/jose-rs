@@ -116,6 +116,13 @@ fn jwk_to_jwe_key_bytes(
 ) -> Result<Vec<u8>> {
     match alg {
         JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
+            if jwk.kty.as_str() != "oct" {
+                return Err(JoseError::Key(format!(
+                    "JWE alg {} requires kty oct, got {}",
+                    alg.as_str(),
+                    jwk.kty.as_str()
+                )));
+            }
             let k = jwk
                 .k
                 .as_deref()
@@ -1488,6 +1495,22 @@ mod tests {
         let token = encrypt_with_jwk(&jwk, plaintext, JweEncryption::A128GCM).unwrap();
         let recovered = decrypt_with_jwk(&jwk, &token).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    /// JWE symmetric one-shot APIs must not accept non-oct JWKs just because
+    /// they carry a stray `k` parameter.
+    #[test]
+    fn jwk_symmetric_alg_rejects_non_oct_kty() {
+        for alg in ["dir", "A256KW"] {
+            let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+            jwk.kty = "RSA".into();
+            jwk.alg = Some(alg.into());
+
+            let err = encrypt_with_jwk(&jwk, b"p", JweEncryption::A256GCM)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("requires kty oct"), "unexpected: {err}");
+        }
     }
 
     /// Phase 9: encrypt_with_jwk + decrypt_with_jwk roundtrip, RSA-OAEP-256.
