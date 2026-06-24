@@ -15,6 +15,8 @@
 //!   [`crate::jws::SignOptions`] / [`crate::jws::VerifyOptions`] carried
 //!   from `jws::compact`.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::base64url;
@@ -93,14 +95,31 @@ pub struct SignatureResult {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the effective payload bytes for a verify operation: the embedded
-/// member if present, otherwise the caller-supplied detached payload. It is
-/// an error for both or neither to be present.
-fn resolve_payload<'a>(
+enum PayloadSource<'a> {
+    Embedded(&'a str),
+    Detached(&'a [u8]),
+}
+
+impl PayloadSource<'_> {
+    fn decode(&self, b64: bool) -> Result<Vec<u8>> {
+        match self {
+            Self::Embedded(payload) => {
+                if b64 {
+                    base64url::decode(payload)
+                } else {
+                    Ok(payload.as_bytes().to_vec())
+                }
+            }
+            Self::Detached(payload) => Ok(payload.to_vec()),
+        }
+    }
+}
+
+fn resolve_payload_for_verify<'a>(
     embedded: Option<&'a str>,
     detached: Option<&'a [u8]>,
     b64: bool,
-) -> Result<Vec<u8>> {
+) -> Result<(Cow<'a, [u8]>, PayloadSource<'a>)> {
     match (embedded, detached) {
         (Some(_), Some(_)) => Err(JoseError::InvalidToken(
             "both an embedded and a detached payload were supplied".into(),
@@ -108,14 +127,18 @@ fn resolve_payload<'a>(
         (None, None) => Err(JoseError::InvalidToken(
             "JWS has no payload member and no detached payload was supplied".into(),
         )),
-        (Some(p), None) => {
-            if b64 {
-                base64url::decode(p)
+        (Some(payload), None) => Ok((
+            Cow::Borrowed(payload.as_bytes()),
+            PayloadSource::Embedded(payload),
+        )),
+        (None, Some(payload)) => {
+            let segment = if b64 {
+                Cow::Owned(base64url::encode(payload).into_bytes())
             } else {
-                Ok(p.as_bytes().to_vec())
-            }
+                Cow::Borrowed(payload)
+            };
+            Ok((segment, PayloadSource::Detached(payload)))
         }
-        (None, Some(d)) => Ok(d.to_vec()),
     }
 }
 
@@ -232,8 +255,9 @@ pub fn verify_flattened_opts(
         crate::jws::compact::ensure_token_size(p)?;
     }
     let b64 = validate_header_opts(&jws.protected, verifier, opts)?;
-    let payload = resolve_payload(jws.payload.as_deref(), detached_payload, b64)?;
-    let input = signing_input(&jws.protected, &payload, b64);
+    let (payload_segment, payload_source) =
+        resolve_payload_for_verify(jws.payload.as_deref(), detached_payload, b64)?;
+    let input = signing_input_from_segment(&jws.protected, payload_segment.as_ref());
     let sig = base64url::decode(&jws.signature)?;
     let valid = verifier.verify(&input, &sig).map_err(JoseError::Crypto)?;
     if !valid {
@@ -241,7 +265,7 @@ pub fn verify_flattened_opts(
             "signature verification failed".into(),
         ));
     }
-    Ok(payload)
+    payload_source.decode(b64)
 }
 
 // ---------------------------------------------------------------------------
@@ -459,30 +483,17 @@ fn verify_general_inner(
         }
     }
 
-    // All entries that pass header validation agree on `b64` (enforced
-    // above) and the payload member is shared, so resolve the effective
-    // payload exactly once instead of decoding/reallocating it per signature
-    // (which would be O(n * payload_size) for an n-signature JWS). When no
-    // entry validated (`shared_b64` is `None`) nothing signs over the payload,
-    // so there is nothing to resolve. A payload-resolution problem is fatal
-    // for the whole JWS, mirroring the previous per-entry behaviour.
+    // All entries that pass header validation agree on `b64` (enforced above)
+    // and the payload member is shared, so prepare the signing-input segment
+    // exactly once. Embedded payloads reuse the transmitted segment verbatim;
+    // payload bytes are decoded only after at least one signature verifies.
     let shared_payload = match shared_b64 {
-        Some(b64) => Some(resolve_payload(
+        Some(b64) => Some(resolve_payload_for_verify(
             jws.payload.as_deref(),
             detached_payload,
             b64,
         )?),
         None => None,
-    };
-
-    // Encode the signing-input payload segment once as well: `signing_input`
-    // base64url-encodes the payload on every call when `b64=true`, so building
-    // it per signature would still be O(n * payload_size). The segment is the
-    // base64url text for `b64=true` and the raw payload bytes for `b64=false`.
-    let shared_segment: Option<Vec<u8>> = match (shared_b64, &shared_payload) {
-        (Some(true), Some(p)) => Some(base64url::encode(p).into_bytes()),
-        (Some(false), Some(p)) => Some(p.clone()),
-        _ => None,
     };
 
     let mut results = Vec::with_capacity(jws.signatures.len());
@@ -513,8 +524,9 @@ fn verify_general_inner(
         // A validated entry implies `shared_b64` (and therefore the shared
         // payload segment) was resolved above; the per-entry `b64` equals
         // `shared_b64`, so the precomputed segment applies to every entry.
-        let segment = shared_segment
-            .as_deref()
+        let segment = shared_payload
+            .as_ref()
+            .map(|(segment, _)| segment.as_ref())
             .expect("a validated signature entry implies the shared payload segment was resolved");
 
         let input = signing_input_from_segment(&entry.protected, segment);
@@ -548,7 +560,14 @@ fn verify_general_inner(
     // Return the payload only when a signature actually verified. A verification
     // API must never hand back payload bytes that nothing authenticated, so a
     // caller cannot accidentally consume unsigned data.
-    let resolved_payload = if any_verified { shared_payload } else { None };
+    let resolved_payload = if any_verified {
+        match (shared_b64, shared_payload) {
+            (Some(b64), Some((_, payload_source))) => Some(payload_source.decode(b64)?),
+            _ => None,
+        }
+    } else {
+        None
+    };
     Ok((results, resolved_payload))
 }
 
@@ -648,6 +667,28 @@ mod tests {
         let jws = sign_flattened(&hmac_signer(KEY_A), payload, &header).unwrap();
         let result = verify_flattened(&hmac_verifier(WRONG_KEY), &jws);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn flattened_bad_embedded_payload_is_not_decoded_before_verify() {
+        let header = JoseHeader::new("HS256");
+        let protected = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload = "not valid base64url!".to_string();
+        let sig = base64url::encode(b"bad-signature");
+        let jws = FlattenedJws {
+            payload: Some(payload),
+            protected,
+            header: None,
+            signature: sig,
+        };
+
+        let err = verify_flattened(&hmac_verifier(KEY_A), &jws)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("signature verification failed"),
+            "unexpected: {err}"
+        );
     }
 
     /// Detached flattened: payload member omitted, supplied at verify time.
@@ -808,6 +849,30 @@ mod tests {
         assert!(
             payload.is_none(),
             "no payload may be returned when nothing verified"
+        );
+    }
+
+    #[test]
+    fn general_bad_embedded_payload_is_not_decoded_without_verified_signature() {
+        let header = JoseHeader::new("HS256");
+        let protected = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let jws = GeneralJws {
+            payload: Some("not valid base64url!".to_string()),
+            signatures: vec![JwsSignature {
+                protected,
+                header: None,
+                signature: base64url::encode(b"bad-signature"),
+            }],
+        };
+
+        let (results, payload) =
+            verify_general_all(&hmac_verifier(KEY_A), &jws, None, &VerifyOptions::new()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].verified);
+        assert!(payload.is_none());
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("signature verification failed")
         );
     }
 

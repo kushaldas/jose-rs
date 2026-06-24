@@ -109,14 +109,33 @@ fn validate_crit(header: &JoseHeader, understood_extra: &[String]) -> Result<boo
             )));
         }
         // RFC 7515 §4.1.11: a parameter named in `crit` MUST be present in the
-        // header. Caller extensions (e.g. JAdES `etsiU`) live in `extra`.
-        if !header.extra.contains_key(param.as_str()) {
+        // header. Registered parameters live in typed fields; caller
+        // extensions (e.g. JAdES `etsiU`) live in `extra`.
+        if !header_has_param(header, param) {
             return Err(JoseError::InvalidHeader(format!(
                 "crit names {param} but it is absent from the protected header (RFC 7515 §4.1.11)"
             )));
         }
     }
     Ok(saw_b64)
+}
+
+fn header_has_param(header: &JoseHeader, param: &str) -> bool {
+    match param {
+        "alg" => true,
+        "enc" => header.enc.is_some(),
+        "kid" => header.kid.is_some(),
+        "typ" => header.typ.is_some(),
+        "cty" => header.cty.is_some(),
+        "jku" => header.jku.is_some(),
+        "jwk" => header.jwk.is_some(),
+        "x5u" => header.x5u.is_some(),
+        "x5c" => header.x5c.is_some(),
+        "x5t" => header.x5t.is_some(),
+        "x5t#S256" => header.x5t_s256.is_some(),
+        "crit" => header.crit.is_some(),
+        _ => header.extra.contains_key(param),
+    }
 }
 
 /// Read the RFC 7797 `b64` header param (default `true`) from the protected
@@ -1010,6 +1029,25 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("crit"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn caller_understood_registered_crit_param_is_accepted() {
+        let mut header = JoseHeader::new("HS256");
+        header.kid = Some("key-1".to_string());
+        header.crit = Some(vec!["kid".to_string()]);
+
+        let opts = SignOptions {
+            b64: true,
+            understood_crit: vec!["kid".to_string()],
+        };
+        let token = sign_with_options(&hmac_signer(), b"p", &header, &opts).unwrap();
+        let vopts = VerifyOptions {
+            understood_crit: vec!["kid".to_string()],
+        };
+
+        let recovered = verify_with_options(&hmac_verifier(), &token, &vopts).unwrap();
+        assert_eq!(recovered, b"p");
     }
 
     /// ML-DSA sign/verify round-trip via the JWK API.
