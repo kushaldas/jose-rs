@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
-use crate::jws::compact::{signing_input, validate_header_opts, validate_sign_header_opts};
+use crate::jws::compact::{
+    signing_input, signing_input_from_segment, validate_header_opts, validate_sign_header_opts,
+};
 use crate::jws::{SignOptions, VerifyOptions};
 
 // ---------------------------------------------------------------------------
@@ -310,13 +312,32 @@ pub fn sign_general_full(
         ));
     }
 
+    // All signers agree on `b64` (enforced above) and sign over the same
+    // payload, so encode the shared payload segment exactly once and reuse it
+    // for every signing input — avoids the O(n * payload_size) cost of
+    // re-encoding inside `signing_input` per signer. The base64url text (when
+    // `b64=true`) doubles as the embedded `payload` member.
+    let encoded_payload = if shared_b64 {
+        Some(base64url::encode(payload))
+    } else {
+        None
+    };
+    // The bytes appended after the protected header in every signing input:
+    // base64url text for `b64=true`, raw payload bytes for `b64=false`.
+    let payload_segment: &[u8] = match &encoded_payload {
+        Some(encoded) => encoded.as_bytes(),
+        None => payload,
+    };
+
+    // For the attached form, validate up front that the payload can be embedded
+    // (b64=false requires UTF-8) so an invalid payload is rejected before any
+    // (possibly HSM-backed) signing runs.
     let payload_member = if embed_payload {
-        let member = if shared_b64 {
-            base64url::encode(payload)
-        } else {
-            String::from_utf8(payload.to_vec()).map_err(|_| {
+        let member = match &encoded_payload {
+            Some(encoded) => encoded.clone(),
+            None => String::from_utf8(payload.to_vec()).map_err(|_| {
                 JoseError::InvalidToken("unencoded (b64=false) payload must be valid UTF-8".into())
-            })?
+            })?,
         };
         Some(member)
     } else {
@@ -325,10 +346,13 @@ pub fn sign_general_full(
 
     let mut signatures = Vec::with_capacity(signers.len());
     for entry in signers {
-        let b64 = validate_sign_header_opts(entry.protected, entry.signer, &entry.options)?;
+        // Re-validates each header's alg/crit binding; the returned b64 equals
+        // `shared_b64` (agreement enforced above), so the precomputed segment
+        // applies to every entry.
+        validate_sign_header_opts(entry.protected, entry.signer, &entry.options)?;
         let header_json = serde_json::to_vec(entry.protected)?;
         let protected_b64 = base64url::encode(&header_json);
-        let input = signing_input(&protected_b64, payload, b64);
+        let input = signing_input_from_segment(&protected_b64, payload_segment);
         let sig = entry.signer.sign(&input).map_err(JoseError::Crypto)?;
         signatures.push(JwsSignature {
             protected: protected_b64,
@@ -451,6 +475,16 @@ fn verify_general_inner(
         None => None,
     };
 
+    // Encode the signing-input payload segment once as well: `signing_input`
+    // base64url-encodes the payload on every call when `b64=true`, so building
+    // it per signature would still be O(n * payload_size). The segment is the
+    // base64url text for `b64=true` and the raw payload bytes for `b64=false`.
+    let shared_segment: Option<Vec<u8>> = match (shared_b64, &shared_payload) {
+        (Some(true), Some(p)) => Some(base64url::encode(p).into_bytes()),
+        (Some(false), Some(p)) => Some(p.clone()),
+        _ => None,
+    };
+
     let mut results = Vec::with_capacity(jws.signatures.len());
     let mut any_verified = false;
 
@@ -470,22 +504,20 @@ fn verify_general_inner(
             }
         }
 
-        let b64 = match validate_header_opts(&entry.protected, verifier, opts) {
-            Ok(b) => b,
-            Err(e) => {
-                result.error = Some(e.to_string());
-                results.push(result);
-                continue;
-            }
-        };
+        if let Err(e) = validate_header_opts(&entry.protected, verifier, opts) {
+            result.error = Some(e.to_string());
+            results.push(result);
+            continue;
+        }
 
         // A validated entry implies `shared_b64` (and therefore the shared
-        // payload) was resolved above; the per-entry `b64` equals `shared_b64`.
-        let payload = shared_payload
+        // payload segment) was resolved above; the per-entry `b64` equals
+        // `shared_b64`, so the precomputed segment applies to every entry.
+        let segment = shared_segment
             .as_deref()
-            .expect("a validated signature entry implies the shared payload was resolved");
+            .expect("a validated signature entry implies the shared payload segment was resolved");
 
-        let input = signing_input(&entry.protected, payload, b64);
+        let input = signing_input_from_segment(&entry.protected, segment);
         let sig = match base64url::decode(&entry.signature) {
             Ok(s) => s,
             Err(e) => {

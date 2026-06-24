@@ -156,11 +156,15 @@ pub(crate) fn signing_input(protected_b64: &str, payload: &[u8], b64: bool) -> V
     input
 }
 
-fn signing_input_from_payload_segment(protected_b64: &str, payload_segment: &str) -> Vec<u8> {
+/// Build a signing input from an already-prepared payload segment (base64url
+/// text for `b64=true`, raw payload bytes for `b64=false`). Lets multi-signer
+/// callers encode the shared payload once and reuse the segment for every
+/// signature instead of re-encoding it per entry.
+pub(crate) fn signing_input_from_segment(protected_b64: &str, payload_segment: &[u8]) -> Vec<u8> {
     let mut input = Vec::with_capacity(protected_b64.len() + 1 + payload_segment.len());
     input.extend_from_slice(protected_b64.as_bytes());
     input.push(b'.');
-    input.extend_from_slice(payload_segment.as_bytes());
+    input.extend_from_slice(payload_segment);
     input
 }
 
@@ -259,7 +263,7 @@ pub fn sign_with_options(
         payload_str.to_string()
     };
 
-    let input = signing_input_from_payload_segment(&header_b64, &payload_segment);
+    let input = signing_input_from_segment(&header_b64, payload_segment.as_bytes());
     let signature = signer.sign(&input).map_err(JoseError::Crypto)?;
     let sig_b64 = base64url::encode(&signature);
     Ok(format!("{header_b64}.{payload_segment}.{sig_b64}"))
