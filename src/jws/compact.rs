@@ -74,14 +74,19 @@ impl VerifyOptions {
     }
 }
 
-/// Validate a `crit` list against the union of the library's understood
-/// params and the caller-supplied understood set (RFC 7515 §4.1.11).
+/// Validate the protected header's `crit` list against the union of the
+/// library's understood params and the caller-supplied understood set
+/// (RFC 7515 §4.1.11).
 ///
 /// An empty `crit` array is itself a protocol violation (RFC 7515 says
 /// `crit` MUST NOT be empty when present). Any entry not understood is
-/// rejected. Returns whether `b64` appeared in `crit`.
-fn validate_crit(crit: Option<&Vec<String>>, understood_extra: &[String]) -> Result<bool> {
-    let Some(crit) = crit else {
+/// rejected, and any entry that is not actually present in the header is
+/// rejected too — §4.1.11 requires every parameter named in `crit` to be
+/// present. (`b64`'s presence is enforced separately in [`resolve_b64`],
+/// which knows the param's default semantics, so it is exempt here.)
+/// Returns whether `b64` appeared in `crit`.
+fn validate_crit(header: &JoseHeader, understood_extra: &[String]) -> Result<bool> {
+    let Some(crit) = header.crit.as_ref() else {
         return Ok(false);
     };
     if crit.is_empty() {
@@ -93,12 +98,21 @@ fn validate_crit(crit: Option<&Vec<String>>, understood_extra: &[String]) -> Res
     for param in crit {
         if param == "b64" {
             saw_b64 = true;
+            // Presence of the b64 param itself is checked in resolve_b64.
+            continue;
         }
         let understood = LIB_UNDERSTOOD_CRIT.contains(&param.as_str())
             || understood_extra.iter().any(|u| u == param);
         if !understood {
             return Err(JoseError::InvalidHeader(format!(
                 "unsupported crit extension: {param}"
+            )));
+        }
+        // RFC 7515 §4.1.11: a parameter named in `crit` MUST be present in the
+        // header. Caller extensions (e.g. JAdES `etsiU`) live in `extra`.
+        if !header.extra.contains_key(param.as_str()) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit names {param} but it is absent from the protected header (RFC 7515 §4.1.11)"
             )));
         }
     }
@@ -187,7 +201,7 @@ pub(crate) fn validate_sign_header_opts(
     signer: &dyn kryptering::Signer,
     opts: &SignOptions,
 ) -> Result<bool> {
-    let crit_listed_b64 = validate_crit(header.crit.as_ref(), &opts.understood_crit)?;
+    let crit_listed_b64 = validate_crit(header, &opts.understood_crit)?;
     if header.alg == "none" {
         return Err(JoseError::InvalidHeader(
             "alg=\"none\" is not permitted".into(),
@@ -280,8 +294,9 @@ pub(crate) fn validate_header_opts(
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
-    // RFC 7515 §4.1.11: reject crit params we do not understand.
-    let crit_listed_b64 = validate_crit(header.crit.as_ref(), &opts.understood_crit)?;
+    // RFC 7515 §4.1.11: reject crit params we do not understand or that are
+    // named in `crit` but absent from the header.
+    let crit_listed_b64 = validate_crit(&header, &opts.understood_crit)?;
 
     // Reject alg="none" at the parse layer — never reach the verifier.
     if header.alg == "none" {
@@ -330,12 +345,12 @@ pub fn verify_with_options(
         ));
     }
     let b64 = validate_header_opts(parts[0], verifier, opts)?;
-    let payload = if b64 {
-        base64url::decode(parts[1])?
-    } else {
-        parts[1].as_bytes().to_vec()
-    };
-    let input = signing_input(parts[0], &payload, b64);
+    // The signing input is `ASCII(protected) || '.' || payload-segment`, where
+    // the payload segment is exactly the transmitted second compact part
+    // (base64url text for b64=true, raw bytes for b64=false). Reuse it
+    // verbatim instead of decoding then re-encoding the payload, which would
+    // add an avoidable O(payload_size) decode+encode on every verification.
+    let input = signing_input_from_segment(parts[0], parts[1].as_bytes());
     let signature = base64url::decode(parts[2])?;
     let valid = verifier
         .verify(&input, &signature)
@@ -345,6 +360,13 @@ pub fn verify_with_options(
             "signature verification failed".into(),
         ));
     }
+    // Decode the payload only after the signature verifies; still rejects an
+    // invalid-base64url payload (for an authenticated token) per spec.
+    let payload = if b64 {
+        base64url::decode(parts[1])?
+    } else {
+        parts[1].as_bytes().to_vec()
+    };
     Ok(payload)
 }
 
@@ -878,6 +900,50 @@ mod tests {
         let token = format!("{signing_input}.{}", base64url::encode(&sig));
         let err = verify(&hmac_verifier(), &token).unwrap_err().to_string();
         assert!(err.contains("no b64 header param"), "unexpected: {err}");
+    }
+
+    /// RFC 7515 §4.1.11: a `crit`-listed extension that is absent from the
+    /// header is rejected on the sign side (even when declared understood).
+    #[test]
+    fn crit_lists_absent_extension_is_rejected_on_sign() {
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["etsiU".to_string()]);
+        // etsiU is declared understood but never added to the header.
+        let opts = SignOptions {
+            b64: true,
+            understood_crit: vec!["etsiU".to_string()],
+        };
+        let err = sign_with_options(&PanicSigner, b"p", &header, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("absent from the protected header"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The verify side likewise rejects a `crit`-listed extension that is
+    /// absent from the header.
+    #[test]
+    fn crit_lists_absent_extension_is_rejected_on_verify() {
+        use kryptering::Signer;
+        let mut header = JoseHeader::new("HS256");
+        header.crit = Some(vec!["etsiU".to_string()]);
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64url::encode(b"p");
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_signer().sign(signing_input.as_bytes()).unwrap();
+        let token = format!("{signing_input}.{}", base64url::encode(&sig));
+        let vopts = VerifyOptions {
+            understood_crit: vec!["etsiU".to_string()],
+        };
+        let err = verify_with_options(&hmac_verifier(), &token, &vopts)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("absent from the protected header"),
+            "unexpected: {err}"
+        );
     }
 
     /// An unencoded compact payload containing a dot is rejected (RFC 7797
