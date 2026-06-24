@@ -336,6 +336,28 @@ pub(crate) fn validate_header_opts(
     resolve_b64(&header, crit_listed_b64)
 }
 
+/// Validate a protected header for whole-JWS policy without binding it to a
+/// particular verifier. General JWS payload encoding is shared by every
+/// signature, so `b64` agreement must be checked before per-verifier algorithm
+/// filtering hides otherwise valid signature entries.
+pub(crate) fn validate_header_b64_opts(header_b64: &str, opts: &VerifyOptions) -> Result<bool> {
+    let header_json = base64url::decode(header_b64)?;
+    let header: JoseHeader = serde_json::from_slice(&header_json)?;
+
+    let crit_listed_b64 = validate_crit(&header, &opts.understood_crit)?;
+
+    if header.alg == "none" {
+        return Err(JoseError::InvalidToken(
+            "alg=\"none\" is not permitted".into(),
+        ));
+    }
+
+    let header_alg = JwsAlgorithm::from_str(&header.alg)?;
+    header_alg.to_crypto()?;
+
+    resolve_b64(&header, crit_listed_b64)
+}
+
 /// Verify a JWS Compact Serialization string.
 ///
 /// Returns the decoded payload on success. The token's `alg` header is

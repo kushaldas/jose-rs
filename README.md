@@ -188,7 +188,8 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   different algorithm than the one actually used.
 - **JWT Best Current Practices (RFC 8725).** `Validation` supports
   pinning the `typ` header (`with_typ`), capping token age via `iat`
-  (`with_max_age`), rejecting future-dated `iat` by default, and
+  (`with_max_age`, which requires `iat`), rejecting future-dated `iat`
+  by default, and
   restricting the accepted signing algorithms independently of the
   verifier (`with_allowed_algorithms`). These close the JWT-context
   confusion and replay-window gaps that fall outside JWS-layer

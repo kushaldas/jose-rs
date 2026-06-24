@@ -17,6 +17,7 @@ use p521::elliptic_curve::sec1::ToEncodedPoint;
 use pkcs8::der::Decode;
 use pkcs8::spki::{DecodePublicKey, SubjectPublicKeyInfoRef};
 use pkcs8::{DecodePrivateKey, ObjectIdentifier, PrivateKeyInfo};
+use rsa::traits::PublicKeyParts;
 
 use crate::error::{JoseError, Result};
 use crate::jwk::convert::software_key_to_jwk;
@@ -37,6 +38,17 @@ const OID_ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112"
 const OID_P256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_P384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
 const OID_P521: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.35");
+
+fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
+    if key.n().bits() < crate::MIN_RSA_BITS {
+        return Err(JoseError::Key(format!(
+            "RSA key size {} bits is below the required minimum of {}",
+            key.n().bits(),
+            crate::MIN_RSA_BITS
+        )));
+    }
+    Ok(())
+}
 
 /// Import a PKCS#8 DER-encoded private key into a [`Jwk`].
 ///
@@ -69,6 +81,7 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
                 .map_err(|e| JoseError::Key(format!("invalid RSA-PSS PKCS#8 key: {e}")))?
         };
         let public = key.to_public_key();
+        ensure_rsa_min_bits(&public)?;
         kryptering::SoftwareKey::Rsa {
             private: Some(key),
             public,
@@ -126,6 +139,7 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
             rsa::RsaPublicKey::from_pkcs1_der(inner)
                 .map_err(|e| JoseError::Key(format!("invalid RSA-PSS SPKI key: {e}")))?
         };
+        ensure_rsa_min_bits(&key)?;
         kryptering::SoftwareKey::Rsa {
             private: None,
             public: key,
@@ -264,6 +278,30 @@ mod tests {
         der_roundtrip("RS256", priv_der.as_bytes(), pub_der.as_bytes());
         der_roundtrip("PS256", priv_der.as_bytes(), pub_der.as_bytes());
         der_roundtrip("PS512", priv_der.as_bytes(), pub_der.as_bytes());
+    }
+
+    #[test]
+    fn rsa_der_import_rejects_sub_2048_bits() {
+        let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap();
+        let pk = sk.to_public_key();
+        let priv_der = sk.to_pkcs8_der().unwrap();
+        let pub_der = pk.to_public_key_der().unwrap();
+
+        let err = jwk_from_pkcs8_der(priv_der.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("below the required minimum"),
+            "unexpected: {err}"
+        );
+
+        let err = jwk_from_spki_der(pub_der.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("below the required minimum"),
+            "unexpected: {err}"
+        );
     }
 
     /// RSASSA-PSS-wrapped keys (OID 1.2.840.113549.1.1.10) import as RSA and
