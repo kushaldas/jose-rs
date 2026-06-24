@@ -2,6 +2,7 @@
 
 pub mod convert;
 pub mod generate;
+pub mod import;
 pub mod thumbprint;
 
 pub use convert::{jwk_to_software_key, software_key_to_jwk};
@@ -11,6 +12,7 @@ pub use generate::{
     generate_direct_symmetric, generate_ec, generate_ed25519, generate_rsa, generate_symmetric,
     generate_symmetric_for_alg,
 };
+pub use import::{jwk_from_pkcs8_der, jwk_from_spki_der};
 
 // Re-export JwkOp at the crate root pattern.
 
