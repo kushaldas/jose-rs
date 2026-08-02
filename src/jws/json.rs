@@ -611,7 +611,7 @@ mod tests {
     }
 
     fn hmac_key(secret: &[u8]) -> SoftwareKey {
-        SoftwareKey::Hmac(secret.to_vec())
+        SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, secret).unwrap()
     }
 
     fn hmac_signer_with_hash(secret: &[u8], hash: HashAlgorithm) -> SoftwareSigner {

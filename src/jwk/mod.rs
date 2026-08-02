@@ -7,7 +7,7 @@ pub mod thumbprint;
 
 pub use convert::{jwk_to_software_key, software_key_to_jwk};
 #[cfg(feature = "post-quantum")]
-pub use generate::generate_mldsa;
+pub use generate::{generate_composite_mldsa, generate_mldsa};
 pub use generate::{
     generate_direct_symmetric, generate_ec, generate_ed25519, generate_rsa, generate_symmetric,
     generate_symmetric_for_alg,

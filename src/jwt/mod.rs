@@ -266,8 +266,12 @@ mod tests {
             .as_secs()
     }
 
+    fn hmac_key_from(bytes: &[u8]) -> SoftwareKey {
+        SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, bytes).unwrap()
+    }
+
     fn hmac_key() -> SoftwareKey {
-        SoftwareKey::Hmac(b"super-secret-key-at-least-32-bytes!!".to_vec())
+        hmac_key_from(b"super-secret-key-at-least-32-bytes!!")
     }
 
     fn hmac_algo() -> SignatureAlgorithm {
@@ -607,7 +611,7 @@ mod tests {
         .unwrap();
 
         // Different HMAC key for verification
-        let wrong_key = SoftwareKey::Hmac(b"wrong-key-that-is-at-least-32-bytes!!".to_vec());
+        let wrong_key = hmac_key_from(b"wrong-key-that-is-at-least-32-bytes!!");
         let wrong_verifier = SoftwareVerifier::new(hmac_algo(), wrong_key).unwrap();
 
         let validation = Validation::new();
@@ -781,7 +785,7 @@ mod tests {
         jwk.use_ = Some("enc".into());
 
         let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
-        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
@@ -806,7 +810,7 @@ mod tests {
 
         // Sign with jwk_b.
         let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
-        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k_b)).unwrap();
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("b".into()); // kid points at jwk_b
         let mut claims = Claims::default();
@@ -831,7 +835,7 @@ mod tests {
 
         // Token signed with jwk_b, header has no kid.
         let k_b = crate::base64url::decode(jwk_b.k.as_ref().unwrap()).unwrap();
-        let signer = SoftwareSigner::new(hmac_algo(), SoftwareKey::Hmac(k_b)).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k_b)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.exp = Some(now() + 3600);
@@ -851,7 +855,7 @@ mod tests {
         jwk_a.alg = Some("HS256".into());
 
         // Sign with a completely different key.
-        let other = SoftwareKey::Hmac(b"completely-different-32-byte-key".to_vec());
+        let other = hmac_key_from(b"completely-different-32-byte-key");
         let signer = SoftwareSigner::new(hmac_algo(), other).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();

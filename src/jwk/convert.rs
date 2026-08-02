@@ -3,6 +3,7 @@
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::jwk::Jwk;
+use p521::elliptic_curve::sec1::ToEncodedPoint;
 
 /// Convert a JWK to a kryptering SoftwareKey.
 ///
@@ -43,8 +44,11 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         "ES256" | "ES384" | "ES512" | "ES256K" => &["EC"],
         // EdDSA.
         "EdDSA" => &["OKP"],
-        // Post-quantum ML-DSA (draft-ietf-cose-dilithium).
-        "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" => &["AKP"],
+        // Post-quantum ML-DSA and composite ML-DSA.
+        "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" | "ML-DSA-44-ES256" | "ML-DSA-65-ES256"
+        | "ML-DSA-87-ES384" | "ML-DSA-44-Ed25519" | "ML-DSA-65-Ed25519" | "ML-DSA-87-Ed448" => {
+            &["AKP"]
+        }
         // JWE key wrap, direct, PBES2 — all symmetric.
         "A128KW" | "A192KW" | "A256KW" | "dir" | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW"
         | "PBES2-HS512+A256KW" => &["oct"],
@@ -96,28 +100,124 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
 
 /// Convert a kryptering SoftwareKey to a JWK.
 pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
-    match key {
-        kryptering::SoftwareKey::Rsa { private, public } => rsa_to_jwk(private.as_ref(), public),
-        kryptering::SoftwareKey::EcP256 { private, public } => {
-            ec_p256_to_jwk(private.as_ref(), public)
+    use kryptering::KeyAlgorithm;
+    use pkcs8::spki::DecodePublicKey;
+    use pkcs8::DecodePrivateKey;
+
+    match key.algorithm() {
+        KeyAlgorithm::Rsa => {
+            let public_der = key.export_spki_der()?;
+            let public = rsa::RsaPublicKey::from_public_key_der(&public_der)
+                .map_err(|e| JoseError::Key(format!("parse exported RSA SPKI: {e}")))?;
+            let private = if key.has_private_key() {
+                let private_der = key.export_private()?;
+                Some(
+                    rsa::RsaPrivateKey::from_pkcs8_der(&private_der)
+                        .map_err(|e| JoseError::Key(format!("parse exported RSA PKCS#8: {e}")))?,
+                )
+            } else {
+                None
+            };
+            rsa_to_jwk(private.as_ref(), &public)
         }
-        kryptering::SoftwareKey::EcP384 { private, public } => {
-            ec_p384_to_jwk(private.as_ref(), public)
+        KeyAlgorithm::Ec(kryptering::EcCurve::P256) => {
+            let public_der = key.export_spki_der()?;
+            let public = p256::ecdsa::VerifyingKey::from_public_key_der(&public_der)
+                .map_err(|e| JoseError::Key(format!("parse exported P-256 SPKI: {e}")))?;
+            let private = if key.has_private_key() {
+                let private_der = key.export_private()?;
+                Some(
+                    p256::ecdsa::SigningKey::from_pkcs8_der(&private_der)
+                        .map_err(|e| JoseError::Key(format!("parse exported P-256 PKCS#8: {e}")))?,
+                )
+            } else {
+                None
+            };
+            ec_p256_to_jwk(private.as_ref(), &public)
         }
-        kryptering::SoftwareKey::EcP521 { private, public } => {
-            ec_p521_to_jwk(private.as_ref(), public)
+        KeyAlgorithm::Ec(kryptering::EcCurve::P384) => {
+            let public_der = key.export_spki_der()?;
+            let public = p384::ecdsa::VerifyingKey::from_public_key_der(&public_der)
+                .map_err(|e| JoseError::Key(format!("parse exported P-384 SPKI: {e}")))?;
+            let private = if key.has_private_key() {
+                let private_der = key.export_private()?;
+                Some(
+                    p384::ecdsa::SigningKey::from_pkcs8_der(&private_der)
+                        .map_err(|e| JoseError::Key(format!("parse exported P-384 PKCS#8: {e}")))?,
+                )
+            } else {
+                None
+            };
+            ec_p384_to_jwk(private.as_ref(), &public)
         }
-        kryptering::SoftwareKey::Ed25519 { private, public } => {
-            ed25519_to_jwk(private.as_ref(), public)
+        KeyAlgorithm::Ec(kryptering::EcCurve::P521) => {
+            let public_der = key.export_spki_der()?;
+            let public_key = p521::PublicKey::from_public_key_der(&public_der)
+                .map_err(|e| JoseError::Key(format!("parse exported P-521 SPKI: {e}")))?;
+            let public = p521::ecdsa::VerifyingKey::from_sec1_bytes(
+                public_key.to_encoded_point(false).as_bytes(),
+            )
+            .map_err(|e| JoseError::Key(format!("parse exported P-521 public point: {e}")))?;
+            let private = if key.has_private_key() {
+                let private_der = key.export_private()?;
+                let secret = p521::SecretKey::from_pkcs8_der(&private_der)
+                    .map_err(|e| JoseError::Key(format!("parse exported P-521 PKCS#8: {e}")))?;
+                Some(
+                    p521::ecdsa::SigningKey::from_slice(&secret.to_bytes()).map_err(|e| {
+                        JoseError::Key(format!("parse exported P-521 private scalar: {e}"))
+                    })?,
+                )
+            } else {
+                None
+            };
+            ec_p521_to_jwk(private.as_ref(), &public)
         }
-        kryptering::SoftwareKey::Hmac(bytes) => oct_to_jwk(bytes),
-        kryptering::SoftwareKey::Aes(bytes) => oct_to_jwk(bytes),
+        KeyAlgorithm::Ed25519 => {
+            let public_der = key.export_spki_der()?;
+            let public = ed25519_dalek::VerifyingKey::from_public_key_der(&public_der)
+                .map_err(|e| JoseError::Key(format!("parse exported Ed25519 SPKI: {e}")))?;
+            let private = if key.has_private_key() {
+                let private_der = key.export_private()?;
+                Some(
+                    ed25519_dalek::SigningKey::from_pkcs8_der(&private_der).map_err(|e| {
+                        JoseError::Key(format!("parse exported Ed25519 PKCS#8: {e}"))
+                    })?,
+                )
+            } else {
+                None
+            };
+            ed25519_to_jwk(private.as_ref(), &public)
+        }
+        KeyAlgorithm::Hmac | KeyAlgorithm::Aes => {
+            let bytes = key.export_private()?;
+            oct_to_jwk(&bytes)
+        }
         #[cfg(feature = "post-quantum")]
-        kryptering::SoftwareKey::PostQuantum {
-            algorithm,
-            private_der,
-            public_der,
-        } => akp_to_jwk(*algorithm, public_der, private_der.as_deref()),
+        KeyAlgorithm::PostQuantum(algorithm) => {
+            let public_der = key.export_spki_der()?;
+            let private = key
+                .has_private_key()
+                .then(|| key.export_private())
+                .transpose()?;
+            akp_to_jwk(
+                algorithm,
+                &public_der,
+                private.as_ref().map(|value| value.as_slice()),
+            )
+        }
+        #[cfg(feature = "post-quantum")]
+        KeyAlgorithm::CompositeMlDsa(variant) => {
+            let public = key.export_composite_public()?;
+            let private = key
+                .has_private_key()
+                .then(|| key.export_composite_private())
+                .transpose()?;
+            composite_akp_to_jwk(
+                variant,
+                &public,
+                private.as_ref().map(|value| value.as_slice()),
+            )
+        }
         _ => Err(JoseError::Key(
             "unsupported SoftwareKey variant for JWK conversion".into(),
         )),
@@ -254,7 +354,22 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    Ok(kryptering::SoftwareKey::Rsa { private, public })
+    use pkcs8::spki::EncodePublicKey;
+    use pkcs8::EncodePrivateKey;
+
+    if let Some(private) = private {
+        let der = private
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("encode RSA PKCS#8: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
+            .map_err(Into::into)
+    } else {
+        let der = public
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("encode RSA SPKI: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
+            .map_err(Into::into)
+    }
 }
 
 fn rsa_to_jwk(private: Option<&rsa::RsaPrivateKey>, public: &rsa::RsaPublicKey) -> Result<Jwk> {
@@ -339,10 +454,28 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    Ok(kryptering::SoftwareKey::EcP256 {
-        private,
-        public: verifying_key,
-    })
+    use pkcs8::spki::EncodePublicKey;
+    use pkcs8::EncodePrivateKey;
+
+    if let Some(private) = private {
+        let der = private
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("encode P-256 PKCS#8: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    } else {
+        let der = verifying_key
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("encode P-256 SPKI: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
@@ -379,10 +512,28 @@ fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    Ok(kryptering::SoftwareKey::EcP384 {
-        private,
-        public: verifying_key,
-    })
+    use pkcs8::spki::EncodePublicKey;
+    use pkcs8::EncodePrivateKey;
+
+    if let Some(private) = private {
+        let der = private
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("encode P-384 PKCS#8: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    } else {
+        let der = verifying_key
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("encode P-384 SPKI: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
@@ -416,10 +567,33 @@ fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    Ok(kryptering::SoftwareKey::EcP521 {
-        private,
-        public: verifying_key,
-    })
+    use pkcs8::spki::EncodePublicKey;
+    use pkcs8::EncodePrivateKey;
+
+    if let Some(private) = private {
+        let secret = p521::SecretKey::from_slice(&private.to_bytes())
+            .map_err(|e| JoseError::Key(format!("convert P-521 private scalar: {e}")))?;
+        let der = secret
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("encode P-521 PKCS#8: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    } else {
+        let public =
+            p521::PublicKey::from_sec1_bytes(verifying_key.to_encoded_point(false).as_bytes())
+                .map_err(|e| JoseError::Key(format!("convert P-521 public point: {e}")))?;
+        let der = public
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("encode P-521 SPKI: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+            der.as_bytes(),
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn ec_p256_to_jwk(
@@ -511,7 +685,22 @@ fn jwk_to_okp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    Ok(kryptering::SoftwareKey::Ed25519 { private, public })
+    use pkcs8::spki::EncodePublicKey;
+    use pkcs8::EncodePrivateKey;
+
+    if let Some(private) = private {
+        let der = private
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("encode Ed25519 PKCS#8: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der.as_bytes())
+            .map_err(Into::into)
+    } else {
+        let der = public
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("encode Ed25519 SPKI: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Ed25519, der.as_bytes())
+            .map_err(Into::into)
+    }
 }
 
 fn ed25519_to_jwk(
@@ -550,7 +739,11 @@ fn jwk_to_oct(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
                     k_bytes.len()
                 )));
             }
-            return Ok(kryptering::SoftwareKey::Hmac(k_bytes));
+            return kryptering::SoftwareKey::from_symmetric_bytes(
+                kryptering::KeyAlgorithm::Hmac,
+                &k_bytes,
+            )
+            .map_err(Into::into);
         }
         if alg.starts_with('A')
             && (alg.contains("KW") || alg.contains("GCM") || alg.contains("CBC"))
@@ -566,7 +759,17 @@ fn jwk_to_oct(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
                     )));
                 }
             }
-            return Ok(kryptering::SoftwareKey::Aes(k_bytes));
+            // A CBC-HS content-encryption key is an aggregate MAC || AES key,
+            // not an AES key by itself.  kryptering intentionally accepts
+            // only 16/24/32-byte AES primitive keys, so retain CBC-HS keys in
+            // its variable-length secret-key container.
+            let key_algorithm = if alg.contains("CBC") {
+                kryptering::KeyAlgorithm::Hmac
+            } else {
+                kryptering::KeyAlgorithm::Aes
+            };
+            return kryptering::SoftwareKey::from_symmetric_bytes(key_algorithm, &k_bytes)
+                .map_err(Into::into);
         }
     }
 
@@ -575,8 +778,14 @@ fn jwk_to_oct(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     // requirement (HS256 -> 32 bytes). Shorter keys cannot satisfy any
     // supported algorithm and are rejected rather than silently accepted.
     match k_bytes.len() {
-        16 | 24 | 32 => Ok(kryptering::SoftwareKey::Aes(k_bytes)),
-        n if n >= 32 => Ok(kryptering::SoftwareKey::Hmac(k_bytes)),
+        16 | 24 | 32 => {
+            kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Aes, &k_bytes)
+                .map_err(Into::into)
+        }
+        n if n >= 32 => {
+            kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &k_bytes)
+                .map_err(Into::into)
+        }
         n => Err(JoseError::Key(format!(
             "oct key of {n} bytes is too short: with no `alg` pinned it must be \
              a valid AES length (16/24/32) or at least 32 bytes for HMAC"
@@ -605,13 +814,13 @@ fn oct_to_jwk(bytes: &[u8]) -> Result<Jwk> {
     Ok(jwk)
 }
 
-// ── AKP (post-quantum ML-DSA) ──────────────────────────────────────────
+// ── AKP (post-quantum and composite ML-DSA) ────────────────────────────
 //
 // draft-ietf-cose-dilithium: `kty="AKP"` with base64url members `pub`
 // (the raw FIPS 204 public key bytes) and `priv` (the 32-byte seed).
-// Kryptering's `SoftwareKey::PostQuantum` stores the public key as SPKI
-// DER and the private key as either PKCS#8 DER or a raw 32-byte seed;
-// this module translates between the two.
+// draft-ietf-jose-pq-composite-sigs-03 uses the same members for raw
+// aggregate keys. Pure ML-DSA is translated to kryptering's DER-backed
+// representation; composite keys remain in the draft's aggregate encoding.
 
 #[cfg(feature = "post-quantum")]
 fn jwk_to_akp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
@@ -619,6 +828,10 @@ fn jwk_to_akp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         .alg
         .as_deref()
         .ok_or_else(|| JoseError::Key("AKP JWK requires `alg`".into()))?;
+    if let Some(variant) = composite_variant_from_name(alg) {
+        return jwk_to_composite_akp(jwk, variant);
+    }
+
     let variant = match alg {
         "ML-DSA-44" => kryptering::MlDsaVariant::MlDsa44,
         "ML-DSA-65" => kryptering::MlDsaVariant::MlDsa65,
@@ -652,16 +865,61 @@ fn jwk_to_akp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
                     seed.len()
                 )));
             }
-            Some(seed)
+            Some(zeroize::Zeroizing::new(seed))
         }
         None => None,
     };
 
-    Ok(kryptering::SoftwareKey::PostQuantum {
-        algorithm: kryptering::PqAlgorithm::MlDsa(variant),
-        private_der,
-        public_der,
-    })
+    kryptering::SoftwareKey::from_post_quantum_der(
+        kryptering::PqAlgorithm::MlDsa(variant),
+        private_der.as_ref().map(|value| value.as_slice()),
+        &public_der,
+    )
+    .map_err(Into::into)
+}
+
+#[cfg(feature = "post-quantum")]
+fn jwk_to_composite_akp(
+    jwk: &Jwk,
+    variant: kryptering::CompositeMlDsaVariant,
+) -> Result<kryptering::SoftwareKey> {
+    let public = base64url::decode(
+        jwk.pub_
+            .as_deref()
+            .ok_or_else(|| JoseError::Key("AKP JWK missing `pub`".into()))?,
+    )?;
+    if public.len() != variant.public_key_len() {
+        return Err(JoseError::Key(format!(
+            "{} `pub` must be {} bytes, got {}",
+            variant.name(),
+            variant.public_key_len(),
+            public.len()
+        )));
+    }
+
+    let private = jwk
+        .priv_
+        .as_deref()
+        .map(base64url::decode)
+        .transpose()?
+        .map(zeroize::Zeroizing::new);
+    if let Some(private) = private.as_ref().map(|value| value.as_slice()) {
+        if private.len() != variant.private_key_len() {
+            return Err(JoseError::Key(format!(
+                "{} `priv` must be {} bytes, got {}",
+                variant.name(),
+                variant.private_key_len(),
+                private.len()
+            )));
+        }
+    }
+
+    kryptering::SoftwareKey::from_composite_ml_dsa(
+        variant,
+        private.as_ref().map(|value| value.as_slice()),
+        &public,
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(feature = "post-quantum")]
@@ -675,6 +933,11 @@ fn akp_to_jwk(
         kryptering::PqAlgorithm::SlhDsa(_) => {
             return Err(JoseError::Key(
                 "SLH-DSA JWK export not yet implemented".into(),
+            ));
+        }
+        kryptering::PqAlgorithm::MlKem(_) => {
+            return Err(JoseError::Key(
+                "ML-KEM JWK export not yet implemented".into(),
             ));
         }
     };
@@ -692,6 +955,53 @@ fn akp_to_jwk(
         jwk.priv_ = Some(base64url::encode(priv_bytes));
     }
     Ok(jwk)
+}
+
+#[cfg(feature = "post-quantum")]
+fn composite_akp_to_jwk(
+    variant: kryptering::CompositeMlDsaVariant,
+    public: &[u8],
+    private: Option<&[u8]>,
+) -> Result<Jwk> {
+    if public.len() != variant.public_key_len() {
+        return Err(JoseError::Key(format!(
+            "{} JWK export requires a {}-byte aggregate public key, got {}",
+            variant.name(),
+            variant.public_key_len(),
+            public.len()
+        )));
+    }
+    if let Some(private) = private {
+        if private.len() != variant.private_key_len() {
+            return Err(JoseError::Key(format!(
+                "{} JWK export requires a {}-byte aggregate private key, got {}",
+                variant.name(),
+                variant.private_key_len(),
+                private.len()
+            )));
+        }
+    }
+
+    let mut jwk = new_jwk("AKP");
+    jwk.alg = Some(variant.name().to_string());
+    jwk.pub_ = Some(base64url::encode(public));
+    jwk.priv_ = private.map(base64url::encode);
+    Ok(jwk)
+}
+
+#[cfg(feature = "post-quantum")]
+fn composite_variant_from_name(name: &str) -> Option<kryptering::CompositeMlDsaVariant> {
+    use kryptering::CompositeMlDsaVariant as Variant;
+
+    match name {
+        "ML-DSA-44-ES256" => Some(Variant::MlDsa44Es256),
+        "ML-DSA-65-ES256" => Some(Variant::MlDsa65Es256),
+        "ML-DSA-87-ES384" => Some(Variant::MlDsa87Es384),
+        "ML-DSA-44-Ed25519" => Some(Variant::MlDsa44Ed25519),
+        "ML-DSA-65-Ed25519" => Some(Variant::MlDsa65Ed25519),
+        "ML-DSA-87-Ed448" => Some(Variant::MlDsa87Ed448),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "post-quantum")]
@@ -754,16 +1064,64 @@ fn mldsa_spki_der_to_raw_public(variant: kryptering::MlDsaVariant, der: &[u8]) -
 mod tests {
     use super::*;
 
+    fn rsa_private_key(key: &rsa::RsaPrivateKey) -> kryptering::SoftwareKey {
+        use pkcs8::EncodePrivateKey;
+        let der = key.to_pkcs8_der().unwrap();
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
+            .unwrap()
+    }
+
+    fn rsa_public_key(key: &rsa::RsaPublicKey) -> kryptering::SoftwareKey {
+        use pkcs8::spki::EncodePublicKey;
+        let der = key.to_public_key_der().unwrap();
+        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
+            .unwrap()
+    }
+
+    fn p256_private_key(key: &p256::ecdsa::SigningKey) -> kryptering::SoftwareKey {
+        use pkcs8::EncodePrivateKey;
+        let der = key.to_pkcs8_der().unwrap();
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+            der.as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn p384_private_key(key: &p384::ecdsa::SigningKey) -> kryptering::SoftwareKey {
+        use pkcs8::EncodePrivateKey;
+        let der = key.to_pkcs8_der().unwrap();
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+            der.as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn p521_private_key(key: &p521::ecdsa::SigningKey) -> kryptering::SoftwareKey {
+        use pkcs8::EncodePrivateKey;
+        let secret = p521::SecretKey::from_slice(&key.to_bytes()).unwrap();
+        let der = secret.to_pkcs8_der().unwrap();
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+            der.as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn ed25519_private_key(key: &ed25519_dalek::SigningKey) -> kryptering::SoftwareKey {
+        use pkcs8::EncodePrivateKey;
+        let der = key.to_pkcs8_der().unwrap();
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der.as_bytes())
+            .unwrap()
+    }
+
     // ── RSA roundtrip ──────────────────────────────────────────────
 
     #[test]
     fn rsa_generate_to_jwk_roundtrip() {
         let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
-        let public_key = private_key.to_public_key();
-        let sw = kryptering::SoftwareKey::Rsa {
-            private: Some(private_key),
-            public: public_key,
-        };
+        let sw = rsa_private_key(&private_key);
 
         // Convert to JWK
         let jwk = software_key_to_jwk(&sw).unwrap();
@@ -776,12 +1134,8 @@ mod tests {
 
         // Convert back
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::Rsa { private, public: _ } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected RSA key"),
-        }
+        assert_eq!(sw2.algorithm(), kryptering::KeyAlgorithm::Rsa);
+        assert!(sw2.has_private_key());
 
         // Sign with original, verify with converted
         use kryptering::HashAlgorithm;
@@ -806,22 +1160,15 @@ mod tests {
     fn rsa_public_only_roundtrip() {
         let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
         let public_key = private_key.to_public_key();
-        let sw = kryptering::SoftwareKey::Rsa {
-            private: None,
-            public: public_key,
-        };
+        let sw = rsa_public_key(&public_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert!(jwk.d.is_none());
         assert!(jwk.p.is_none());
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::Rsa { private, .. } => {
-                assert!(private.is_none());
-            }
-            _ => panic!("expected RSA key"),
-        }
+        assert_eq!(sw2.algorithm(), kryptering::KeyAlgorithm::Rsa);
+        assert!(!sw2.has_private_key());
     }
 
     // ── EC P-256 roundtrip ─────────────────────────────────────────
@@ -829,11 +1176,7 @@ mod tests {
     #[test]
     fn ec_p256_roundtrip() {
         let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let verifying_key = *signing_key.verifying_key();
-        let sw = kryptering::SoftwareKey::EcP256 {
-            private: Some(signing_key),
-            public: verifying_key,
-        };
+        let sw = p256_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.kty, "EC");
@@ -843,12 +1186,11 @@ mod tests {
         assert!(jwk.d.is_some());
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::EcP256 { private, .. } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected EcP256 key"),
-        }
+        assert_eq!(
+            sw2.algorithm(),
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256)
+        );
+        assert!(sw2.has_private_key());
 
         // Sign/verify roundtrip
         use kryptering::Signer as _;
@@ -877,22 +1219,17 @@ mod tests {
     #[test]
     fn ec_p384_roundtrip() {
         let signing_key = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let verifying_key = *signing_key.verifying_key();
-        let sw = kryptering::SoftwareKey::EcP384 {
-            private: Some(signing_key),
-            public: verifying_key,
-        };
+        let sw = p384_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.crv.as_deref(), Some("P-384"));
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::EcP384 { private, .. } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected EcP384 key"),
-        }
+        assert_eq!(
+            sw2.algorithm(),
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384)
+        );
+        assert!(sw2.has_private_key());
     }
 
     // ── EC P-521 roundtrip ─────────────────────────────────────────
@@ -900,22 +1237,17 @@ mod tests {
     #[test]
     fn ec_p521_roundtrip() {
         let signing_key = p521::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let verifying_key = p521::ecdsa::VerifyingKey::from(&signing_key);
-        let sw = kryptering::SoftwareKey::EcP521 {
-            private: Some(signing_key),
-            public: verifying_key,
-        };
+        let sw = p521_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.crv.as_deref(), Some("P-521"));
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::EcP521 { private, .. } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected EcP521 key"),
-        }
+        assert_eq!(
+            sw2.algorithm(),
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521)
+        );
+        assert!(sw2.has_private_key());
     }
 
     // ── Ed25519 roundtrip ──────────────────────────────────────────
@@ -923,11 +1255,7 @@ mod tests {
     #[test]
     fn ed25519_roundtrip() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let verifying_key = signing_key.verifying_key();
-        let sw = kryptering::SoftwareKey::Ed25519 {
-            private: Some(signing_key),
-            public: verifying_key,
-        };
+        let sw = ed25519_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.kty, "OKP");
@@ -936,12 +1264,8 @@ mod tests {
         assert!(jwk.d.is_some());
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::Ed25519 { private, .. } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected Ed25519 key"),
-        }
+        assert_eq!(sw2.algorithm(), kryptering::KeyAlgorithm::Ed25519);
+        assert!(sw2.has_private_key());
 
         // Sign/verify roundtrip
         use kryptering::SignatureAlgorithm;
@@ -962,7 +1286,11 @@ mod tests {
     #[test]
     fn hmac_symmetric_roundtrip() {
         let key_bytes = vec![0x42u8; 32];
-        let sw = kryptering::SoftwareKey::Hmac(key_bytes.clone());
+        let sw = kryptering::SoftwareKey::from_symmetric_bytes(
+            kryptering::KeyAlgorithm::Hmac,
+            &key_bytes,
+        )
+        .unwrap();
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.kty, "oct");
@@ -973,29 +1301,25 @@ mod tests {
         let mut jwk_hmac = jwk.clone();
         jwk_hmac.alg = Some("HS256".into());
         let sw2 = jwk_to_software_key(&jwk_hmac).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::Hmac(bytes) => {
-                assert_eq!(bytes, &key_bytes);
-            }
-            _ => panic!("expected Hmac key"),
-        }
+        assert_eq!(sw2.algorithm(), kryptering::KeyAlgorithm::Hmac);
+        assert_eq!(sw2.export_private().unwrap().as_slice(), key_bytes);
     }
 
     #[test]
     fn aes_symmetric_roundtrip() {
         let key_bytes = vec![0x42u8; 16];
-        let sw = kryptering::SoftwareKey::Aes(key_bytes.clone());
+        let sw = kryptering::SoftwareKey::from_symmetric_bytes(
+            kryptering::KeyAlgorithm::Aes,
+            &key_bytes,
+        )
+        .unwrap();
 
         let jwk = software_key_to_jwk(&sw).unwrap();
         assert_eq!(jwk.kty, "oct");
 
         let sw2 = jwk_to_software_key(&jwk).unwrap();
-        match &sw2 {
-            kryptering::SoftwareKey::Aes(bytes) => {
-                assert_eq!(bytes, &key_bytes);
-            }
-            _ => panic!("expected Aes key"),
-        }
+        assert_eq!(sw2.algorithm(), kryptering::KeyAlgorithm::Aes);
+        assert_eq!(sw2.export_private().unwrap().as_slice(), key_bytes);
     }
 
     // ── Tier-2 hardening: key-consistency + oct length ─────────────
@@ -1006,16 +1330,8 @@ mod tests {
     fn ec_p256_mismatched_d_rejected() {
         let a = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
         let b = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let a_jwk = software_key_to_jwk(&kryptering::SoftwareKey::EcP256 {
-            private: Some(a.clone()),
-            public: *a.verifying_key(),
-        })
-        .unwrap();
-        let b_jwk = software_key_to_jwk(&kryptering::SoftwareKey::EcP256 {
-            private: Some(b.clone()),
-            public: *b.verifying_key(),
-        })
-        .unwrap();
+        let a_jwk = software_key_to_jwk(&p256_private_key(&a)).unwrap();
+        let b_jwk = software_key_to_jwk(&p256_private_key(&b)).unwrap();
 
         // x/y from A, but d from B.
         let mut mixed = a_jwk;
@@ -1033,16 +1349,8 @@ mod tests {
     fn ed25519_mismatched_d_rejected() {
         let a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let a_jwk = software_key_to_jwk(&kryptering::SoftwareKey::Ed25519 {
-            private: Some(a.clone()),
-            public: a.verifying_key(),
-        })
-        .unwrap();
-        let b_jwk = software_key_to_jwk(&kryptering::SoftwareKey::Ed25519 {
-            private: Some(b.clone()),
-            public: b.verifying_key(),
-        })
-        .unwrap();
+        let a_jwk = software_key_to_jwk(&ed25519_private_key(&a)).unwrap();
+        let b_jwk = software_key_to_jwk(&ed25519_private_key(&b)).unwrap();
 
         let mut mixed = a_jwk;
         mixed.d = b_jwk.d.clone();
@@ -1099,10 +1407,8 @@ mod tests {
         );
         let jwk = Jwk::from_json(&json).unwrap();
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::Hmac(b) => assert_eq!(b.len(), 64),
-            _ => panic!("expected Hmac key"),
-        }
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Hmac);
+        assert_eq!(sw.export_private().unwrap().len(), 64);
     }
 
     // ── RFC 7517 Appendix A.1 (RSA public key) ────────────────────
@@ -1120,14 +1426,13 @@ mod tests {
         let jwk = Jwk::from_json(json).unwrap();
         let sw = jwk_to_software_key(&jwk).unwrap();
 
-        match &sw {
-            kryptering::SoftwareKey::Rsa { private, public } => {
-                assert!(private.is_none());
-                use rsa::traits::PublicKeyParts;
-                assert!(public.n().bits() >= 2040);
-            }
-            _ => panic!("expected RSA key"),
-        }
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Rsa);
+        assert!(!sw.has_private_key());
+        let public_der = sw.export_spki_der().unwrap();
+        use rsa::pkcs8::DecodePublicKey;
+        use rsa::traits::PublicKeyParts;
+        let public = rsa::RsaPublicKey::from_public_key_der(&public_der).unwrap();
+        assert!(public.n().bits() >= 2040);
     }
 
     // ── EC public key parse ────────────────────────────────────────
@@ -1144,12 +1449,11 @@ mod tests {
 
         let jwk = Jwk::from_json(json).unwrap();
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::EcP256 { private, .. } => {
-                assert!(private.is_none());
-            }
-            _ => panic!("expected EcP256 key"),
-        }
+        assert_eq!(
+            sw.algorithm(),
+            kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256)
+        );
+        assert!(!sw.has_private_key());
     }
 
     // ── RSA exponent validation ───────────────────────────────────

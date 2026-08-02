@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 jose-rs = { path = "..", features = ["post-quantum"] }
-kryptering = { version = "0.3", default-features = false, features = ["post-quantum"] }
+kryptering = { version = "0.5", default-features = false, features = ["rustcrypto", "post-quantum"] }
 
 [[bin]]
 name = "base64url_decode"
@@ -64,6 +64,13 @@ bench = false
 [[bin]]
 name = "jws_verify_mldsa"
 path = "fuzz_targets/jws_verify_mldsa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jws_verify_composite"
+path = "fuzz_targets/jws_verify_composite.rs"
 test = false
 doc = false
 bench = false

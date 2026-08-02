@@ -10,6 +10,8 @@ use crate::jwk::Jwk;
 /// `bits` is the modulus size in bits (e.g. 2048, 3072, 4096). Must be at
 /// least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3.
 pub fn generate_rsa(bits: usize) -> Result<Jwk> {
+    use pkcs8::EncodePrivateKey;
+
     if bits < crate::MIN_RSA_BITS {
         return Err(JoseError::Key(format!(
             "requested RSA key size {} bits is below the required minimum of {}",
@@ -19,11 +21,11 @@ pub fn generate_rsa(bits: usize) -> Result<Jwk> {
     }
     let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits)
         .map_err(|e| JoseError::Key(format!("RSA keygen failed: {e}")))?;
-    let public_key = private_key.to_public_key();
-    let sw = kryptering::SoftwareKey::Rsa {
-        public: public_key,
-        private: Some(private_key),
-    };
+    let der = private_key
+        .to_pkcs8_der()
+        .map_err(|e| JoseError::Key(format!("RSA PKCS#8 encode failed: {e}")))?;
+    let sw =
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())?;
     software_key_to_jwk(&sw)
 }
 
@@ -31,30 +33,40 @@ pub fn generate_rsa(bits: usize) -> Result<Jwk> {
 ///
 /// `curve` must be one of `"P-256"`, `"P-384"`, or `"P-521"`.
 pub fn generate_ec(curve: &str) -> Result<Jwk> {
+    use pkcs8::EncodePrivateKey;
+
     let sw = match curve {
         "P-256" => {
             let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-            let vk = *sk.verifying_key();
-            kryptering::SoftwareKey::EcP256 {
-                private: Some(sk),
-                public: vk,
-            }
+            let der = sk
+                .to_pkcs8_der()
+                .map_err(|e| JoseError::Key(format!("P-256 PKCS#8 encode failed: {e}")))?;
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+                der.as_bytes(),
+            )?
         }
         "P-384" => {
             let sk = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
-            let vk = *sk.verifying_key();
-            kryptering::SoftwareKey::EcP384 {
-                private: Some(sk),
-                public: vk,
-            }
+            let der = sk
+                .to_pkcs8_der()
+                .map_err(|e| JoseError::Key(format!("P-384 PKCS#8 encode failed: {e}")))?;
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+                der.as_bytes(),
+            )?
         }
         "P-521" => {
             let sk = p521::ecdsa::SigningKey::random(&mut rand::thread_rng());
-            let vk = p521::ecdsa::VerifyingKey::from(&sk);
-            kryptering::SoftwareKey::EcP521 {
-                private: Some(sk),
-                public: vk,
-            }
+            let secret = p521::SecretKey::from_slice(&sk.to_bytes())
+                .map_err(|e| JoseError::Key(format!("P-521 key conversion failed: {e}")))?;
+            let der = secret
+                .to_pkcs8_der()
+                .map_err(|e| JoseError::Key(format!("P-521 PKCS#8 encode failed: {e}")))?;
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+                der.as_bytes(),
+            )?
         }
         other => return Err(JoseError::Key(format!("unsupported EC curve: {other}"))),
     };
@@ -63,12 +75,14 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
 
 /// Generate an Ed25519 key pair as a JWK.
 pub fn generate_ed25519() -> Result<Jwk> {
+    use pkcs8::EncodePrivateKey;
+
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let vk = sk.verifying_key();
-    let sw = kryptering::SoftwareKey::Ed25519 {
-        private: Some(sk),
-        public: vk,
-    };
+    let der = sk
+        .to_pkcs8_der()
+        .map_err(|e| JoseError::Key(format!("Ed25519 PKCS#8 encode failed: {e}")))?;
+    let sw =
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der.as_bytes())?;
     software_key_to_jwk(&sw)
 }
 
@@ -79,7 +93,8 @@ pub fn generate_symmetric(len: usize) -> Result<Jwk> {
     use rand::RngCore;
     let mut key_bytes = vec![0u8; len];
     rand::thread_rng().fill_bytes(&mut key_bytes);
-    let sw = kryptering::SoftwareKey::Hmac(key_bytes);
+    let sw =
+        kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &key_bytes)?;
     software_key_to_jwk(&sw)
 }
 
@@ -140,13 +155,23 @@ pub fn generate_direct_symmetric(enc: JweEncryption) -> Result<Jwk> {
 /// Delegates to [`kryptering::generate_ml_dsa`] for the actual key
 /// material so the crate keeps a single post-quantum RNG policy
 /// (`getrandom::SysRng`, matching the signing path). jose-rs only
-/// translates the resulting `SoftwareKey::PostQuantum` into the AKP
-/// JWK wire format. `Jwk::Drop` still zeroizes `priv`, and
-/// `SoftwareKey::Drop` still zeroizes the seed, at both sides of
-/// the boundary.
+/// translates the resulting opaque software key into the AKP JWK wire
+/// format. `Jwk::Drop` still zeroizes `priv`, and `SoftwareKey::Drop`
+/// still zeroizes the seed, at both sides of the boundary.
 #[cfg(feature = "post-quantum")]
 pub fn generate_mldsa(variant: kryptering::MlDsaVariant) -> Result<Jwk> {
     let sw = kryptering::generate_ml_dsa(variant).map_err(JoseError::Crypto)?;
+    software_key_to_jwk(&sw)
+}
+
+/// Generate a composite ML-DSA key pair as an AKP JWK.
+///
+/// The `pub` and `priv` members contain the aggregate raw encodings from
+/// draft-ietf-jose-pq-composite-sigs-03. Both components are generated
+/// atomically by kryptering and are bound to the selected composite variant.
+#[cfg(feature = "post-quantum")]
+pub fn generate_composite_mldsa(variant: kryptering::CompositeMlDsaVariant) -> Result<Jwk> {
+    let sw = kryptering::generate_composite_ml_dsa(variant)?;
     software_key_to_jwk(&sw)
 }
 
@@ -164,12 +189,8 @@ mod tests {
 
         // Roundtrip back to SoftwareKey
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::Rsa { private, .. } => {
-                assert!(private.is_some());
-            }
-            _ => panic!("expected RSA"),
-        }
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Rsa);
+        assert!(sw.has_private_key());
     }
 
     #[test]
@@ -246,10 +267,18 @@ mod tests {
         assert_eq!(jwk.alg.as_deref(), Some("A256KW"));
         assert_eq!(jwk.use_.as_deref(), Some("enc"));
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::Aes(bytes) => assert_eq!(bytes.len(), 32),
-            _ => panic!("expected AES key"),
-        }
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Aes);
+        assert_eq!(sw.export_private().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn generate_cbc_hs_symmetric_roundtrips_aggregate_key() {
+        let jwk = generate_symmetric_for_alg("A192CBC-HS384").unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("A192CBC-HS384"));
+        assert_eq!(jwk.use_.as_deref(), Some("enc"));
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Hmac);
+        assert_eq!(sw.export_private().unwrap().len(), 48);
     }
 
     #[test]
@@ -258,10 +287,18 @@ mod tests {
         assert_eq!(jwk.alg.as_deref(), Some("dir"));
         assert_eq!(jwk.use_.as_deref(), Some("enc"));
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::Aes(bytes) => assert_eq!(bytes.len(), 16),
-            _ => panic!("expected AES key"),
-        }
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Aes);
+        assert_eq!(sw.export_private().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn generate_direct_cbc_hs_roundtrips_aggregate_key() {
+        let jwk = generate_direct_symmetric(JweEncryption::A256CbcHs512).unwrap();
+        assert_eq!(jwk.alg.as_deref(), Some("dir"));
+        assert_eq!(jwk.use_.as_deref(), Some("enc"));
+        let sw = jwk_to_software_key(&jwk).unwrap();
+        assert_eq!(sw.algorithm(), kryptering::KeyAlgorithm::Hmac);
+        assert_eq!(sw.export_private().unwrap().len(), 64);
     }
 
     #[test]
@@ -314,21 +351,17 @@ mod tests {
         use kryptering::MlDsaVariant;
         let jwk = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
         let sw = jwk_to_software_key(&jwk).unwrap();
-        match &sw {
-            kryptering::SoftwareKey::PostQuantum {
-                algorithm,
-                private_der,
-                public_der,
-            } => {
-                assert_eq!(
-                    *algorithm,
-                    kryptering::PqAlgorithm::MlDsa(MlDsaVariant::MlDsa44)
-                );
-                assert_eq!(private_der.as_ref().unwrap().len(), 32);
-                assert!(public_der.len() > 1312, "public is SPKI DER, not raw");
-            }
-            _ => panic!("expected PostQuantum variant"),
-        }
+        assert_eq!(
+            sw.algorithm(),
+            kryptering::KeyAlgorithm::PostQuantum(kryptering::PqAlgorithm::MlDsa(
+                MlDsaVariant::MlDsa44
+            ))
+        );
+        assert_eq!(sw.export_private().unwrap().len(), 32);
+        assert!(
+            sw.export_spki_der().unwrap().len() > 1312,
+            "public is SPKI DER, not raw"
+        );
     }
 
     #[cfg(feature = "post-quantum")]

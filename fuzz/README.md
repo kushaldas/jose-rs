@@ -14,6 +14,7 @@ which in turn wraps libFuzzer.
 | `jws_decode_header`       | `jws::compact::decode_header` (attacker-controlled)    |
 | `jws_verify`              | Full JWS compact verify pipeline (fixed HMAC verifier) |
 | `jws_verify_mldsa`        | Full JWS compact verify via `verify_with_jwk` over an ML-DSA-44 AKP JWK (post-quantum AKP parse + sign/verify dispatch) |
+| `jws_verify_composite`    | Full compact-JWS verify and aggregate-signature splitting for ML-DSA-44-Ed25519 |
 | `jwe_decrypt`             | Full JWE compact decrypt pipeline (fixed dir CEK)      |
 | `jwt_decode_unverified`   | JWT header + claims parse without crypto               |
 

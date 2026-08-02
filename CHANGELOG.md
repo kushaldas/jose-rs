@@ -2,6 +2,20 @@
 
 All notable changes to `jose-rs` from the `0.5.0` release onward are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Added all six composite ML-DSA JWS algorithms from
+  `draft-ietf-jose-pq-composite-sigs-03`, including strict AKP aggregate-key
+  import/export, key generation, JWS/JWT signing and verification, thumbprints,
+  draft Appendix A vectors, and a composite verification fuzz target.
+
+### Changed
+
+- Updated to kryptering 0.5's opaque software-key API and raised the minimum
+  supported Rust version to 1.88.
+
 ## [0.5.1] - 2026-07-07
 
 ### Changed

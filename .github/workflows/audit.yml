@@ -23,11 +23,21 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        # Honors .cargo/audit.toml for documented allow-list entries.
-        run: cargo audit --deny warnings
+        run: |
+          # Show the human-readable report, including accepted findings.
+          cargo audit
+          # Permit only the known transitive spin 0.9.8 yanked warning.
+          cargo audit --no-fetch --json | jq -e '
+            .vulnerabilities.count == 0 and
+            ([.warnings | to_entries[] | .value[]] | all(
+              .kind == "yanked" and
+              .package.name == "spin" and
+              .package.version == "0.9.8"
+            ))
+          '

@@ -113,7 +113,7 @@ fn jwk_to_jwe_key_bytes(
     jwk: &crate::jwk::Jwk,
     alg: JweAlgorithm,
     for_decrypt: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     match alg {
         JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
             if jwk.kty.as_str() != "oct" {
@@ -127,7 +127,7 @@ fn jwk_to_jwe_key_bytes(
                 .k
                 .as_deref()
                 .ok_or_else(|| JoseError::Key("JWK is missing `k`".into()))?;
-            base64url::decode(k)
+            Ok(Zeroizing::new(base64url::decode(k)?))
         }
         JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
         #[cfg(feature = "deprecated")]
@@ -139,30 +139,18 @@ fn jwk_to_jwe_key_bytes(
     }
 }
 
-fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
+fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Zeroizing<Vec<u8>>> {
     let sw = crate::jwk::jwk_to_software_key(jwk)?;
-    match &sw {
-        kryptering::SoftwareKey::Rsa { public, private } => {
-            if for_decrypt {
-                use rsa::pkcs8::EncodePrivateKey;
-                let pk = private
-                    .as_ref()
-                    .ok_or_else(|| JoseError::Key("JWK lacks RSA private components".into()))?;
-                Ok(pk
-                    .to_pkcs8_der()
-                    .map_err(|e| JoseError::Key(format!("PKCS#8 encode: {e}")))?
-                    .as_bytes()
-                    .to_vec())
-            } else {
-                use rsa::pkcs8::EncodePublicKey;
-                Ok(public
-                    .to_public_key_der()
-                    .map_err(|e| JoseError::Key(format!("SPKI encode: {e}")))?
-                    .as_ref()
-                    .to_vec())
-            }
+    if sw.algorithm() != kryptering::KeyAlgorithm::Rsa {
+        return Err(JoseError::Key("RSA JWK expected".into()));
+    }
+    if for_decrypt {
+        if !sw.has_private_key() {
+            return Err(JoseError::Key("JWK lacks RSA private components".into()));
         }
-        _ => Err(JoseError::Key("RSA JWK expected".into())),
+        sw.export_private().map_err(Into::into)
+    } else {
+        Ok(Zeroizing::new(sw.export_spki_der()?))
     }
 }
 
@@ -887,7 +875,7 @@ fn aes_cbc_encrypt_raw(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
 fn aes_cbc_decrypt_raw(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 
-    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return Err(JoseError::InvalidToken(
             "AES-CBC ciphertext length must be a multiple of 16".into(),
         ));
@@ -942,7 +930,7 @@ fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
     // Structural checks on the *length* of the buffer are not secret-dependent
     // (the attacker already controls the ciphertext length) and are safe to
     // branch on.
-    if data.is_empty() || data.len() % BLOCK != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(BLOCK) {
         return Err(JoseError::Crypto(kryptering::Error::Crypto(
             "invalid PKCS#7 padding".into(),
         )));
@@ -1056,7 +1044,7 @@ fn jwe_alg_to_keytransport(alg: JweAlgorithm) -> Result<kryptering::KeyTransport
 // RSA key parsing
 // ---------------------------------------------------------------------------
 
-fn parse_rsa_public_key(der: &[u8]) -> Result<rsa::RsaPublicKey> {
+fn parse_rsa_public_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
     use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
     let key = rsa::RsaPublicKey::from_public_key_der(der)
@@ -1068,10 +1056,10 @@ fn parse_rsa_public_key(der: &[u8]) -> Result<rsa::RsaPublicKey> {
             crate::MIN_RSA_BITS
         )));
     }
-    Ok(key)
+    kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 
-fn parse_rsa_private_key(der: &[u8]) -> Result<rsa::RsaPrivateKey> {
+fn parse_rsa_private_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
@@ -1083,7 +1071,7 @@ fn parse_rsa_private_key(der: &[u8]) -> Result<rsa::RsaPrivateKey> {
             crate::MIN_RSA_BITS
         )));
     }
-    Ok(key)
+    kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
