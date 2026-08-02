@@ -27,11 +27,7 @@ fn main() -> jose_rs::Result<()> {
     // Load encryption key (AES-256 for key wrapping)
     let aes_jwk = load_jwk("examples/keys/aes.jwk");
     let aes_key = jose_rs::jwk::jwk_to_software_key(&aes_jwk)?;
-    let kek = match &aes_key {
-        kryptering::SoftwareKey::Aes(bytes) => bytes.clone(),
-        kryptering::SoftwareKey::Hmac(bytes) => bytes.clone(),
-        _ => panic!("expected symmetric key"),
-    };
+    let kek = aes_key.export_private()?;
 
     // Build claims
     let now = SystemTime::now()

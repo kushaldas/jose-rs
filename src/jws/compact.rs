@@ -517,7 +517,11 @@ mod tests {
     }
 
     fn hmac_key() -> SoftwareKey {
-        SoftwareKey::Hmac(b"my-secret-key-at-least-32-bytes!".to_vec())
+        SoftwareKey::from_symmetric_bytes(
+            kryptering::KeyAlgorithm::Hmac,
+            b"my-secret-key-at-least-32-bytes!",
+        )
+        .unwrap()
     }
 
     fn hmac_signer() -> SoftwareSigner {
@@ -560,14 +564,16 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
 
-        let signer_key = SoftwareKey::Ed25519 {
-            private: Some(signing_key),
-            public: verifying_key,
-        };
-        let verifier_key = SoftwareKey::Ed25519 {
-            private: None,
-            public: verifying_key,
-        };
+        use pkcs8::spki::EncodePublicKey;
+        use pkcs8::EncodePrivateKey;
+        let private_der = signing_key.to_pkcs8_der().unwrap();
+        let public_der = verifying_key.to_public_key_der().unwrap();
+        let signer_key =
+            SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, private_der.as_bytes())
+                .unwrap();
+        let verifier_key =
+            SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Ed25519, public_der.as_bytes())
+                .unwrap();
 
         let signer = SoftwareSigner::new(SignatureAlgorithm::Ed25519, signer_key).unwrap();
         let verifier = SoftwareVerifier::new(SignatureAlgorithm::Ed25519, verifier_key).unwrap();
@@ -592,7 +598,11 @@ mod tests {
         let token = sign(&hmac_signer(), payload, &header).unwrap();
 
         // Verify with a different key.
-        let wrong_key = SoftwareKey::Hmac(b"wrong-key-that-is-also-32-bytes!".to_vec());
+        let wrong_key = SoftwareKey::from_symmetric_bytes(
+            kryptering::KeyAlgorithm::Hmac,
+            b"wrong-key-that-is-also-32-bytes!",
+        )
+        .unwrap();
         let wrong_verifier =
             SoftwareVerifier::new(SignatureAlgorithm::Hmac(HashAlgorithm::Sha256), wrong_key)
                 .unwrap();
@@ -772,7 +782,8 @@ mod tests {
         let k_bytes = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
         let signer = kryptering::SoftwareSigner::new(
             JwsAlgorithm::HS256.to_crypto().unwrap(),
-            kryptering::SoftwareKey::Hmac(k_bytes),
+            kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &k_bytes)
+                .unwrap(),
         )
         .unwrap();
         let header = JoseHeader::new("HS256");

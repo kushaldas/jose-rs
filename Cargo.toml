@@ -8,7 +8,7 @@ repository = "https://github.com/kushaldas/jose-rs"
 homepage = "https://github.com/kushaldas/jose-rs"
 keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
 categories = ["cryptography", "authentication", "web-programming"]
-rust-version = "1.83"
+rust-version = "1.88"
 exclude = ["examples/"]
 
 [features]
@@ -18,7 +18,7 @@ deprecated = ["kryptering/legacy"]
 pkcs11 = ["kryptering/pkcs11"]
 
 [dependencies]
-kryptering = { version = "0.4", default-features = false }
+kryptering = { version = "0.5", path = "../kryptering", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -47,5 +47,9 @@ pkcs8-pq = { package = "pkcs8", version = "0.11.0", optional = true }
 
 [[example]]
 name = "jwt_ml_dsa"
+required-features = ["post-quantum"]
+
+[[example]]
+name = "jwt_composite"
 required-features = ["post-quantum"]
 [dev-dependencies]

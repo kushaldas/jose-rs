@@ -16,7 +16,11 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 
 **JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, EdDSA
 
-**JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 / ML-DSA-87 (FIPS 204), enabled with `--features post-quantum`. See *Post-quantum signatures* below.
+**JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 /
+ML-DSA-87 (FIPS 204), plus the six composite algorithms from
+`draft-ietf-jose-pq-composite-sigs-03`: ML-DSA-44-ES256,
+ML-DSA-65-ES256, ML-DSA-87-ES384, ML-DSA-44-Ed25519,
+ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
 **JWE key management**: dir, A128KW/A192KW/A256KW, RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
 
@@ -27,7 +31,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 | Feature | Default | Description |
 |---|---|---|
 | `pkcs11` | Yes | PKCS#11 HSM key support via kryptering |
-| `post-quantum` | No | ML-DSA algorithms |
+| `post-quantum` | No | ML-DSA and composite ML-DSA algorithms |
 | `deprecated` | No | Legacy algorithms (RSA-OAEP with SHA-1, none) |
 
 ## Usage
@@ -39,7 +43,10 @@ use jose_rs::{JoseHeader, jwt, JwsAlgorithm};
 use jose_rs::jwt::{Claims, Validation};
 
 // Create a signer (HMAC-SHA256)
-let key = kryptering::SoftwareKey::Hmac(b"my-secret-key-32-bytes-long!!!!!".to_vec());
+let key = kryptering::SoftwareKey::from_symmetric_bytes(
+    kryptering::KeyAlgorithm::Hmac,
+    b"my-secret-key-32-bytes-long!!!!!",
+).unwrap();
 let signer = kryptering::SoftwareSigner::new(
     JwsAlgorithm::HS256.to_crypto().unwrap(),
     key.clone(),
@@ -123,6 +130,8 @@ See the [examples directory](https://github.com/kushaldas/jose/tree/main/example
 - **jwt_rsa** -- JWT sign with RS256, verify with public key
 - **jwt_ecdsa** -- JWT sign with ES256, verify with public key
 - **jwt_eddsa** -- JWT sign with EdDSA (Ed25519), verify with public key
+- **jwt_ml_dsa** -- JWT sign/verify with pure ML-DSA
+- **jwt_composite** -- JWT sign/verify with ML-DSA-65-Ed25519
 - **jwe_aes_kw** -- JWE encrypt/decrypt with AES Key Wrap + AES-GCM
 - **jwe_rsa_oaep** -- JWE encrypt with RSA-OAEP, decrypt with private key
 - **jws_json** -- JWS flattened and general JSON serialization (multi-signature)
@@ -240,19 +249,18 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   `jwk::generate_symmetric_for_alg(...)` or `jwk::generate_direct_symmetric(...)`
   so `alg` and `use` are pinned at creation time.
 
-## Post-quantum signatures (experimental)
+## Post-quantum and composite signatures (experimental)
 
 ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.4", features = ["post-quantum"] }
+jose-rs = { version = "0.5", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's
-post-quantum backend, and adds three `JwsAlgorithm` variants corresponding
-to the IANA-registered identifiers `ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`
-(FIPS 204).
+post-quantum backend. It enables pure `ML-DSA-44`, `ML-DSA-65`, and
+`ML-DSA-87`, as well as all six composite identifiers listed above.
 
 ### JWK wire format (`kty = "AKP"`)
 
@@ -269,6 +277,29 @@ Per `draft-ietf-cose-dilithium`, ML-DSA keys use the new `"AKP"`
 private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
 `pub`, which is the correct shape for a JWK Set endpoint.
 
+Composite algorithms use the same AKP members, with raw concatenated
+encodings defined by `draft-ietf-jose-pq-composite-sigs-03`:
+
+- `pub = ML-DSA public || traditional public`
+- `priv = 32-byte ML-DSA seed || traditional private`
+
+The selected `alg` fixes the component algorithms, prehash, domain-separation
+label, and every aggregate length. Import rejects wrong lengths, malformed
+traditional public keys, and private/public mismatches. Generate composite
+keys atomically so neither component is reused independently:
+
+```rust
+use kryptering::CompositeMlDsaVariant;
+
+let key = jose_rs::jwk::generate_composite_mldsa(
+    CompositeMlDsaVariant::MlDsa65Ed25519,
+).unwrap();
+let header = jose_rs::JoseHeader::new("ML-DSA-65-Ed25519");
+let token = jose_rs::jws::compact::sign_with_jwk(&key, b"payload", &header).unwrap();
+let payload = jose_rs::jws::compact::verify_with_jwk(&key.to_public_jwk(), &token).unwrap();
+assert_eq!(payload, b"payload");
+```
+
 ### Status and caveats
 
 - **Draft-spec, not yet RFC.** The authoritative spec is
@@ -276,6 +307,11 @@ private-component wipe. `Jwk::to_public_jwk()` strips `priv` and keeps
   (active, submitted to IESG, expected to publish as an RFC in 2026). The
   wire format may shift before publication — do not use this feature
   for long-lived signed artifacts that you cannot re-issue later.
+
+- **Composite draft status.** Composite names and encodings follow
+  `draft-ietf-jose-pq-composite-sigs-03`. They may change before publication.
+  The ML-DSA-87-Ed448 implementation currently relies on the pinned
+  prerelease `ed448-goldilocks 0.14.0-pre.15` through kryptering.
 
 - **`ml-dsa` crate history.** The RustCrypto `ml-dsa` crate shipped
   three moderate-severity advisories during its 0.1.0 release-candidate

@@ -16,11 +16,7 @@ fn main() -> jose_rs::Result<()> {
     // Load AES key (used as Key Encryption Key)
     let jwk = load_jwk("examples/keys/aes.jwk");
     let key = jose_rs::jwk::jwk_to_software_key(&jwk)?;
-    let kek = match &key {
-        kryptering::SoftwareKey::Aes(bytes) => bytes.clone(),
-        kryptering::SoftwareKey::Hmac(bytes) => bytes.clone(),
-        _ => panic!("expected symmetric key"),
-    };
+    let kek = key.export_private()?;
 
     let plaintext = b"This is a secret message encrypted with AES Key Wrap.";
     println!("Plaintext: {}", std::str::from_utf8(plaintext).unwrap());

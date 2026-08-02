@@ -50,6 +50,30 @@ pub enum JwsAlgorithm {
     #[cfg(feature = "post-quantum")]
     #[serde(rename = "ML-DSA-87")]
     MlDsa87,
+    /// Composite ML-DSA-44 and ECDSA P-256 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-44-ES256")]
+    MlDsa44Es256,
+    /// Composite ML-DSA-65 and ECDSA P-256 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-65-ES256")]
+    MlDsa65Es256,
+    /// Composite ML-DSA-87 and ECDSA P-384 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-87-ES384")]
+    MlDsa87Es384,
+    /// Composite ML-DSA-44 and Ed25519 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-44-Ed25519")]
+    MlDsa44Ed25519,
+    /// Composite ML-DSA-65 and Ed25519 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-65-Ed25519")]
+    MlDsa65Ed25519,
+    /// Composite ML-DSA-87 and Ed448 (draft-ietf-jose-pq-composite-sigs-03)
+    #[cfg(feature = "post-quantum")]
+    #[serde(rename = "ML-DSA-87-Ed448")]
+    MlDsa87Ed448,
     /// No digital signature (DANGEROUS -- only available with the `deprecated` feature)
     #[cfg(feature = "deprecated")]
     None,
@@ -95,6 +119,30 @@ impl JwsAlgorithm {
             Self::MlDsa65 => Ok(SignatureAlgorithm::MlDsa(kryptering::MlDsaVariant::MlDsa65)),
             #[cfg(feature = "post-quantum")]
             Self::MlDsa87 => Ok(SignatureAlgorithm::MlDsa(kryptering::MlDsaVariant::MlDsa87)),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44Es256 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa44Es256,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65Es256 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa65Es256,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87Es384 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa87Es384,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44Ed25519 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa44Ed25519,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65Ed25519 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa65Ed25519,
+            )),
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87Ed448 => Ok(SignatureAlgorithm::CompositeMlDsa(
+                kryptering::CompositeMlDsaVariant::MlDsa87Ed448,
+            )),
             #[cfg(feature = "deprecated")]
             Self::None => Err(JoseError::UnsupportedAlgorithm(
                 "\"none\" algorithm has no cryptographic operation".into(),
@@ -125,6 +173,18 @@ impl JwsAlgorithm {
             "ML-DSA-65" => Ok(Self::MlDsa65),
             #[cfg(feature = "post-quantum")]
             "ML-DSA-87" => Ok(Self::MlDsa87),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-44-ES256" => Ok(Self::MlDsa44Es256),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-65-ES256" => Ok(Self::MlDsa65Es256),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-87-ES384" => Ok(Self::MlDsa87Es384),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-44-Ed25519" => Ok(Self::MlDsa44Ed25519),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-65-Ed25519" => Ok(Self::MlDsa65Ed25519),
+            #[cfg(feature = "post-quantum")]
+            "ML-DSA-87-Ed448" => Ok(Self::MlDsa87Ed448),
             #[cfg(feature = "deprecated")]
             "none" => Ok(Self::None),
             other => Err(JoseError::UnsupportedAlgorithm(other.to_string())),
@@ -154,6 +214,18 @@ impl JwsAlgorithm {
             Self::MlDsa65 => "ML-DSA-65",
             #[cfg(feature = "post-quantum")]
             Self::MlDsa87 => "ML-DSA-87",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44Es256 => "ML-DSA-44-ES256",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65Es256 => "ML-DSA-65-ES256",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87Es384 => "ML-DSA-87-ES384",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa44Ed25519 => "ML-DSA-44-Ed25519",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa65Ed25519 => "ML-DSA-65-Ed25519",
+            #[cfg(feature = "post-quantum")]
+            Self::MlDsa87Ed448 => "ML-DSA-87-Ed448",
             #[cfg(feature = "deprecated")]
             Self::None => "none",
         }
@@ -354,5 +426,54 @@ mod tests {
         assert!(JwsAlgorithm::RS256.to_crypto().is_ok());
         assert!(JwsAlgorithm::ES256.to_crypto().is_ok());
         assert!(JwsAlgorithm::EdDSA.to_crypto().is_ok());
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn composite_algorithms_roundtrip_and_map_to_kryptering() {
+        use kryptering::CompositeMlDsaVariant as Variant;
+
+        let cases = [
+            (
+                "ML-DSA-44-ES256",
+                JwsAlgorithm::MlDsa44Es256,
+                Variant::MlDsa44Es256,
+            ),
+            (
+                "ML-DSA-65-ES256",
+                JwsAlgorithm::MlDsa65Es256,
+                Variant::MlDsa65Es256,
+            ),
+            (
+                "ML-DSA-87-ES384",
+                JwsAlgorithm::MlDsa87Es384,
+                Variant::MlDsa87Es384,
+            ),
+            (
+                "ML-DSA-44-Ed25519",
+                JwsAlgorithm::MlDsa44Ed25519,
+                Variant::MlDsa44Ed25519,
+            ),
+            (
+                "ML-DSA-65-Ed25519",
+                JwsAlgorithm::MlDsa65Ed25519,
+                Variant::MlDsa65Ed25519,
+            ),
+            (
+                "ML-DSA-87-Ed448",
+                JwsAlgorithm::MlDsa87Ed448,
+                Variant::MlDsa87Ed448,
+            ),
+        ];
+
+        for (name, jose, crypto) in cases {
+            assert_eq!(JwsAlgorithm::from_str(name).unwrap(), jose);
+            assert_eq!(jose.as_str(), name);
+            assert_eq!(
+                jose.to_crypto().unwrap(),
+                kryptering::SignatureAlgorithm::CompositeMlDsa(crypto)
+            );
+            assert_eq!(serde_json::to_string(&jose).unwrap(), format!("\"{name}\""));
+        }
     }
 }

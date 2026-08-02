@@ -96,7 +96,7 @@ pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
     }
 
     let thumbprint_json = serde_json::to_vec(&required)?;
-    let hash = kryptering::digest::digest(kryptering::HashAlgorithm::Sha256, &thumbprint_json);
+    let hash = kryptering::digest::digest(kryptering::HashAlgorithm::Sha256, &thumbprint_json)?;
     Ok(crate::base64url::encode(&hash))
 }
 

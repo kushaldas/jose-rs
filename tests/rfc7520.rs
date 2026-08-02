@@ -150,7 +150,7 @@ fn rfc7520_4_4_hs256_deterministic_roundtrip() {
     .unwrap();
     let signer = SoftwareSigner::new(
         SignatureAlgorithm::Hmac(HashAlgorithm::Sha256),
-        SoftwareKey::Hmac(k),
+        SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &k).unwrap(),
     )
     .unwrap();
     let sig = signer.sign(signing_input.as_bytes()).unwrap();

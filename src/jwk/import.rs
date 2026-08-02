@@ -15,8 +15,8 @@
 
 use p521::elliptic_curve::sec1::ToEncodedPoint;
 use pkcs8::der::Decode;
-use pkcs8::spki::{DecodePublicKey, SubjectPublicKeyInfoRef};
-use pkcs8::{DecodePrivateKey, ObjectIdentifier, PrivateKeyInfo};
+use pkcs8::spki::{DecodePublicKey, EncodePublicKey, SubjectPublicKeyInfoRef};
+use pkcs8::{DecodePrivateKey, EncodePrivateKey, ObjectIdentifier, PrivateKeyInfo};
 use rsa::traits::PublicKeyParts;
 
 use crate::error::{JoseError, Result};
@@ -82,18 +82,17 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
         };
         let public = key.to_public_key();
         ensure_rsa_min_bits(&public)?;
-        kryptering::SoftwareKey::Rsa {
-            private: Some(key),
-            public,
-        }
+        let normalized = key
+            .to_pkcs8_der()
+            .map_err(|e| JoseError::Key(format!("RSA PKCS#8 normalization failed: {e}")))?;
+        kryptering::SoftwareKey::from_pkcs8_der(
+            kryptering::KeyAlgorithm::Rsa,
+            normalized.as_bytes(),
+        )?
     } else if oid == OID_ED25519 {
-        let key = ed25519_dalek::SigningKey::from_pkcs8_der(der)
+        ed25519_dalek::SigningKey::from_pkcs8_der(der)
             .map_err(|e| JoseError::Key(format!("invalid Ed25519 PKCS#8 key: {e}")))?;
-        let public = key.verifying_key();
-        kryptering::SoftwareKey::Ed25519 {
-            private: Some(key),
-            public,
-        }
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der)?
     } else if oid == OID_EC_PUBLIC_KEY {
         let curve = info
             .algorithm
@@ -140,17 +139,17 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
                 .map_err(|e| JoseError::Key(format!("invalid RSA-PSS SPKI key: {e}")))?
         };
         ensure_rsa_min_bits(&key)?;
-        kryptering::SoftwareKey::Rsa {
-            private: None,
-            public: key,
-        }
+        let normalized = key
+            .to_public_key_der()
+            .map_err(|e| JoseError::Key(format!("RSA SPKI normalization failed: {e}")))?;
+        kryptering::SoftwareKey::from_spki_der(
+            kryptering::KeyAlgorithm::Rsa,
+            normalized.as_bytes(),
+        )?
     } else if oid == OID_ED25519 {
-        let key = ed25519_dalek::VerifyingKey::from_public_key_der(der)
+        ed25519_dalek::VerifyingKey::from_public_key_der(der)
             .map_err(|e| JoseError::Key(format!("invalid Ed25519 SPKI key: {e}")))?;
-        kryptering::SoftwareKey::Ed25519 {
-            private: None,
-            public: key,
-        }
+        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Ed25519, der)?
     } else if oid == OID_EC_PUBLIC_KEY {
         let curve = spki
             .algorithm
@@ -171,22 +170,22 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
 fn ec_private_from_pkcs8(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering::SoftwareKey> {
     match curve {
         OID_P256 => {
-            let sk = p256::ecdsa::SigningKey::from_pkcs8_der(der)
+            p256::ecdsa::SigningKey::from_pkcs8_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-256 PKCS#8 key: {e}")))?;
-            let public = *sk.verifying_key();
-            Ok(kryptering::SoftwareKey::EcP256 {
-                private: Some(sk),
-                public,
-            })
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+                der,
+            )
+            .map_err(Into::into)
         }
         OID_P384 => {
-            let sk = p384::ecdsa::SigningKey::from_pkcs8_der(der)
+            p384::ecdsa::SigningKey::from_pkcs8_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-384 PKCS#8 key: {e}")))?;
-            let public = *sk.verifying_key();
-            Ok(kryptering::SoftwareKey::EcP384 {
-                private: Some(sk),
-                public,
-            })
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+                der,
+            )
+            .map_err(Into::into)
         }
         OID_P521 => {
             // p521's ECDSA key types don't implement the pkcs8/spki decoder
@@ -194,13 +193,13 @@ fn ec_private_from_pkcs8(der: &[u8], curve: ObjectIdentifier) -> Result<krypteri
             // bytes (matching the `from_slice` path used elsewhere).
             let secret = p521::SecretKey::from_pkcs8_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-521 PKCS#8 key: {e}")))?;
-            let sk = p521::ecdsa::SigningKey::from_slice(&secret.to_bytes())
+            p521::ecdsa::SigningKey::from_slice(&secret.to_bytes())
                 .map_err(|e| JoseError::Key(format!("invalid P-521 private scalar: {e}")))?;
-            let public = p521::ecdsa::VerifyingKey::from(&sk);
-            Ok(kryptering::SoftwareKey::EcP521 {
-                private: Some(sk),
-                public,
-            })
+            kryptering::SoftwareKey::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+                der,
+            )
+            .map_err(Into::into)
         }
         other => Err(JoseError::Key(format!("unsupported EC curve OID: {other}"))),
     }
@@ -209,32 +208,33 @@ fn ec_private_from_pkcs8(der: &[u8], curve: ObjectIdentifier) -> Result<krypteri
 fn ec_public_from_spki(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering::SoftwareKey> {
     match curve {
         OID_P256 => {
-            let vk = p256::ecdsa::VerifyingKey::from_public_key_der(der)
+            p256::ecdsa::VerifyingKey::from_public_key_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-256 SPKI key: {e}")))?;
-            Ok(kryptering::SoftwareKey::EcP256 {
-                private: None,
-                public: vk,
-            })
+            kryptering::SoftwareKey::from_spki_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P256),
+                der,
+            )
+            .map_err(Into::into)
         }
         OID_P384 => {
-            let vk = p384::ecdsa::VerifyingKey::from_public_key_der(der)
+            p384::ecdsa::VerifyingKey::from_public_key_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-384 SPKI key: {e}")))?;
-            Ok(kryptering::SoftwareKey::EcP384 {
-                private: None,
-                public: vk,
-            })
+            kryptering::SoftwareKey::from_spki_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P384),
+                der,
+            )
+            .map_err(Into::into)
         }
         OID_P521 => {
             let public = p521::PublicKey::from_public_key_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-521 SPKI key: {e}")))?;
-            let vk = p521::ecdsa::VerifyingKey::from_sec1_bytes(
-                public.to_encoded_point(false).as_bytes(),
+            p521::ecdsa::VerifyingKey::from_sec1_bytes(public.to_encoded_point(false).as_bytes())
+                .map_err(|e| JoseError::Key(format!("invalid P-521 public point: {e}")))?;
+            kryptering::SoftwareKey::from_spki_der(
+                kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
+                der,
             )
-            .map_err(|e| JoseError::Key(format!("invalid P-521 public point: {e}")))?;
-            Ok(kryptering::SoftwareKey::EcP521 {
-                private: None,
-                public: vk,
-            })
+            .map_err(Into::into)
         }
         other => Err(JoseError::Key(format!("unsupported EC curve OID: {other}"))),
     }

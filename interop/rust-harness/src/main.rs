@@ -88,6 +88,24 @@ fn gen_key(alg: &str) -> Result<()> {
         "ML-DSA-44" => jose_rs::jwk::generate_mldsa(kryptering::MlDsaVariant::MlDsa44)?,
         "ML-DSA-65" => jose_rs::jwk::generate_mldsa(kryptering::MlDsaVariant::MlDsa65)?,
         "ML-DSA-87" => jose_rs::jwk::generate_mldsa(kryptering::MlDsaVariant::MlDsa87)?,
+        "ML-DSA-44-ES256" => {
+            jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa44Es256)?
+        }
+        "ML-DSA-65-ES256" => {
+            jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa65Es256)?
+        }
+        "ML-DSA-87-ES384" => {
+            jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Es384)?
+        }
+        "ML-DSA-44-Ed25519" => jose_rs::jwk::generate_composite_mldsa(
+            kryptering::CompositeMlDsaVariant::MlDsa44Ed25519,
+        )?,
+        "ML-DSA-65-Ed25519" => jose_rs::jwk::generate_composite_mldsa(
+            kryptering::CompositeMlDsaVariant::MlDsa65Ed25519,
+        )?,
+        "ML-DSA-87-Ed448" => {
+            jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
+        }
         "EdDSA" => set_alg(jose_rs::jwk::generate_ed25519()?, "EdDSA"),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
