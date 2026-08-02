@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 jose-rs = { path = "../..", default-features = false, features = ["post-quantum"] }
-kryptering = { version = "0.5", path = "../../../kryptering", default-features = false, features = ["rustcrypto", "post-quantum"] }
+kryptering = { version = "0.5", default-features = false, features = ["rustcrypto", "post-quantum"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
