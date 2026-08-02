@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 jose-rs = { path = "..", features = ["post-quantum"] }
-kryptering = { version = "0.5", path = "../../kryptering", default-features = false, features = ["rustcrypto", "post-quantum"] }
+kryptering = { version = "0.5", default-features = false, features = ["rustcrypto", "post-quantum"] }
 
 [[bin]]
 name = "base64url_decode"
