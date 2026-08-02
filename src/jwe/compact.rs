@@ -113,7 +113,7 @@ fn jwk_to_jwe_key_bytes(
     jwk: &crate::jwk::Jwk,
     alg: JweAlgorithm,
     for_decrypt: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     match alg {
         JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
             if jwk.kty.as_str() != "oct" {
@@ -127,7 +127,7 @@ fn jwk_to_jwe_key_bytes(
                 .k
                 .as_deref()
                 .ok_or_else(|| JoseError::Key("JWK is missing `k`".into()))?;
-            base64url::decode(k)
+            Ok(Zeroizing::new(base64url::decode(k)?))
         }
         JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
         #[cfg(feature = "deprecated")]
@@ -139,7 +139,7 @@ fn jwk_to_jwe_key_bytes(
     }
 }
 
-fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
+fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Zeroizing<Vec<u8>>> {
     let sw = crate::jwk::jwk_to_software_key(jwk)?;
     if sw.algorithm() != kryptering::KeyAlgorithm::Rsa {
         return Err(JoseError::Key("RSA JWK expected".into()));
@@ -148,9 +148,9 @@ fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Vec<u8>> {
         if !sw.has_private_key() {
             return Err(JoseError::Key("JWK lacks RSA private components".into()));
         }
-        Ok(sw.export_private()?.to_vec())
+        sw.export_private().map_err(Into::into)
     } else {
-        sw.export_spki_der().map_err(Into::into)
+        Ok(Zeroizing::new(sw.export_spki_der()?))
     }
 }
 
