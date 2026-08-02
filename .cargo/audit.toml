@@ -8,10 +8,10 @@
 [advisories]
 ignore = [
     # RSA timing side-channel, a.k.a. the "Marvin" attack. Affects the
-    # `rsa` crate's PKCS#1 v1.5 and OAEP decryption paths. There is no
-    # patched 0.9.x release as of 2026-04; the advisory remains open
-    # upstream. jose-rs uses `rsa` transitively through kryptering for
-    # JWE RSA-OAEP decryption.
+    # `rsa` crate padding and private-key decryption paths. RustSec lists
+    # no patched release as of 2026-08-02, and the upstream issue remains
+    # open. jose-rs depends on `rsa` directly and through kryptering; the
+    # network-observable exposure is JWE RSA-OAEP decryption.
     #
     # Mitigations in jose-rs:
     # - RSA-OAEP SHA-1 variant is gated behind the `deprecated` feature
@@ -22,7 +22,8 @@ ignore = [
     #   opaque error to remove a one-bit oracle (see
     #   rsa_oaep_recover_cek in src/jwe/compact.rs).
     #
-    # Operational guidance: rate-limit JWE decryption failures on the
-    # caller side when RSA-OAEP is in use.
+    # These mitigations reduce oracle exposure but do not remove the
+    # upstream timing side channel. Operational guidance: rate-limit JWE
+    # decryption failures and prefer non-RSA key management algorithms.
     "RUSTSEC-2023-0071",
 ]

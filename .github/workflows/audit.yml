@@ -29,5 +29,15 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        # Honors .cargo/audit.toml for documented allow-list entries.
-        run: cargo audit --deny warnings
+        run: |
+          # Show the human-readable report, including accepted findings.
+          cargo audit
+          # Permit only the known transitive spin 0.9.8 yanked warning.
+          cargo audit --no-fetch --json | jq -e '
+            .vulnerabilities.count == 0 and
+            ([.warnings | to_entries[] | .value[]] | all(
+              .kind == "yanked" and
+              .package.name == "spin" and
+              .package.version == "0.9.8"
+            ))
+          '

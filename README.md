@@ -143,12 +143,17 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 ## Security notes
 
 - **`rsa` crate advisory (RUSTSEC-2023-0071, a.k.a. "Marvin attack").** The
-  upstream `rsa` crate used by this library has a known timing side-channel
-  in PKCS#1 v1.5 and OAEP decryption. The vulnerability affects JWE
-  `RSA-OAEP-256` (and, with the `deprecated` feature, `RSA-OAEP`) on the
-  decryption side. There is no patched `rsa` 0.9.x release yet. If you
-  operate a service that decrypts JWEs from untrusted senders, rate-limit
+  upstream `rsa` crate has a network-observable timing side channel in its
+  padding and private-key decryption paths. This affects JWE `RSA-OAEP-256`
+  and, with the `deprecated` feature, `RSA-OAEP`. RustSec lists no patched
+  release as of 2026-08-02. The mitigations described in `.cargo/audit.toml`
+  reduce oracle exposure but do not fix the upstream issue. Rate-limit
   decryption failures and prefer non-RSA key management algorithms.
+- **Yanked `spin 0.9.8`.** This is a cargo-audit warning, not a RustSec
+  vulnerability. It is pulled in through `num-bigint-dig 0.8.6 ->
+  lazy_static 1.5.0 -> spin 0.9.8`. The current `lazy_static` constraint has
+  no compatible non-yanked release. The warning remains visible in local and
+  CI audit output while the upstream dependency chain is updated.
 - **Trust-sensitive header fields.** `jku`, `x5u`, and `jwk` headers are
   parsed by the library but **never fetched or trusted** — callers must
   never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
@@ -357,13 +362,15 @@ cargo audit
 
 CI runs the same command on every push to `main`, every pull request
 that touches `Cargo.toml` / `Cargo.lock`, and on a weekly schedule
-(`.github/workflows/audit.yml`).
+(`.github/workflows/audit.yml`). With the current lockfile, the command
+completes successfully while still reporting the yanked `spin 0.9.8` warning.
 
-`.cargo/audit.toml` carries a single documented advisory ignore —
-RUSTSEC-2023-0071 (the `rsa` crate Marvin timing advisory) — with
-mitigations described above. Any advisory that is **not** in the
-ignore list fails CI; the ignore file itself is the source of truth
-for "what are we accepting, and why".
+`.cargo/audit.toml` carries one documented advisory ignore:
+RUSTSEC-2023-0071, the `rsa` crate Marvin timing advisory. Any RustSec
+advisory not in that list fails local and CI audits. CI additionally parses
+the JSON report and permits only the exact `spin 0.9.8` yanked warning; any
+other warning fails the job. The audit config and security notes are the
+source of truth for accepted findings and their mitigations.
 
 ### Interop test vectors (RFC 7520)
 
