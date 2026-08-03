@@ -66,32 +66,44 @@ pub struct Jwk {
     pub kid: Option<String>,
 
     // RSA parameters
+    /// Base64url-encoded RSA modulus (`n`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<String>,
+    /// Base64url-encoded RSA public exponent (`e`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e: Option<String>,
+    /// Base64url-encoded RSA private exponent (`d`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub d: Option<String>,
+    /// Base64url-encoded first RSA prime factor (`p`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p: Option<String>,
+    /// Base64url-encoded second RSA prime factor (`q`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
+    /// Base64url-encoded first RSA CRT exponent (`d mod (p - 1)`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dp: Option<String>,
+    /// Base64url-encoded second RSA CRT exponent (`d mod (q - 1)`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dq: Option<String>,
+    /// Base64url-encoded RSA CRT coefficient (`q⁻¹ mod p`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qi: Option<String>,
 
     // EC parameters
+    /// Elliptic-curve identifier (`crv`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crv: Option<String>,
+    /// Base64url-encoded public-key x-coordinate (`x`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub x: Option<String>,
+    /// Base64url-encoded public-key y-coordinate (`y`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub y: Option<String>,
 
     // Symmetric key parameter
+    /// Base64url-encoded symmetric key material (`k`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub k: Option<String>,
 
@@ -100,12 +112,15 @@ pub struct Jwk {
     // `post-quantum` feature is enabled at the kryptering layer but kept
     // unconditionally in the struct so JWKs round-trip through the
     // deserializer regardless of which features a consumer picked.
+    /// Base64url-encoded AKP public-key material (`pub`).
     #[serde(rename = "pub", skip_serializing_if = "Option::is_none")]
     pub pub_: Option<String>,
+    /// Base64url-encoded AKP private-key material (`priv`).
     #[serde(rename = "priv", skip_serializing_if = "Option::is_none")]
     pub priv_: Option<String>,
 
     // Catch-all for additional parameters
+    /// Additional JWK parameters not represented by dedicated fields.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -114,13 +129,21 @@ pub struct Jwk {
 /// (RFC 7517 §4.3 "key_ops" values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JwkOp {
+    /// Create a digital signature or MAC.
     Sign,
+    /// Verify a digital signature or MAC.
     Verify,
+    /// Encrypt content directly.
     Encrypt,
+    /// Decrypt content directly.
     Decrypt,
+    /// Wrap or transport a content-encryption key.
     WrapKey,
+    /// Unwrap or recover a content-encryption key.
     UnwrapKey,
+    /// Derive key material.
     DeriveKey,
+    /// Derive raw shared-secret bits.
     DeriveBits,
 }
 
@@ -338,6 +361,7 @@ impl Jwk {
 /// A JWK Set (RFC 7517 Section 5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwkSet {
+    /// Keys published in the set.
     pub keys: Vec<Jwk>,
 }
 

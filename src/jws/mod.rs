@@ -1,3 +1,10 @@
+//! JSON Web Signature (JWS) signing, verification, and certificate binding.
+//!
+//! [`crate::jws::compact`] implements RFC 7515 Compact Serialization,
+//! [`crate::jws::json`] implements Flattened and General JSON Serialization,
+//! and [`crate::jws::x5`] provides helpers for binding protected headers to
+//! X.509 certificates.
+
 pub mod compact;
 pub mod json;
 pub mod x5;

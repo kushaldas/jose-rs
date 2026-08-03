@@ -147,7 +147,9 @@ fn parse_u64_digits(text: &str) -> Option<u64> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Audience {
+    /// A single audience string.
     Single(String),
+    /// Multiple acceptable audience strings.
     Multiple(Vec<String>),
 }
 

@@ -4,6 +4,8 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-03
+
 ### Added
 
 - Added all six composite ML-DSA JWS algorithms from
@@ -13,8 +15,20 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Changed
 
+- Bumped the crate version to `0.6.0`.
 - Updated to kryptering 0.5's opaque software-key API and raised the minimum
   supported Rust version to 1.88.
+
+### Security
+
+- Changed RSA-OAEP CEK recovery to use implicit rejection: failed unwraps and
+  incorrectly sized CEKs now continue through content authentication with a
+  random zeroizing fallback CEK instead of exposing a distinct early error.
+
+### Documentation
+
+- Completed documentation for the public Rust API and enabled the
+  `missing_docs` lint so new exported items remain documented.
 
 ## [0.5.1] - 2026-07-07
 
