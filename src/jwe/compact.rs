@@ -517,9 +517,14 @@ fn recover_cek(
 }
 
 /// Shared RSA-OAEP CEK recovery (used by both RSA-OAEP-256 and the deprecated
-/// SHA-1 RSA-OAEP variant). Post-decrypt error paths are deliberately merged
-/// into a single opaque error to avoid distinguishable oracles. The recovered
-/// CEK is wrapped in `Zeroizing` so it is wiped when dropped.
+/// SHA-1 RSA-OAEP variant).
+///
+/// A random fallback CEK is generated before attempting the unwrap. Invalid
+/// OAEP ciphertexts and incorrectly sized results use that fallback so they
+/// continue through content authentication instead of returning early. This
+/// implicit-rejection pattern prevents callers from distinguishing an OAEP
+/// failure from a valid unwrap followed by failed content authentication.
+/// Trusted-key parsing and algorithm-configuration errors remain explicit.
 fn rsa_oaep_recover_cek(
     key: &[u8],
     alg: JweAlgorithm,
@@ -528,17 +533,19 @@ fn rsa_oaep_recover_cek(
 ) -> Result<Zeroizing<Vec<u8>>> {
     let priv_key = parse_rsa_private_key(key)?;
     let kt_alg = jwe_alg_to_keytransport(alg)?;
-    let cek_result = kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None);
-    let opaque_err = || {
-        JoseError::Crypto(kryptering::Error::Crypto(
-            "RSA-OAEP key unwrap failed".into(),
-        ))
-    };
-    let cek = Zeroizing::new(cek_result.map_err(|_| opaque_err())?);
-    if cek.len() != cek_len {
-        return Err(opaque_err());
+
+    // Generate this unconditionally so successful and failed unwraps perform
+    // the same random-number generation work. It is zeroized if unused.
+    let fallback_cek = Zeroizing::new(random_bytes(cek_len));
+    let recovered = kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None)
+        .map(Zeroizing::new);
+
+    match recovered {
+        Ok(cek) if cek.len() == cek_len => Ok(cek),
+        // `cek`, when present with the wrong length, and the fallback are both
+        // `Zeroizing`, so neither recovered nor dummy key material lingers.
+        Ok(_) | Err(_) => Ok(fallback_cek),
     }
-    Ok(cek)
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,6 +1256,96 @@ mod tests {
         .unwrap();
         let recovered = decrypt(&priv_der, &token).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    fn assert_rsa_oaep_failure_classes_are_indistinguishable(alg: JweAlgorithm) {
+        let (pub_der, priv_der) = generate_rsa_keypair();
+        let public_key = parse_rsa_public_key(&pub_der).unwrap();
+
+        for enc in [JweEncryption::A256GCM, JweEncryption::A256CbcHs512] {
+            let token = encrypt(&pub_der, b"RSA-OAEP implicit rejection", alg, enc).unwrap();
+            let parts: Vec<&str> = token.splitn(5, '.').collect();
+
+            // An all-zero RSA ciphertext deterministically fails OAEP decoding.
+            let encrypted_key = base64url::decode(parts[1]).unwrap();
+            let invalid_oaep = format!(
+                "{}.{}.{}.{}.{}",
+                parts[0],
+                base64url::encode(&vec![0; encrypted_key.len()]),
+                parts[2],
+                parts[3],
+                parts[4]
+            );
+
+            // A valid OAEP ciphertext carrying the wrong CEK length must take
+            // the same implicit-rejection path as an OAEP decoding failure.
+            let short_cek = kryptering::keytransport::kt_encrypt(
+                jwe_alg_to_keytransport(alg).unwrap(),
+                &public_key,
+                &[0x42],
+                None,
+            )
+            .unwrap();
+            let invalid_cek_length = format!(
+                "{}.{}.{}.{}.{}",
+                parts[0],
+                base64url::encode(&short_cek),
+                parts[2],
+                parts[3],
+                parts[4]
+            );
+
+            // Preserve the valid RSA-OAEP ciphertext and invalidate only the
+            // content-authentication tag.
+            let mut tag = base64url::decode(parts[4]).unwrap();
+            tag[0] ^= 1;
+            let invalid_tag = format!(
+                "{}.{}.{}.{}.{}",
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+                base64url::encode(&tag)
+            );
+
+            let unwrap_error = decrypt(&priv_der, &invalid_oaep).unwrap_err().to_string();
+            let cek_length_error = decrypt(&priv_der, &invalid_cek_length)
+                .unwrap_err()
+                .to_string();
+            let content_error = decrypt(&priv_der, &invalid_tag).unwrap_err().to_string();
+
+            assert_eq!(
+                unwrap_error,
+                content_error,
+                "failure oracle for {}/{}",
+                alg.as_str(),
+                enc.as_str()
+            );
+            assert_eq!(
+                cek_length_error,
+                content_error,
+                "CEK-length oracle for {}/{}",
+                alg.as_str(),
+                enc.as_str()
+            );
+            assert!(!unwrap_error.contains("OAEP"), "unexpected: {unwrap_error}");
+        }
+    }
+
+    /// RSA-OAEP implicit rejection must make an invalid wrapped CEK
+    /// indistinguishable from a valid unwrap followed by failed content
+    /// authentication.
+    #[test]
+    fn rsa_oaep_failure_classes_are_indistinguishable() {
+        assert_rsa_oaep_failure_classes_are_indistinguishable(JweAlgorithm::RsaOaep256);
+    }
+
+    /// The deprecated SHA-1 RSA-OAEP variant shares the same implicit-
+    /// rejection guarantee.
+    #[cfg(feature = "deprecated")]
+    #[test]
+    fn deprecated_rsa_oaep_failure_classes_are_indistinguishable() {
+        assert_rsa_oaep_failure_classes_are_indistinguishable(JweAlgorithm::RsaOaep);
     }
 
     // -- AES-CBC-HS roundtrips --
