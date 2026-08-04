@@ -292,9 +292,13 @@ pub fn verify_flattened_opts(
 /// One signer entry for a General JWS: a signer, its protected header, and
 /// an optional per-signature unprotected `header` member.
 pub struct GeneralSigner<'a> {
+    /// Cryptographic signer used for this signature entry.
     pub signer: &'a dyn kryptering::Signer,
+    /// Protected JOSE header authenticated by this signature.
     pub protected: &'a JoseHeader,
+    /// Optional unprotected per-signature header parameters.
     pub unprotected: Option<serde_json::Value>,
+    /// Signing and critical-header validation options.
     pub options: SignOptions,
 }
 

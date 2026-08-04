@@ -73,15 +73,18 @@ impl Default for Validation {
 }
 
 impl Validation {
+    /// Construct validation settings with secure defaults.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Require the `iss` claim to equal `issuer`.
     pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
         self.issuer = Some(issuer.into());
         self
     }
 
+    /// Require the `aud` claim to contain `audience`.
     pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
         self.audience = Some(audience.into());
         self
@@ -93,6 +96,7 @@ impl Validation {
         self
     }
 
+    /// Set the accepted clock-skew tolerance in seconds.
     pub fn with_leeway(mut self, seconds: u64) -> Self {
         self.leeway = seconds;
         self

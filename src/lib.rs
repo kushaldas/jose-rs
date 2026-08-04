@@ -1,11 +1,25 @@
+//! Pure-Rust JSON Object Signing and Encryption (JOSE) primitives.
+//!
+//! The crate provides JSON Web Signature (JWS), JSON Web Encryption (JWE),
+//! JSON Web Key (JWK), and JSON Web Token (JWT) APIs backed by software keys
+//! and optional PKCS#11 keys. Algorithms are represented by typed enums, and
+//! higher-level JWK APIs bind key metadata to signing, verification,
+//! encryption, and decryption operations.
+//!
+//! Optional crate features enable post-quantum algorithms, deprecated JOSE
+//! algorithms needed for legacy interoperability, and PKCS#11 support.
+
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod algorithm;
 pub mod base64url;
+/// Error and result types returned by JOSE operations.
 pub mod error;
 pub mod header;
 pub mod jwe;
 pub mod jwk;
+/// JSON Web Signature compact and JSON serialization APIs.
 pub mod jws;
 pub mod jwt;
 
