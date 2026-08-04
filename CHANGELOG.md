@@ -4,7 +4,7 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-08-03
+## [0.6.0] - 2026-08-04
 
 ### Added
 
