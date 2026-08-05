@@ -347,13 +347,26 @@ pub fn decrypt_with_options(
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
-    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: reject unknown crit extensions.
+    // RFC 7516 §4.1.3: the library does not implement content compression.
+    // Reject tokens declaring a `zip` member instead of silently returning
+    // the still-compressed bytes as plaintext.
+    if header.extra.contains_key("zip") {
+        return Err(JoseError::InvalidHeader(
+            "unsupported zip header: content compression is not supported".into(),
+        ));
+    }
+
+    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: `crit` must be non-empty and may
+    // name only extensions the library understands — none are supported.
     if let Some(crit) = &header.crit {
-        if !crit.is_empty() {
-            return Err(JoseError::InvalidHeader(format!(
-                "unsupported crit extensions: {crit:?}"
-            )));
+        if crit.is_empty() {
+            return Err(JoseError::InvalidHeader(
+                "crit header must not be empty (RFC 7515 §4.1.11)".into(),
+            ));
         }
+        return Err(JoseError::InvalidHeader(format!(
+            "unsupported crit extensions: {crit:?}"
+        )));
     }
 
     let alg = JweAlgorithm::from_str(&header.alg)?;
@@ -1847,6 +1860,58 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("crit"), "unexpected error: {err}");
+    }
+
+    /// Regression: an empty-but-present crit array must be rejected on JWE
+    /// decrypt (RFC 7515 §4.1.11 requires crit to be non-empty).
+    #[test]
+    fn empty_crit_rejected_on_decrypt() {
+        let cek = [0x42u8; 32];
+        let token = encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        // Rewrite the header to include an empty crit array.
+        let parts: Vec<&str> = token.splitn(5, '.').collect();
+        let mut header: JoseHeader =
+            serde_json::from_slice(&base64url::decode(parts[0]).unwrap()).unwrap();
+        header.crit = Some(Vec::new());
+        let new_header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let tampered_token = format!(
+            "{}.{}.{}.{}.{}",
+            new_header_b64, parts[1], parts[2], parts[3], parts[4]
+        );
+
+        let result = decrypt(&cek, &tampered_token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("crit"), "unexpected error: {err}");
+    }
+
+    /// Regression: a JWE header declaring `zip` (content compression, which
+    /// this library does not implement) must be rejected on decrypt instead
+    /// of returning the compressed bytes as plaintext.
+    #[test]
+    fn zip_header_rejected_on_decrypt() {
+        let cek = [0x42u8; 32];
+        let token = encrypt(&cek, b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+
+        // Rewrite the header to declare DEFLATE compression.
+        let parts: Vec<&str> = token.splitn(5, '.').collect();
+        let mut header: JoseHeader =
+            serde_json::from_slice(&base64url::decode(parts[0]).unwrap()).unwrap();
+        header.extra.insert(
+            "zip".to_string(),
+            serde_json::Value::String("DEF".to_string()),
+        );
+        let new_header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let tampered_token = format!(
+            "{}.{}.{}.{}.{}",
+            new_header_b64, parts[1], parts[2], parts[3], parts[4]
+        );
+
+        let result = decrypt(&cek, &tampered_token);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("zip"), "unexpected error: {err}");
     }
 
     #[test]

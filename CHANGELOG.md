@@ -4,6 +4,38 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
+### Changed
+
+- Bumped the crate version to `0.7.0`.
+
+### Security
+
+- Changed `jwt::decode_with_jwkset` to return a hard error when the token
+  header pins a `kid` that matches no JWK in the set, instead of falling
+  through and trying every key. The try-all fallback now applies to kid-less
+  tokens, and to kid-pinned tokens against a set in which no JWK carries a
+  `kid` at all — such a set cannot be addressed by name, so the pinned `kid`
+  selects nothing and no pinning is weakened by trying each key. Sets that
+  label at least one JWK with a `kid` are treated as addressable and reject
+  an unmatched `kid`.
+- Added `jwt::Validation::require_kid()`, which rejects tokens whose protected
+  header carries no `kid`. `decode_with_jwkset` enforces it before trying any
+  key, closing the path where an attacker holding one key in a JWK Set omits
+  `kid` to reach the try-every-key fallback and be accepted under that key.
+  Off by default — `kid` is optional in RFC 7515 §4.1.4.
+- Rejected JWE tokens whose protected header declares a `zip` member, since
+  content compression is not implemented and the compressed bytes would
+  previously have been returned as plaintext.
+- Rejected empty-but-present `crit` header arrays on JWE decrypt per
+  RFC 7515 §4.1.11.
+
+### Documentation
+
+- Added ADRs 0002–0004 under `docs/adr/` covering the three security fixes
+  above.
+
 ## [0.6.0] - 2026-08-04
 
 ### Added
