@@ -1898,9 +1898,10 @@ mod tests {
         let parts: Vec<&str> = token.splitn(5, '.').collect();
         let mut header: JoseHeader =
             serde_json::from_slice(&base64url::decode(parts[0]).unwrap()).unwrap();
-        header
-            .extra
-            .insert("zip".to_string(), serde_json::Value::String("DEF".to_string()));
+        header.extra.insert(
+            "zip".to_string(),
+            serde_json::Value::String("DEF".to_string()),
+        );
         let new_header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
         let tampered_token = format!(
             "{}.{}.{}.{}.{}",
