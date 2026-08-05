@@ -50,6 +50,15 @@ pub struct Validation {
     /// `with_max_age` enables this automatically because a max-age policy
     /// cannot be evaluated without an issued-at timestamp.
     pub require_iat: bool,
+    /// Whether to reject tokens whose protected header carries no `kid`
+    /// (default: false).
+    ///
+    /// Enable this for strict key pinning against a [`crate::jwk::JwkSet`].
+    /// [`crate::jwt::decode_with_jwkset`] tries every key in the set for a
+    /// kid-less token, so a token that names no key can be accepted under
+    /// any key in the set. Requiring `kid` forces every token to name the
+    /// key it was signed with before any verification is attempted.
+    pub require_kid: bool,
 }
 
 impl Default for Validation {
@@ -68,6 +77,7 @@ impl Default for Validation {
             require_exp: false,
             require_nbf: false,
             require_iat: false,
+            require_kid: false,
         }
     }
 }
@@ -138,6 +148,18 @@ impl Validation {
         self
     }
 
+    /// Require the protected header to carry a `kid`.
+    ///
+    /// Use this with [`crate::jwt::decode_with_jwkset`] when the JWK Set
+    /// holds keys of differing trust (multiple issuers, or a legacy key
+    /// kept through a rotation window). Without it, an attacker holding
+    /// any one key in the set can omit `kid` and have the token accepted
+    /// under that key via the try-every-key fallback.
+    pub fn require_kid(mut self) -> Self {
+        self.require_kid = true;
+        self
+    }
+
     /// Restrict the set of permitted JWS algorithms. Defence in depth on
     /// top of the verifier-binding enforced at the JWS layer. An empty
     /// list means no additional restriction.
@@ -165,6 +187,11 @@ impl Validation {
     fn validate_internal(&self, claims: &Claims, header: Option<&JoseHeader>) -> Result<()> {
         // Header-bound checks (run first — fail fast on a mis-typed token).
         if let Some(h) = header {
+            if self.require_kid && h.kid.is_none() {
+                return Err(JoseError::InvalidHeader(
+                    "missing required kid header".into(),
+                ));
+            }
             if let Some(required_typ) = &self.required_typ {
                 match &h.typ {
                     Some(t) if t == required_typ => {}

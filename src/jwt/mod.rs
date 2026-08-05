@@ -196,10 +196,14 @@ pub fn decode_with_jwk(
 /// Decode and validate a JWT using a JWK Set (the canonical OIDC flow).
 ///
 /// If the token header carries a `kid`, the matching JWK is selected and
-/// [`decode_with_jwk`] is called; a `kid` that matches no JWK in the set
-/// is a hard error. If no `kid` is present, every key in the set is tried
-/// in order; the first one whose signature validates wins. Returns the
-/// last error if no key in the set validates the token.
+/// [`decode_with_jwk`] is called; a `kid` that matches no JWK in a set whose
+/// keys are labelled with `kid` is a hard error. If no `kid` is present, every
+/// key in the set is tried in order; the first one whose signature validates
+/// wins. Returns the last error if no key in the set validates the token.
+///
+/// The try-every-key fallback means a token that names no key can be accepted
+/// under any key in the set. Where the set mixes keys of differing trust, pair
+/// this with [`Validation::require_kid`] to force every token to name its key.
 pub fn decode_with_jwkset(
     set: &crate::jwk::JwkSet,
     token: &str,
@@ -213,15 +217,29 @@ pub fn decode_with_jwkset(
     // a token under a key the token did not name, letting an attacker
     // smuggle a signature past key-pinning policies.
     if let Some(kid) = header.kid.as_deref() {
-        return match set.find_by_kid(kid) {
-            Some(jwk) => decode_with_jwk(jwk, token, validation),
-            None => Err(JoseError::Key(format!(
+        if let Some(jwk) = set.find_by_kid(kid) {
+            return decode_with_jwk(jwk, token, validation);
+        }
+        // Exception: a set in which no JWK carries a `kid` at all cannot be
+        // addressed by name, so a pinned kid selects nothing and the token is
+        // in exactly the position of a kid-less one. Publishing a JWK Set
+        // without `kid` is common for single-key issuers, so fall through to
+        // try-all rather than rejecting outright. No pinning is weakened:
+        // there is no key the token could have named instead.
+        if set.keys.iter().any(|jwk| jwk.kid.is_some()) {
+            return Err(JoseError::Key(format!(
                 "no JWK in the set matches the token's kid {kid:?}"
-            ))),
-        };
+            )));
+        }
+    } else if validation.require_kid {
+        // Fail before touching any key: the whole point of require_kid is to
+        // stop attacker-controlled input being run against every key in the set.
+        return Err(JoseError::InvalidHeader(
+            "missing required kid header".into(),
+        ));
     }
 
-    // No kid pinned: try every key until one verifies.
+    // No usable kid pinning: try every key until one verifies.
     if set.keys.is_empty() {
         return Err(JoseError::Key("JWK Set is empty".into()));
     }
@@ -873,6 +891,116 @@ mod tests {
 
         let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
         let err = decode_with_jwkset(&set, &token, &Validation::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid"), "unexpected error: {err}");
+    }
+
+    /// decode_with_jwkset: a set whose JWKs carry no `kid` at all cannot be
+    /// addressed by name, so a kid-pinned token still falls through to
+    /// try-all. Publishing a kid-less JWK Set is common for single-key
+    /// issuers and must keep working.
+    #[test]
+    fn decode_with_jwkset_kidless_set_accepts_kid_pinned_token() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+        jwk.kid = None; // issuer published the set without kid
+
+        let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
+        let mut header = JoseHeader::jwt("HS256");
+        header.kid = Some("signer-1".into()); // but the signer pins one
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet { keys: vec![jwk] };
+        decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+    }
+
+    /// A set that labels *some* key with a kid is addressable, so an
+    /// unmatched kid stays a hard error even though another key would
+    /// have verified the token.
+    #[test]
+    fn decode_with_jwkset_partially_labelled_set_still_rejects_unknown_kid() {
+        let mut labelled = crate::jwk::generate_symmetric(32).unwrap();
+        labelled.alg = Some("HS256".into());
+        labelled.kid = Some("a".into());
+
+        let mut unlabelled = crate::jwk::generate_symmetric(32).unwrap();
+        unlabelled.alg = Some("HS256".into());
+        unlabelled.kid = None;
+
+        // Sign with the unlabelled key, pin a kid nothing matches.
+        let k = crate::base64url::decode(unlabelled.k.as_ref().unwrap()).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
+        let mut header = JoseHeader::jwt("HS256");
+        header.kid = Some("zzz".into());
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![labelled, unlabelled],
+        };
+        let err = decode_with_jwkset(&set, &token, &Validation::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid"), "unexpected error: {err}");
+    }
+
+    /// `Validation::require_kid` closes the kid-less try-all path: an
+    /// attacker holding one key in the set can otherwise omit `kid` and be
+    /// accepted under it.
+    #[test]
+    fn require_kid_rejects_kidless_token_against_jwkset() {
+        let mut trusted = crate::jwk::generate_symmetric(32).unwrap();
+        trusted.alg = Some("HS256".into());
+        trusted.kid = Some("prod-signer".into());
+
+        let mut low_trust = crate::jwk::generate_symmetric(32).unwrap();
+        low_trust.alg = Some("HS256".into());
+        low_trust.kid = Some("legacy".into());
+
+        // Attacker holds `low_trust` and omits kid entirely.
+        let k = crate::base64url::decode(low_trust.k.as_ref().unwrap()).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
+        let header = JoseHeader::jwt("HS256"); // no kid
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet {
+            keys: vec![trusted, low_trust],
+        };
+
+        // Default validation still accepts it (documented try-all behaviour).
+        decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+
+        // require_kid closes it.
+        let err = decode_with_jwkset(&set, &token, &Validation::new().require_kid())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid"), "unexpected error: {err}");
+    }
+
+    /// require_kid also applies on the single-JWK and verifier paths, not
+    /// just the JWK Set one.
+    #[test]
+    fn require_kid_applies_to_plain_decode() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("HS256".into());
+
+        let k = crate::base64url::decode(jwk.k.as_ref().unwrap()).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
+        let verifier = SoftwareVerifier::new(hmac_algo(), hmac_key_from(&k)).unwrap();
+        let header = JoseHeader::jwt("HS256"); // no kid
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        decode(&verifier, &token, &Validation::new()).unwrap();
+        let err = decode(&verifier, &token, &Validation::new().require_kid())
             .unwrap_err()
             .to_string();
         assert!(err.contains("kid"), "unexpected error: {err}");

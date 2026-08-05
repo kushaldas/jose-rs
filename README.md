@@ -249,8 +249,14 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   Each API enforces `Jwk::check_op` for the intended operation
   (`Sign`/`Verify`/`Encrypt`/`Decrypt`/`WrapKey`/`UnwrapKey`) and constructs
   the underlying signer/verifier or key-material form internally.
-  `decode_with_jwkset` is the canonical OIDC flow (kid-lookup with
-  fall-through to each key in the set). For new symmetric JWKs, prefer
+  `decode_with_jwkset` is the canonical OIDC flow: a token pinning a `kid`
+  selects exactly that JWK, and a `kid` matching nothing in an addressable
+  set is a hard error rather than a fall-through. Tokens carrying no `kid`
+  — and tokens pinning one against a set whose JWKs are themselves all
+  `kid`-less, which cannot be addressed by name — try each key in the set
+  in turn. Because that fallback can accept a token under any key in the
+  set, pair it with `Validation::require_kid()` when the set mixes keys of
+  differing trust. For new symmetric JWKs, prefer
   `jwk::generate_symmetric_for_alg(...)` or `jwk::generate_direct_symmetric(...)`
   so `alg` and `use` are pinned at creation time.
 
