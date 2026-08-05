@@ -1,6 +1,6 @@
 [package]
 name = "jose-rs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"

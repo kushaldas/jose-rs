@@ -4,6 +4,29 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
+### Changed
+
+- Bumped the crate version to `0.7.0`.
+
+### Security
+
+- Changed `jwt::decode_with_jwkset` to return a hard error when the token
+  header pins a `kid` that matches no JWK in the set, instead of falling
+  through and trying every key; the try-all fallback now applies only to
+  kid-less tokens.
+- Rejected JWE tokens whose protected header declares a `zip` member, since
+  content compression is not implemented and the compressed bytes would
+  previously have been returned as plaintext.
+- Rejected empty-but-present `crit` header arrays on JWE decrypt per
+  RFC 7515 §4.1.11.
+
+### Documentation
+
+- Added ADRs 0002–0004 under `docs/adr/` covering the three security fixes
+  above.
+
 ## [0.6.0] - 2026-08-04
 
 ### Added

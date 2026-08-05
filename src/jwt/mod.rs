@@ -196,10 +196,10 @@ pub fn decode_with_jwk(
 /// Decode and validate a JWT using a JWK Set (the canonical OIDC flow).
 ///
 /// If the token header carries a `kid`, the matching JWK is selected and
-/// [`decode_with_jwk`] is called. If no `kid` is present (or no JWK in
-/// the set matches), every key in the set is tried in order; the first
-/// one whose signature validates wins. Returns the last error if no key
-/// in the set validates the token.
+/// [`decode_with_jwk`] is called; a `kid` that matches no JWK in the set
+/// is a hard error. If no `kid` is present, every key in the set is tried
+/// in order; the first one whose signature validates wins. Returns the
+/// last error if no key in the set validates the token.
 pub fn decode_with_jwkset(
     set: &crate::jwk::JwkSet,
     token: &str,
@@ -208,14 +208,20 @@ pub fn decode_with_jwkset(
     let header = crate::jws::compact::decode_header(token)?;
 
     // Prefer kid-based selection when the header pins one and the set
-    // contains a matching JWK.
+    // contains a matching JWK. A pinned kid that matches nothing in the
+    // set is a hard error: falling through to try every key would accept
+    // a token under a key the token did not name, letting an attacker
+    // smuggle a signature past key-pinning policies.
     if let Some(kid) = header.kid.as_deref() {
-        if let Some(jwk) = set.find_by_kid(kid) {
-            return decode_with_jwk(jwk, token, validation);
-        }
+        return match set.find_by_kid(kid) {
+            Some(jwk) => decode_with_jwk(jwk, token, validation),
+            None => Err(JoseError::Key(format!(
+                "no JWK in the set matches the token's kid {kid:?}"
+            ))),
+        };
     }
 
-    // Otherwise fall through: try every key until one verifies.
+    // No kid pinned: try every key until one verifies.
     if set.keys.is_empty() {
         return Err(JoseError::Key("JWK Set is empty".into()));
     }
@@ -846,6 +852,30 @@ mod tests {
         };
         // Fallback finds jwk_b on second try.
         decode_with_jwkset(&set, &token, &Validation::new()).unwrap();
+    }
+
+    /// decode_with_jwkset: kid present but unmatched → hard error, no
+    /// fallthrough to try-all (even though the signing key is in the set).
+    #[test]
+    fn decode_with_jwkset_unknown_kid_rejected() {
+        let mut jwk_a = crate::jwk::generate_symmetric(32).unwrap();
+        jwk_a.alg = Some("HS256".into());
+        jwk_a.kid = Some("a".into());
+
+        // Sign with jwk_a but pin a kid the set does not contain.
+        let k_a = crate::base64url::decode(jwk_a.k.as_ref().unwrap()).unwrap();
+        let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k_a)).unwrap();
+        let mut header = JoseHeader::jwt("HS256");
+        header.kid = Some("zzz".into());
+        let mut claims = Claims::default();
+        claims.exp = Some(now() + 3600);
+        let token = encode(&signer, &header, &claims).unwrap();
+
+        let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
+        let err = decode_with_jwkset(&set, &token, &Validation::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid"), "unexpected error: {err}");
     }
 
     /// decode_with_jwkset: no key in the set matches → error.
