@@ -23,6 +23,9 @@ pub mod jwk;
 pub mod jws;
 pub mod jwt;
 
+#[cfg(test)]
+mod security_tests;
+
 pub use algorithm::{JweAlgorithm, JweEncryption, JwsAlgorithm};
 pub use error::{JoseError, Result};
 pub use header::JoseHeader;
