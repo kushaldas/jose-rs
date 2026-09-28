@@ -4,6 +4,21 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-28
+
+### Changed
+
+- Bumped the crate version to `0.7.1`.
+- Updated `kryptering` from `0.5` to `0.6` in the library, fuzz targets, and
+  interop harness, and refreshed the dependency lockfiles.
+- Kept transitive `aes` at `0.9.2` in the lockfiles to preserve Rust 1.88
+  compatibility (`0.9.3` requires Rust 1.89).
+- Updated compatible dependencies, including `rand`, `serde`, `serde_json`,
+  `thiserror`, and `cryptoki`.
+- Replaced the yanked transitive `spin 0.9.8` dependency with `0.9.9` and
+  removed its obsolete CI audit warning exception.
+
+
 ## [0.7.0] - 2026-08-05
 
 ### Changed

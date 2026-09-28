@@ -149,11 +149,6 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   release as of 2026-08-02. The mitigations described in `.cargo/audit.toml`
   reduce oracle exposure but do not fix the upstream issue. Rate-limit
   decryption failures and prefer non-RSA key management algorithms.
-- **Yanked `spin 0.9.8`.** This is a cargo-audit warning, not a RustSec
-  vulnerability. It is pulled in through `num-bigint-dig 0.8.6 ->
-  lazy_static 1.5.0 -> spin 0.9.8`. The current `lazy_static` constraint has
-  no compatible non-yanked release. The warning remains visible in local and
-  CI audit output while the upstream dependency chain is updated.
 - **Trust-sensitive header fields.** `jku`, `x5u`, and `jwk` headers are
   parsed by the library but **never fetched or trusted** — callers must
   never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
@@ -266,7 +261,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.5", features = ["post-quantum"] }
+jose-rs = { version = "0.7.1", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's
@@ -363,20 +358,19 @@ Local run:
 
 ```
 cargo install --locked cargo-audit
-cargo audit
+cargo audit --deny warnings
 ```
 
 CI runs the same command on every push to `main`, every pull request
 that touches `Cargo.toml` / `Cargo.lock`, and on a weekly schedule
 (`.github/workflows/audit.yml`). With the current lockfile, the command
-completes successfully while still reporting the yanked `spin 0.9.8` warning.
+completes successfully without warnings.
 
 `.cargo/audit.toml` carries one documented advisory ignore:
 RUSTSEC-2023-0071, the `rsa` crate Marvin timing advisory. Any RustSec
-advisory not in that list fails local and CI audits. CI additionally parses
-the JSON report and permits only the exact `spin 0.9.8` yanked warning; any
-other warning fails the job. The audit config and security notes are the
-source of truth for accepted findings and their mitigations.
+advisory not in that list fails local and CI audits. The `--deny warnings`
+flag also rejects all audit warnings. The audit config and security notes
+are the source of truth for accepted findings and their mitigations.
 
 ### Interop test vectors (RFC 7520)
 
