@@ -6,6 +6,20 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [0.7.1] - 2026-09-28
 
+### Security
+
+- Reject RSA-PSS-specific PKCS#8 and SPKI imports instead of silently losing
+  their PSS-only and parameter restrictions during JWK conversion. This also
+  rejects PSS wrappers with absent parameters. Ordinary `rsaEncryption` DER
+  remains supported for RS* and PS* algorithms.
+- Add regression coverage for mixed-case, whitespace, and escaped `alg`
+  values across JWS and JWT verification APIs.
+
+### Documentation
+
+- Document the RSA-PSS import restriction and the security invariants checked
+  by the new test helpers and regression tests.
+
 ### Changed
 
 - Bumped the crate version to `0.7.1`.

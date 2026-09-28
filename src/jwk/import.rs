@@ -27,9 +27,7 @@ use crate::jwk::Jwk;
 // pulled from a const-oid database feature so the set we accept is explicit
 // and auditable.
 const OID_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
-// RSASSA-PSS (RFC 8017 §A.2.3). Keys for PS* JWS algorithms are sometimes
-// wrapped under this OID instead of plain rsaEncryption; the inner key
-// material is the same PKCS#1 structure.
+// RSASSA-PSS keys carry restrictions that a generic RSA JWK cannot retain.
 const OID_RSA_PSS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const OID_ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
@@ -38,6 +36,21 @@ const OID_ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112"
 const OID_P256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_P384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
 const OID_P521: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.35");
+
+/// Reject a PSS-specific key before decoding or normalizing its key material.
+///
+/// Even absent parameters retain a PSS-only restriction through the OID.
+/// The generic RSA JWK representation cannot enforce that restriction, so
+/// both public and private importers must fail instead of silently losing it.
+fn reject_pss_key(oid: ObjectIdentifier) -> Result<()> {
+    if oid == OID_RSA_PSS {
+        return Err(JoseError::Key(
+            "RSA-PSS-specific DER keys are unsupported: JWK conversion cannot preserve their restrictions"
+                .into(),
+        ));
+    }
+    Ok(())
+}
 
 fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
     if key.n().bits() < crate::MIN_RSA_BITS {
@@ -59,6 +72,11 @@ fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
 /// no `alg` pinned (the caller selects the precise JWS algorithm — e.g.
 /// `RS256` vs `PS256` for the same RSA key — by setting `jwk.alg`).
 ///
+/// RSA-PSS-specific DER keys are rejected, including those with absent
+/// parameters: converting them to a generic RSA JWK would lose their
+/// PSS-only and parameter restrictions. Ordinary `rsaEncryption` keys
+/// remain supported for both RS* and PS* algorithms.
+///
 /// This is the private-key counterpart of josekit's `signer_from_der`:
 /// follow it with [`crate::jws::compact::sign_with_jwk`] after pinning
 /// `jwk.alg`.
@@ -66,20 +84,11 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
     let info = PrivateKeyInfo::from_der(der)
         .map_err(|e| JoseError::Key(format!("invalid PKCS#8 DER: {e}")))?;
     let oid = info.algorithm.oid;
+    reject_pss_key(oid)?;
 
-    let sw = if oid == OID_RSA || oid == OID_RSA_PSS {
-        // rsaEncryption-wrapped keys decode through the standard PKCS#8 path.
-        // rsassaPss-wrapped keys carry the same PKCS#1 `RSAPrivateKey` in the
-        // `privateKey` field, but the rsa crate's PKCS#8 decoder only accepts
-        // the rsaEncryption OID, so parse the inner PKCS#1 structure directly.
-        let key = if oid == OID_RSA {
-            rsa::RsaPrivateKey::from_pkcs8_der(der)
-                .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?
-        } else {
-            use rsa::pkcs1::DecodeRsaPrivateKey;
-            rsa::RsaPrivateKey::from_pkcs1_der(info.private_key)
-                .map_err(|e| JoseError::Key(format!("invalid RSA-PSS PKCS#8 key: {e}")))?
-        };
+    let sw = if oid == OID_RSA {
+        let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
+            .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
         let public = key.to_public_key();
         ensure_rsa_min_bits(&public)?;
         let normalized = key
@@ -115,6 +124,10 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
 /// (P-256/384/521), and Ed25519 public keys. The returned JWK carries only
 /// public components and pins no `alg`.
 ///
+/// RSA-PSS-specific DER keys are rejected, including those with absent
+/// parameters, because this conversion cannot preserve their restrictions.
+/// Ordinary `rsaEncryption` keys remain supported for RS* and PS* algorithms.
+///
 /// This is the public-key counterpart of josekit's `verifier_from_der`:
 /// follow it with [`crate::jws::compact::verify_with_jwk`] (which derives
 /// the algorithm from the token header) or build a verifier explicitly.
@@ -122,22 +135,11 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
     let spki = SubjectPublicKeyInfoRef::from_der(der)
         .map_err(|e| JoseError::Key(format!("invalid SPKI DER: {e}")))?;
     let oid = spki.algorithm.oid;
+    reject_pss_key(oid)?;
 
-    let sw = if oid == OID_RSA || oid == OID_RSA_PSS {
-        // As on the private side: rsaEncryption decodes through the SPKI path,
-        // while an rssaPss-wrapped SPKI carries the same PKCS#1 `RSAPublicKey`
-        // in its BIT STRING, which the rsa crate's SPKI decoder rejects.
-        let key = if oid == OID_RSA {
-            rsa::RsaPublicKey::from_public_key_der(der)
-                .map_err(|e| JoseError::Key(format!("invalid RSA SPKI key: {e}")))?
-        } else {
-            use rsa::pkcs1::DecodeRsaPublicKey;
-            let inner = spki.subject_public_key.as_bytes().ok_or_else(|| {
-                JoseError::Key("RSA-PSS SPKI public key is not byte-aligned".into())
-            })?;
-            rsa::RsaPublicKey::from_pkcs1_der(inner)
-                .map_err(|e| JoseError::Key(format!("invalid RSA-PSS SPKI key: {e}")))?
-        };
+    let sw = if oid == OID_RSA {
+        let key = rsa::RsaPublicKey::from_public_key_der(der)
+            .map_err(|e| JoseError::Key(format!("invalid RSA SPKI key: {e}")))?;
         ensure_rsa_min_bits(&key)?;
         let normalized = key
             .to_public_key_der()
@@ -304,12 +306,14 @@ mod tests {
         );
     }
 
-    /// RSASSA-PSS-wrapped keys (OID 1.2.840.113549.1.1.10) import as RSA and
-    /// round-trip through a PS256 sign/verify. The rsa crate's PKCS#8/SPKI
-    /// decoders reject this OID, so the importer parses the inner PKCS#1.
+    /// Neither importer may silently discard the PSS-only identity or
+    /// parameter restrictions, even when the inner RSA material is valid.
     #[test]
-    fn rsa_pss_oid_wrapped_keys_import() {
-        use pkcs8::der::{asn1::BitStringRef, Encode};
+    fn rsa_pss_oid_wrapped_keys_rejected() {
+        use pkcs8::der::{
+            asn1::{AnyRef, BitStringRef},
+            Encode,
+        };
         use pkcs8::spki::SubjectPublicKeyInfoRef;
         use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfo};
         use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
@@ -317,31 +321,52 @@ mod tests {
         let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
         let pk = sk.to_public_key();
 
-        // Wrap the PKCS#1 RSAPrivateKey in a PKCS#8 PrivateKeyInfo bearing the
-        // rsassaPss OID.
         let pkcs1_priv = sk.to_pkcs1_der().unwrap();
-        let priv_info = PrivateKeyInfo {
-            algorithm: AlgorithmIdentifierRef {
-                oid: OID_RSA_PSS,
-                parameters: None,
-            },
-            private_key: pkcs1_priv.as_bytes(),
-            public_key: None,
-        };
-        let priv_der = priv_info.to_der().unwrap();
-
-        // Wrap the PKCS#1 RSAPublicKey in an SPKI bearing the rsassaPss OID.
         let pkcs1_pub = pk.to_pkcs1_der().unwrap();
-        let spki = SubjectPublicKeyInfoRef {
-            algorithm: AlgorithmIdentifierRef {
-                oid: OID_RSA_PSS,
-                parameters: None,
-            },
-            subject_public_key: BitStringRef::from_bytes(pkcs1_pub.as_bytes()).unwrap(),
-        };
-        let pub_der = spki.to_der().unwrap();
+        let default_params = rsa::pkcs1::RsaPssParams::default().to_der().unwrap();
+        let sha256_params = rsa::pkcs1::RsaPssParams::new::<sha2::Sha256>(32)
+            .to_der()
+            .unwrap();
+        let sha512_params = rsa::pkcs1::RsaPssParams::new::<sha2::Sha512>(64)
+            .to_der()
+            .unwrap();
 
-        der_roundtrip("PS256", &priv_der, &pub_der);
+        for (label, parameters) in [
+            ("absent", None),
+            (
+                "default sequence",
+                Some(AnyRef::from_der(&default_params).unwrap()),
+            ),
+            ("SHA-256", Some(AnyRef::from_der(&sha256_params).unwrap())),
+            ("SHA-512", Some(AnyRef::from_der(&sha512_params).unwrap())),
+            ("invalid NULL", Some(AnyRef::NULL)),
+        ] {
+            let algorithm = AlgorithmIdentifierRef {
+                oid: OID_RSA_PSS,
+                parameters,
+            };
+            let private = PrivateKeyInfo {
+                algorithm,
+                private_key: pkcs1_priv.as_bytes(),
+                public_key: None,
+            }
+            .to_der()
+            .unwrap();
+            let public = SubjectPublicKeyInfoRef {
+                algorithm,
+                subject_public_key: BitStringRef::from_bytes(pkcs1_pub.as_bytes()).unwrap(),
+            }
+            .to_der()
+            .unwrap();
+
+            for result in [jwk_from_pkcs8_der(&private), jwk_from_spki_der(&public)] {
+                assert!(
+                    matches!(result, Err(JoseError::Key(ref message))
+                    if message.contains("cannot preserve their restrictions")),
+                    "PSS parameters {label} must be rejected: {result:?}"
+                );
+            }
+        }
     }
 
     #[test]
