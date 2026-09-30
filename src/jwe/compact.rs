@@ -40,7 +40,20 @@ pub fn encrypt(
     encrypt_with_header(JoseHeader::for_jwe(alg, enc), key, plaintext, alg, enc)
 }
 
-pub(crate) fn encrypt_with_header(
+/// Encrypt plaintext with an explicit authenticated protected header.
+///
+/// Key formats are the same as for [`encrypt`]. The header's `alg` and `enc`
+/// must match the supplied algorithms. Every serialized header member is
+/// authenticated as additional authenticated data; changing it invalidates
+/// the token. JWK metadata is not checked by this raw-key API; use
+/// [`encrypt_with_jwk_header`] to enforce JWK operation permissions.
+///
+/// # Errors
+///
+/// Returns an error for inconsistent headers, unsupported algorithms, invalid
+/// key material or key sizes, or an encryption failure. Compression and
+/// critical extensions are not implemented by the corresponding decrypt API.
+pub fn encrypt_with_header(
     header: JoseHeader,
     key: &[u8],
     plaintext: &[u8],
@@ -181,7 +194,20 @@ pub fn encrypt_with_jwk(
     )
 }
 
-pub(crate) fn encrypt_with_jwk_header(
+/// Encrypt plaintext using a JWK and an explicit authenticated protected header.
+///
+/// The key-management algorithm comes from `jwk.alg`, which must be set and
+/// match `header.alg`; `header.enc` must match `enc`. Enforces `Encrypt` for
+/// `dir` and `WrapKey` for AES key wrap and RSA-OAEP. All serialized protected
+/// header members are authenticated, allowing application fields such as
+/// `kid`, `typ`, and `cty` without modifying the encryption implementation.
+///
+/// # Errors
+///
+/// Returns an error when the JWK algorithm or operation permissions reject
+/// encryption, the header algorithms disagree, key material is invalid, or
+/// encryption fails. See [`encrypt_with_header`] for header limitations.
+pub fn encrypt_with_jwk_header(
     jwk: &crate::jwk::Jwk,
     header: JoseHeader,
     plaintext: &[u8],

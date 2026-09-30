@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "jose-rs"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",

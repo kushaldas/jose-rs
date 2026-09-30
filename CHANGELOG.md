@@ -4,6 +4,22 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-30
+
+### Added
+
+- Expose `jwe::encrypt_with_header` and `jwe::encrypt_with_jwk_header`, also
+  available through `jwe::compact`, so bindings and applications can encrypt
+  with authenticated custom protected headers without patching or vendoring
+  the backend. Algorithm/header consistency and JWK operation permissions
+  remain enforced.
+- Add public-API regression tests for custom header authentication, mismatched
+  algorithms, and JWK operation restrictions.
+
+### Changed
+
+- Bumped the crate version to `0.7.2`.
+
 ## [0.7.1] - 2026-09-28
 
 ### Security
