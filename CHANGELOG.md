@@ -12,9 +12,29 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   available through `jwe::compact`, so bindings and applications can encrypt
   with authenticated custom protected headers without patching or vendoring
   the backend. Algorithm/header consistency and JWK operation permissions
-  remain enforced.
+  remain enforced. Caller-supplied headers are rejected when `extra` repeats
+  a typed member (`alg`, `enc`, `kid`, `crit`, ...), when `extra` declares
+  `zip`, or when `crit` is set, so these APIs never emit a token that the
+  decrypt side refuses or that different JSON parsers read differently.
 - Add public-API regression tests for custom header authentication, mismatched
-  algorithms, and JWK operation restrictions.
+  algorithms, JWK operation restrictions, duplicate header members, and
+  unsupported `zip`/`crit` headers.
+
+### Security
+
+- Reject JWS protected headers whose `extra` map repeats a member already
+  serialized by a typed `JoseHeader` field (`alg`, `enc`, `kid`, `typ`,
+  `cty`, `jku`, `jwk`, `x5u`, `x5c`, `x5t`, `x5t#S256`, `crit`). `extra` is
+  flattened into the same JSON object, so such a header was signed with a
+  duplicate member, e.g. `{"alg":"HS256","alg":"none"}`. The sign-side `alg`
+  and `crit` checks only saw the typed field, while last-key-wins parsers
+  (JavaScript `JSON.parse`, panva/jose) read the `extra` value. The check
+  applies to all JWS signing paths (compact, flattened and general JSON,
+  `sign_with_jwk`) and to JWT encoding. This crate's own verifier already
+  rejected such tokens as duplicate fields.
+- Add a unit test that keeps the reserved member list in sync with the
+  `JoseHeader` fields, plus regression tests across every JWS/JWT signing
+  entry point.
 
 ### Changed
 

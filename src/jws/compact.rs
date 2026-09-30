@@ -215,11 +215,19 @@ pub(crate) fn ensure_token_size(token: &str) -> Result<()> {
 /// Cross-check the protected header against the signer and the RFC 7797 /
 /// understood-`crit` policy carried in `opts`. Returns the effective `b64`
 /// flag (so the caller knows whether to encode the payload).
+///
+/// This is the single sign-side gate shared by the compact, flattened and
+/// general JSON serializers (and so by JWT encoding). It first rejects an
+/// `extra` map that shadows a typed member: the `alg` and `crit` checks
+/// below only see the typed fields, so `extra["alg"] = "none"` or
+/// `extra["crit"]` would otherwise be signed unvalidated as a duplicate JSON
+/// member that last-key-wins verifiers read instead.
 pub(crate) fn validate_sign_header_opts(
     header: &JoseHeader,
     signer: &dyn kryptering::Signer,
     opts: &SignOptions,
 ) -> Result<bool> {
+    header.ensure_no_duplicate_members()?;
     let crit_listed_b64 = validate_crit(header, &opts.understood_crit)?;
     if header.alg == "none" {
         return Err(JoseError::InvalidHeader(
@@ -253,7 +261,9 @@ pub(crate) fn validate_sign_header_opts(
 /// The `signer` provides the cryptographic operation -- it can be a software
 /// key or an HSM-backed key. The supplied `header.alg` is cross-checked
 /// against `signer.algorithm()` before any cryptographic operation;
-/// mismatches (including `alg: "none"` or a non-empty `crit`) are rejected.
+/// mismatches (including `alg: "none"` or a non-empty `crit`) are rejected,
+/// as is a `header.extra` entry that repeats a typed member such as `alg`,
+/// `kid` or `crit`.
 pub fn sign(
     signer: &dyn kryptering::Signer,
     payload: &[u8],

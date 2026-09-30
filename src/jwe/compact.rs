@@ -50,9 +50,20 @@ pub fn encrypt(
 ///
 /// # Errors
 ///
-/// Returns an error for inconsistent headers, unsupported algorithms, invalid
-/// key material or key sizes, or an encryption failure. Compression and
-/// critical extensions are not implemented by the corresponding decrypt API.
+/// Returns [`JoseError::InvalidHeader`] when:
+///
+/// - `header.alg` / `header.enc` disagree with `alg` / `enc`;
+/// - `header.extra` repeats a member that a typed [`JoseHeader`] field
+///   already serializes (`alg`, `enc`, `kid`, `typ`, `cty`, `jku`, `jwk`,
+///   `x5u`, `x5c`, `x5t`, `x5t#S256`, `crit`), which would put an ambiguous
+///   duplicate key in the protected header;
+/// - `header.extra` contains `zip` (content compression is not implemented);
+/// - `header.crit` is set (no JWE critical extensions are implemented).
+///
+/// These mirror the checks in [`decrypt`], so every token this function
+/// produces can be decrypted by this crate. Other errors are returned for
+/// unsupported algorithms, invalid key material or key sizes, or an
+/// encryption failure.
 pub fn encrypt_with_header(
     header: JoseHeader,
     key: &[u8],
@@ -74,6 +85,8 @@ pub fn encrypt_with_header(
             enc.as_str()
         )));
     }
+    // alg/enc agree; now reject duplicate members, `zip`, and `crit`.
+    validate_encrypt_header(&header)?;
 
     let header_json = serde_json::to_vec(&header)?;
     let header_b64 = base64url::encode(&header_json);
@@ -95,6 +108,51 @@ pub fn encrypt_with_header(
     Ok(format!(
         "{header_b64}.{encrypted_key_b64}.{iv_b64}.{ciphertext_b64}.{tag_b64}"
     ))
+}
+
+/// Validate a caller-supplied protected header before it is serialized and
+/// used as additional authenticated data.
+///
+/// Callers must already have checked that `header.alg` / `header.enc` match
+/// the algorithms actually used; this function covers the remaining header
+/// content and enforces that the encrypt side never produces a token that
+/// [`decrypt_with_options`] would reject:
+///
+/// 1. `extra` must not repeat a typed member
+///    (see `JoseHeader::ensure_no_duplicate_members`).
+/// 2. `zip` must be absent, since content compression is not implemented
+///    and the header would misdescribe the uncompressed plaintext
+///    (RFC 7516 §4.1.3).
+/// 3. `crit` must be absent. No JWE critical extensions are implemented, and
+///    an empty `crit` array is invalid (RFC 7515 §4.1.11).
+///
+/// # Errors
+///
+/// Returns [`JoseError::InvalidHeader`] naming the first rule violated.
+fn validate_encrypt_header(header: &JoseHeader) -> Result<()> {
+    // Rule 1: no duplicate members between typed fields and `extra`. This
+    // also catches `extra["crit"]`, which would otherwise bypass rule 3.
+    header.ensure_no_duplicate_members()?;
+
+    // Rule 2: same check and message as the decrypt side, so a token this
+    // crate emits is always one it can decrypt.
+    if header.extra.contains_key("zip") {
+        return Err(JoseError::InvalidHeader(
+            "unsupported zip header: content compression is not supported".into(),
+        ));
+    }
+
+    // Rule 3: any `crit` is unsupported; distinguish the empty case so the
+    // error points at the RFC violation rather than an unknown extension.
+    if let Some(crit) = &header.crit {
+        return Err(JoseError::InvalidHeader(if crit.is_empty() {
+            "crit header must not be empty (RFC 7515 §4.1.11)".into()
+        } else {
+            format!("unsupported crit extensions: {crit:?}")
+        }));
+    }
+
+    Ok(())
 }
 
 /// Determine which `JwkOp` governs a JWE alg on the encrypt side.
@@ -206,7 +264,9 @@ pub fn encrypt_with_jwk(
 ///
 /// Returns an error when the JWK algorithm or operation permissions reject
 /// encryption, the header algorithms disagree, key material is invalid, or
-/// encryption fails. See [`encrypt_with_header`] for header limitations.
+/// encryption fails. The header is validated exactly as in
+/// [`encrypt_with_header`]: duplicate typed members in `extra`, `zip`, and
+/// `crit` are rejected with [`JoseError::InvalidHeader`].
 pub fn encrypt_with_jwk_header(
     jwk: &crate::jwk::Jwk,
     header: JoseHeader,
