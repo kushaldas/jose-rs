@@ -149,6 +149,8 @@ pub fn decode_nested(
 /// Decode a nested JWT, enforcing the caller's JWE algorithm allow-list.
 ///
 /// See [`crate::jwe::JweDecryptOptions`] for how to build a strict allow-list.
+/// Its plaintext-size limit bounds the complete inner signed JWT, not just
+/// the claims JSON. Decryption must pass that limit before JWT verification.
 pub fn decode_nested_with_options(
     decryption_key: &[u8],
     verifier: &dyn kryptering::Verifier,

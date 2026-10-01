@@ -449,7 +449,7 @@ pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
     decrypt_with_options(key, token, &JweDecryptOptions::permissive())
 }
 
-/// Options controlling which JWE algorithms `decrypt_with_options` accepts.
+/// Algorithm policy and plaintext-size limit for [`decrypt_with_options`].
 ///
 /// Use [`JweDecryptOptions::new`] to pin an explicit allow-list of key
 /// management algorithms and content encryption algorithms. Tokens whose
@@ -461,6 +461,7 @@ pub struct JweDecryptOptions {
     allowed_alg: Vec<JweAlgorithm>,
     allowed_enc: Vec<JweEncryption>,
     allow_all: bool,
+    max_plaintext: Option<usize>,
 }
 
 impl JweDecryptOptions {
@@ -470,6 +471,7 @@ impl JweDecryptOptions {
             allowed_alg,
             allowed_enc,
             allow_all: false,
+            max_plaintext: None,
         }
     }
 
@@ -481,7 +483,43 @@ impl JweDecryptOptions {
             allowed_alg: Vec::new(),
             allowed_enc: Vec::new(),
             allow_all: true,
+            max_plaintext: None,
         }
+    }
+
+    /// Limit returned plaintext to at most `bytes` bytes (inclusive).
+    ///
+    /// Zero permits only empty plaintext. By default there is no additional
+    /// plaintext limit; [`crate::MAX_TOKEN_BYTES`] still bounds the token.
+    /// This does not enable compression or change the algorithm policy.
+    /// Oversized ciphertext is rejected before decoding or key operations
+    /// when its length proves the plaintext cannot fit. CBC padding requires
+    /// up to one extra 16-byte block and an exact post-authentication check.
+    /// This bounds plaintext, not total process memory or key-operation cost.
+    ///
+    /// ```
+    /// use jose_rs::{jwe::{self, JweDecryptOptions}, JweAlgorithm, JweEncryption};
+    /// let options = JweDecryptOptions::new(
+    ///     vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM],
+    /// ).with_max_plaintext(1024);
+    /// let key = [7_u8; 32]; // Example only; generate a secret key in production.
+    /// let token = jwe::encrypt(&key, b"message", JweAlgorithm::Dir, JweEncryption::A256GCM)?;
+    /// assert_eq!(jwe::decrypt_with_options(&key, &token, &options)?, b"message");
+    /// # Ok::<(), jose_rs::JoseError>(())
+    /// ```
+    #[must_use]
+    pub fn with_max_plaintext(mut self, bytes: usize) -> Self {
+        self.max_plaintext = Some(bytes);
+        self
+    }
+
+    fn check_plaintext_size(&self, bytes: usize) -> Result<()> {
+        if self.max_plaintext.is_some_and(|limit| bytes > limit) {
+            return Err(JoseError::InvalidToken(
+                "plaintext exceeds configured maximum size".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn check(&self, alg: JweAlgorithm, enc: JweEncryption) -> Result<()> {
@@ -523,6 +561,8 @@ fn all_enc_algorithms() -> Vec<JweEncryption> {
 ///
 /// Rejects the token before any cryptographic operation if its `alg` or
 /// `enc` header is outside the allow-list supplied via `options`.
+/// Enforces [`JweDecryptOptions::with_max_plaintext`] when configured. No
+/// plaintext is returned until authentication and the exact size check pass.
 pub fn decrypt_with_options(
     key: &[u8],
     token: &str,
@@ -579,6 +619,17 @@ pub fn decrypt_with_options(
     // Enforce caller's allow-list before touching any key material.
     options.check(alg, enc)?;
 
+    // For valid unpadded base64url this is the exact decoded length. Invalid
+    // encodings still fail in decode below. MAX_TOKEN_BYTES bounds arithmetic.
+    let ciphertext_len = ciphertext_b64.len() * 3 / 4;
+    let minimum_plaintext_len = match enc {
+        JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => ciphertext_len,
+        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
+            ciphertext_len.saturating_sub(16)
+        }
+    };
+    options.check_plaintext_size(minimum_plaintext_len)?;
+
     // 3. Decode parts.
     let encrypted_key = base64url::decode(encrypted_key_b64)?;
     let iv = base64url::decode(iv_b64)?;
@@ -591,7 +642,11 @@ pub fn decrypt_with_options(
     // 5. Content decryption.
     // AAD = ASCII(BASE64URL(header)).
     let aad = header_b64.as_bytes();
-    content_decrypt(enc, &cek, &iv, &ciphertext, &tag, aad)
+    let mut plaintext = Zeroizing::new(content_decrypt(enc, &cek, &iv, &ciphertext, &tag, aad)?);
+    // Exact CBC length is known only after authenticated padding removal.
+    // On rejection, wipe the authenticated plaintext instead of returning it.
+    options.check_plaintext_size(plaintext.len())?;
+    Ok(std::mem::take(&mut *plaintext))
 }
 
 /// Decode the protected header from a JWE compact token without decrypting.
