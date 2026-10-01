@@ -135,7 +135,7 @@ fn gen_key(alg: &str, enc: Option<&str>) -> Result<()> {
         "ML-DSA-87-Ed448" => {
             jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
         }
-        "EdDSA" => set_alg(jose_rs::jwk::generate_ed25519()?, "EdDSA"),
+        "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
         other => bail!("unsupported alg for gen-key: {other}"),

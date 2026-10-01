@@ -14,6 +14,10 @@
 //! - **RFC 7797 `b64`** and the understood-`crit` allow-list, via the
 //!   [`crate::jws::SignOptions`] / [`crate::jws::VerifyOptions`] carried
 //!   from `jws::compact`.
+//!
+//! Raw Ed25519 verifiers support both `Ed25519` and legacy `EdDSA` wire
+//! identifiers. Applications requiring one exact name must enforce their
+//! protected-header algorithm policy in addition to primitive verification.
 
 use std::borrow::Cow;
 

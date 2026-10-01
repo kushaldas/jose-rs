@@ -29,6 +29,8 @@ pub struct Validation {
     /// Allow-list of JwsAlgorithm values. If non-empty, the token's
     /// header `alg` must map to one of these. Empty means no restriction
     /// beyond the verifier-algorithm binding.
+    /// `Ed25519` and `EdDSA` are distinct entries even though they currently
+    /// use the same cryptographic primitive.
     pub allowed_algorithms: Vec<JwsAlgorithm>,
     /// Clock skew tolerance in seconds (default: 60).
     pub leeway: u64,
