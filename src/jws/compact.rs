@@ -21,7 +21,22 @@ pub const LIB_UNDERSTOOD_CRIT: &[&str] = &["b64"];
 /// The default — `SignOptions::default()` — reproduces the classic RFC 7515
 /// behaviour: base64url-encoded payload, attached, and only the library's
 /// built-in understood `crit` params permitted.
+///
+/// The struct is `#[non_exhaustive]` so new policy switches can be added
+/// without breaking callers: start from [`SignOptions::new`] and use the
+/// `with_*` builders (or assign the public fields on a `mut` binding).
+///
+/// ```
+/// use jose_rs::jws::SignOptions;
+///
+/// let opts = SignOptions::new()
+///     .with_understood_crit(["etsiU"])
+///     .with_key_reference_headers(true);
+/// assert!(opts.b64);
+/// assert!(opts.allow_key_reference_headers);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SignOptions {
     /// RFC 7797: when `false`, the payload is carried unencoded and the
     /// signing input is `ASCII(protected) || '.' || payload` over the raw
@@ -36,16 +51,54 @@ pub struct SignOptions {
     /// processed out-of-band (e.g. JAdES `etsiU`, `sigT`). These are
     /// permitted in `crit` on top of [`LIB_UNDERSTOOD_CRIT`].
     pub understood_crit: Vec<String>,
+    /// Permit the key-reference members `jku`, `jwk`, `x5u` and `x5c`
+    /// ([`crate::header::KEY_REFERENCE_MEMBERS`]) in the protected header and
+    /// in a JSON-serialization unprotected header. Defaults to `false`.
+    ///
+    /// This crate never dereferences these members, but a peer may, so a
+    /// header carrying them is refused unless the caller opts in. Set this
+    /// when the members are deliberate, e.g. an `x5c` chain added by
+    /// [`crate::jws::x5::bind_cert_to_header`].
+    pub allow_key_reference_headers: bool,
 }
 
 impl SignOptions {
     /// Classic RFC 7515 behaviour: base64url-encoded, attached payload,
-    /// no extra understood `crit`.
+    /// no extra understood `crit`, no key-reference header members.
     pub fn new() -> Self {
         Self {
             b64: true,
             understood_crit: Vec::new(),
+            allow_key_reference_headers: false,
         }
+    }
+
+    /// Set [`b64`](Self::b64): `false` selects the RFC 7797 unencoded
+    /// payload (the protected header must then carry `"b64": false` and list
+    /// `"b64"` in `crit`).
+    #[must_use]
+    pub fn with_b64(mut self, b64: bool) -> Self {
+        self.b64 = b64;
+        self
+    }
+
+    /// Set [`understood_crit`](Self::understood_crit), replacing any
+    /// previous value.
+    #[must_use]
+    pub fn with_understood_crit<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.understood_crit = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set [`allow_key_reference_headers`](Self::allow_key_reference_headers).
+    #[must_use]
+    pub fn with_key_reference_headers(mut self, allow: bool) -> Self {
+        self.allow_key_reference_headers = allow;
+        self
     }
 }
 
@@ -212,22 +265,74 @@ pub(crate) fn ensure_token_size(token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Producer-side `crit` rules of RFC 7515 §4.1.11 that [`validate_crit`]
+/// (shared with verification) does not cover:
+///
+/// - "Producers MUST NOT include Header Parameter names defined by this
+///   specification or [JWA] for use with JWS ... in the `crit` list": any
+///   name registered by RFC 7515, RFC 7516 or RFC 7518 is refused, even if
+///   the caller lists it in [`SignOptions::understood_crit`]. RFC 7797 `b64`
+///   is an extension and stays allowed (RFC 7797 §6 requires it in `crit`).
+/// - Producers MUST NOT include "duplicate names" in the `crit` list.
+///
+/// Verification keeps accepting registered names that the caller declares
+/// understood: §4.1.11 only says recipients MAY reject them.
+fn validate_sign_crit_names(header: &JoseHeader) -> Result<()> {
+    let Some(crit) = header.crit.as_ref() else {
+        return Ok(());
+    };
+    for (i, name) in crit.iter().enumerate() {
+        if crate::header::is_registered_member(name) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit must not list the registered header parameter {name} (RFC 7515 §4.1.11)"
+            )));
+        }
+        if crit[..i].contains(name) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit lists {name} more than once (RFC 7515 §4.1.11)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A protected header that passed every sign-side check, ready to sign.
+pub(crate) struct PreparedSignHeader {
+    /// Effective RFC 7797 `b64` flag (whether to base64url the payload).
+    pub(crate) b64: bool,
+    /// `BASE64URL(UTF8(protected header))`, the first signing-input segment.
+    pub(crate) protected_b64: String,
+}
+
 /// Cross-check the protected header against the signer and the RFC 7797 /
-/// understood-`crit` policy carried in `opts`. Returns the effective `b64`
-/// flag (so the caller knows whether to encode the payload).
+/// understood-`crit` / key-reference policy carried in `opts`, then
+/// serialize it.
 ///
 /// This is the single sign-side gate shared by the compact, flattened and
-/// general JSON serializers (and so by JWT encoding). It first rejects an
-/// `extra` map that shadows a typed member: the `alg` and `crit` checks
-/// below only see the typed fields, so `extra["alg"] = "none"` or
-/// `extra["crit"]` would otherwise be signed unvalidated as a duplicate JSON
-/// member that last-key-wins verifiers read instead.
-pub(crate) fn validate_sign_header_opts(
+/// general JSON serializers (and so by JWT encoding); the serialized header
+/// is only obtainable through it. It first rejects an `extra` map that
+/// shadows a typed member: the `alg` and `crit` checks below only see the
+/// typed fields, so `extra["alg"] = "none"` or `extra["crit"]` would
+/// otherwise be signed unvalidated as a duplicate JSON member that
+/// last-key-wins verifiers read instead (RFC 7515 §4 requires unique member
+/// names). It then rejects JWE-only members
+/// ([`crate::header::JWE_ONLY_MEMBERS`]) and the `crit` names producers must
+/// not emit ([`validate_sign_crit_names`]). Serialization goes through
+/// [`JoseHeader::to_protected_b64`], which also applies the key-reference
+/// policy and the size limit.
+pub(crate) fn prepare_sign_header(
     header: &JoseHeader,
     signer: &dyn kryptering::Signer,
     opts: &SignOptions,
-) -> Result<bool> {
+) -> Result<PreparedSignHeader> {
     header.ensure_no_duplicate_members()?;
+    if let Some(name) = header.jwe_only_member() {
+        return Err(JoseError::InvalidHeader(format!(
+            "{name} is a JWE-only header member and must not appear in a JWS header \
+             (RFC 7516 §9; IANA JOSE header registry)"
+        )));
+    }
+    validate_sign_crit_names(header)?;
     let crit_listed_b64 = validate_crit(header, &opts.understood_crit)?;
     if header.alg == "none" {
         return Err(JoseError::InvalidHeader(
@@ -253,7 +358,10 @@ pub(crate) fn validate_sign_header_opts(
             opts.b64
         )));
     }
-    Ok(header_b64)
+    Ok(PreparedSignHeader {
+        b64: header_b64,
+        protected_b64: header.to_protected_b64(opts.allow_key_reference_headers)?,
+    })
 }
 
 /// Sign a payload and produce a JWS Compact Serialization string.
@@ -261,9 +369,21 @@ pub(crate) fn validate_sign_header_opts(
 /// The `signer` provides the cryptographic operation -- it can be a software
 /// key or an HSM-backed key. The supplied `header.alg` is cross-checked
 /// against `signer.algorithm()` before any cryptographic operation;
-/// mismatches (including `alg: "none"` or a non-empty `crit`) are rejected,
-/// as is a `header.extra` entry that repeats a typed member such as `alg`,
-/// `kid` or `crit`.
+/// mismatches (including `alg: "none"` or a non-empty `crit`) are rejected.
+///
+/// Header content is also restricted so that every token this crate emits is
+/// unambiguous and decodable by this crate:
+///
+/// - a `header.extra` entry that repeats a typed member such as `alg`, `kid`
+///   or `crit` is rejected (it would emit a duplicate JSON member);
+/// - JWE-only members (`enc`, `zip`, `epk`, `apu`, `apv`, `iv`, `tag`,
+///   `p2s`, `p2c`; see [`crate::header::JWE_ONLY_MEMBERS`]) are rejected;
+/// - a `crit` list naming a registered header parameter, or naming one
+///   parameter twice, is rejected (RFC 7515 §4.1.11);
+/// - `jku`, `jwk`, `x5u` and `x5c` are rejected unless
+///   [`SignOptions::allow_key_reference_headers`] is set (use
+///   [`sign_with_options`]);
+/// - a token longer than [`crate::MAX_TOKEN_BYTES`] is refused.
 pub fn sign(
     signer: &dyn kryptering::Signer,
     payload: &[u8],
@@ -285,9 +405,10 @@ pub fn sign_with_options(
     header: &JoseHeader,
     opts: &SignOptions,
 ) -> Result<String> {
-    let b64 = validate_sign_header_opts(header, signer, opts)?;
-    let header_json = serde_json::to_vec(header)?;
-    let header_b64 = base64url::encode(&header_json);
+    let PreparedSignHeader {
+        b64,
+        protected_b64: header_b64,
+    } = prepare_sign_header(header, signer, opts)?;
 
     let payload_segment = if b64 {
         base64url::encode(payload)
@@ -307,9 +428,15 @@ pub fn sign_with_options(
     };
 
     let input = signing_input_from_segment(&header_b64, payload_segment.as_bytes());
+    // Refuse before the (possibly HSM-backed) signing operation when the
+    // token cannot fit even without its signature, and again once assembled:
+    // `verify` rejects compact tokens over MAX_TOKEN_BYTES.
+    crate::ensure_emit_size(input.len() + 1)?;
     let signature = signer.sign(&input).map_err(JoseError::Crypto)?;
     let sig_b64 = base64url::encode(&signature);
-    Ok(format!("{header_b64}.{payload_segment}.{sig_b64}"))
+    let token = format!("{header_b64}.{payload_segment}.{sig_b64}");
+    crate::ensure_emit_size(token.len())?;
+    Ok(token)
 }
 
 /// Validate a protected header against the verifier and the
@@ -430,6 +557,21 @@ pub fn verify_with_options(
 /// bindings (header/signer alg agreement, `alg: "none"` rejection,
 /// non-empty `crit` rejection) apply transitively.
 pub fn sign_with_jwk(jwk: &crate::jwk::Jwk, payload: &[u8], header: &JoseHeader) -> Result<String> {
+    sign_with_jwk_options(jwk, payload, header, &SignOptions::new())
+}
+
+/// [`sign_with_jwk`] with explicit [`SignOptions`]: RFC 7797 unencoded
+/// payloads, caller-understood `crit` parameters, and the opt-in for
+/// key-reference header members (`jku`, `jwk`, `x5u`, `x5c`).
+///
+/// All [`sign_with_jwk`] checks apply: the header `alg` must match `jwk.alg`
+/// and `Jwk::check_op(Sign)` is enforced.
+pub fn sign_with_jwk_options(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+    opts: &SignOptions,
+) -> Result<String> {
     // 1. Derive the algorithm from the JWK.
     let jwk_alg_str = jwk
         .alg
@@ -454,7 +596,7 @@ pub fn sign_with_jwk(jwk: &crate::jwk::Jwk, payload: &[u8], header: &JoseHeader)
     let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
 
     // 5. Standard sign — applies the full phase-4 sign-side binding.
-    sign(&signer, payload, header)
+    sign_with_options(&signer, payload, header, opts)
 }
 
 /// Verify a JWS Compact Serialization string using a JWK directly.
@@ -904,6 +1046,7 @@ mod tests {
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
+            allow_key_reference_headers: false,
         };
         let token = sign_with_options(&hmac_signer(), payload, &header, &opts).unwrap();
 
@@ -928,6 +1071,7 @@ mod tests {
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
+            allow_key_reference_headers: false,
         };
         let err = sign_with_options(&hmac_signer(), b"p", &header, &opts)
             .unwrap_err()
@@ -974,6 +1118,7 @@ mod tests {
         let opts = SignOptions {
             b64: true,
             understood_crit: vec!["etsiU".to_string()],
+            allow_key_reference_headers: false,
         };
         let err = sign_with_options(&PanicSigner, b"p", &header, &opts)
             .unwrap_err()
@@ -1016,6 +1161,7 @@ mod tests {
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
+            allow_key_reference_headers: false,
         };
         let err = sign_with_options(&hmac_signer(), b"a.b", &header, &opts)
             .unwrap_err()
@@ -1029,6 +1175,7 @@ mod tests {
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
+            allow_key_reference_headers: false,
         };
         let err = sign_with_options(&PanicSigner, b"a.b", &header, &opts)
             .unwrap_err()
@@ -1042,6 +1189,7 @@ mod tests {
         let opts = SignOptions {
             b64: false,
             understood_crit: vec![],
+            allow_key_reference_headers: false,
         };
         let err = sign_with_options(&PanicSigner, &[0xff], &header, &opts)
             .unwrap_err()
@@ -1060,6 +1208,7 @@ mod tests {
         let opts = SignOptions {
             b64: true,
             understood_crit: vec!["etsiU".to_string()],
+            allow_key_reference_headers: false,
         };
         let token = sign_with_options(&hmac_signer(), b"p", &header, &opts).unwrap();
         let vopts = VerifyOptions {
@@ -1074,23 +1223,75 @@ mod tests {
         assert!(err.contains("crit"), "unexpected: {err}");
     }
 
+    /// RFC 7515 §4.1.11: "Producers MUST NOT include Header Parameter names
+    /// defined by this specification or [JWA] for use with JWS ... in the
+    /// `crit` list". Declaring the name understood does not lift the
+    /// producer rule, and the check runs before the signer is invoked.
     #[test]
-    fn caller_understood_registered_crit_param_is_accepted() {
+    fn registered_crit_param_is_rejected_at_sign() {
         let mut header = JoseHeader::new("HS256");
         header.kid = Some("key-1".to_string());
         header.crit = Some(vec!["kid".to_string()]);
 
-        let opts = SignOptions {
-            b64: true,
-            understood_crit: vec!["kid".to_string()],
-        };
-        let token = sign_with_options(&hmac_signer(), b"p", &header, &opts).unwrap();
+        let opts = SignOptions::new().with_understood_crit(["kid"]);
+        let err = sign_with_options(&PanicSigner, b"p", &header, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("registered header parameter kid"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// RFC 7515 §4.1.11 only says recipients MAY treat a registered name in
+    /// `crit` as invalid, so a peer's token with `crit: ["kid"]` still
+    /// verifies when the caller declares `kid` understood. The token is
+    /// built by hand because this crate refuses to emit it.
+    #[test]
+    fn registered_crit_param_from_peer_is_accepted_when_understood() {
+        use kryptering::Signer;
+        let mut header = JoseHeader::new("HS256");
+        header.kid = Some("key-1".to_string());
+        header.crit = Some(vec!["kid".to_string()]);
+        let header_b64 = base64url::encode(&serde_json::to_vec(&header).unwrap());
+        let signing_input = format!("{header_b64}.{}", base64url::encode(b"p"));
+        let sig = hmac_signer().sign(signing_input.as_bytes()).unwrap();
+        let token = format!("{signing_input}.{}", base64url::encode(&sig));
+
         let vopts = VerifyOptions {
             understood_crit: vec!["kid".to_string()],
         };
-
         let recovered = verify_with_options(&hmac_verifier(), &token, &vopts).unwrap();
         assert_eq!(recovered, b"p");
+    }
+
+    /// RFC 7515 §4.1.11: producers MUST NOT include "duplicate names" in
+    /// `crit`, including a repeated RFC 7797 `b64`.
+    #[test]
+    fn duplicate_crit_names_are_rejected_at_sign() {
+        let mut header = JoseHeader::new("HS256");
+        header
+            .extra
+            .insert("etsiU".into(), serde_json::json!(["x"]));
+        header.crit = Some(vec!["etsiU".to_string(), "etsiU".to_string()]);
+        let opts = SignOptions::new().with_understood_crit(["etsiU"]);
+        let err = sign_with_options(&PanicSigner, b"p", &header, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "unexpected: {err}");
+
+        let mut header = JoseHeader::new("HS256");
+        header.extra.insert("b64".into(), serde_json::json!(false));
+        header.crit = Some(vec!["b64".to_string(), "b64".to_string()]);
+        let err = sign_with_options(
+            &PanicSigner,
+            b"p",
+            &header,
+            &SignOptions::new().with_b64(false),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("more than once"), "unexpected: {err}");
     }
 
     /// ML-DSA sign/verify round-trip via the JWK API.

@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs'
 import {
   generateKeyPair,
+  generateSecret,
   exportJWK,
   importJWK,
   CompactSign,
@@ -15,6 +16,8 @@ import {
   SignJWT,
   jwtVerify,
   decodeProtectedHeader,
+  CompactEncrypt,
+  compactDecrypt,
 } from 'jose'
 
 // Node's "ExperimentalWarning: ML-DSA-* Web Crypto API algorithm…" is
@@ -26,12 +29,15 @@ import {
 function parseArgs(argv) {
   const [cmd, ...rest] = argv
   let alg
+  let enc
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a.startsWith('--alg=')) alg = a.slice('--alg='.length)
     else if (a === '--alg') { alg = rest[i + 1]; i++ }
+    else if (a.startsWith('--enc=')) enc = a.slice('--enc='.length)
+    else if (a === '--enc') { enc = rest[i + 1]; i++ }
   }
-  return { cmd, alg }
+  return { cmd, alg, enc }
 }
 
 function readStdin() {
@@ -49,8 +55,20 @@ function b64uDecode(s) {
   return new Uint8Array(Buffer.from(s, 'base64url'))
 }
 
-async function genKey(alg) {
+const JWE_KW_ALGS = new Set(['A128KW', 'A192KW', 'A256KW'])
+
+async function genKey(alg, enc) {
   if (!alg) throw new Error('--alg is required')
+  if (JWE_KW_ALGS.has(alg) || alg === 'dir') {
+    // Symmetric JWE key. For `dir` the secret *is* the CEK, so its size
+    // follows `enc`; for AES-KW it follows the wrapping alg.
+    if (alg === 'dir' && !enc) throw new Error('gen-key --alg dir requires --enc')
+    const secret = await generateSecret(alg === 'dir' ? enc : alg, { extractable: true })
+    const jwk = await exportJWK(secret)
+    jwk.alg = alg
+    emit(jwk)
+    return
+  }
   const { privateKey } = await generateKeyPair(alg, { extractable: true })
   const jwk = await exportJWK(privateKey)
   // Pin alg so a caller (panva or jose-rs) can use the JWK without hinting.
@@ -71,10 +89,11 @@ async function exportPub() {
 
 async function signCompact(alg) {
   if (!alg) throw new Error('--alg is required')
-  const { jwk, payload_b64u } = JSON.parse(readStdin())
+  const { jwk, payload_b64u, header } = JSON.parse(readStdin())
+  if (header && ('alg' in header)) throw new Error('header input must not override `alg`')
   const key = await importJWK(jwk, alg)
   const jws = await new CompactSign(b64uDecode(payload_b64u))
-    .setProtectedHeader({ alg })
+    .setProtectedHeader({ ...(header ?? {}), alg })
     .sign(key)
   emit({ jws })
 }
@@ -88,8 +107,8 @@ async function verifyCompact(alg) {
     throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
   }
   const key = await importJWK(jwk, alg)
-  const { payload } = await compactVerify(jws, key, { algorithms: [alg] })
-  emit({ ok: true, payload_b64u: b64uEncode(payload) })
+  const { payload, protectedHeader } = await compactVerify(jws, key, { algorithms: [alg] })
+  emit({ ok: true, payload_b64u: b64uEncode(payload), protected_header: protectedHeader })
 }
 
 async function signJwt(alg) {
@@ -121,15 +140,47 @@ async function verifyJwt(alg) {
   emit({ ok: true, claims: payload })
 }
 
+async function encryptCompact(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwk, plaintext_b64u, header } = JSON.parse(readStdin())
+  if (header && ('alg' in header || 'enc' in header)) {
+    throw new Error('header input must not override `alg` / `enc`')
+  }
+  if (jwk.alg !== alg) throw new Error(`JWK alg ${jwk.alg} does not match expected ${alg}`)
+  const key = await importJWK(jwk, alg)
+  const jwe = await new CompactEncrypt(b64uDecode(plaintext_b64u))
+    .setProtectedHeader({ ...(header ?? {}), alg, enc })
+    .encrypt(key)
+  emit({ jwe })
+}
+
+async function decryptCompact(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwk, jwe } = JSON.parse(readStdin())
+  const hdr = decodeProtectedHeader(jwe)
+  if (hdr.alg !== alg) throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
+  if (hdr.enc !== enc) throw new Error(`token enc ${hdr.enc} does not match expected ${enc}`)
+  const key = await importJWK(jwk, alg)
+  const { plaintext, protectedHeader } = await compactDecrypt(jwe, key, {
+    keyManagementAlgorithms: [alg],
+    contentEncryptionAlgorithms: [enc],
+  })
+  emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
+}
+
 async function main() {
-  const { cmd, alg } = parseArgs(process.argv.slice(2))
+  const { cmd, alg, enc } = parseArgs(process.argv.slice(2))
   switch (cmd) {
-    case 'gen-key': return genKey(alg)
+    case 'gen-key': return genKey(alg, enc)
     case 'export-pub': return exportPub()
     case 'sign-compact': return signCompact(alg)
     case 'verify-compact': return verifyCompact(alg)
     case 'sign-jwt': return signJwt(alg)
     case 'verify-jwt': return verifyJwt(alg)
+    case 'encrypt-compact': return encryptCompact(alg, enc)
+    case 'decrypt-compact': return decryptCompact(alg, enc)
     default: throw new Error(`unknown subcommand: ${cmd}`)
   }
 }

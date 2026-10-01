@@ -154,6 +154,26 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
   key-substitution risk) and must never treat an inline `jwk` header as a
   verification key without first verifying it against a trusted key store.
+  On the emit side, `jku`, `jwk`, `x5u` and `x5c` are **refused by default**
+  when signing or encrypting; set `allow_key_reference_headers` on
+  `jws::SignOptions` or `jwe::JweEncryptOptions` to emit them deliberately
+  (e.g. an `x5c` chain from `jws::x5::bind_cert_to_header`). RFC 8725 §3.10
+  does not require this; it is a defensive default so that caller-controlled
+  data forwarded into a header cannot mint key references under a trusted
+  key.
+- **Unambiguous emitted headers.** Signing and encryption refuse a header
+  whose `extra` map repeats a typed member (`alg`, `enc`, `kid`, `crit`,
+  ...), which would otherwise serialize as a duplicate JSON member that
+  last-key-wins parsers (e.g. panva/jose, confirmed by the interop matrix)
+  read differently. On the decode side the same duplicates are rejected at
+  parse time. JWS JSON unprotected headers must be a JSON object disjoint
+  from the protected header (RFC 7515 §7.2.1) and may not carry `crit` or
+  `b64`. JWS signing refuses JWE-only members (`enc`, `zip`, `epk`, `apu`,
+  `apv`, `iv`, `tag`, `p2s`, `p2c`) in either header, since `enc` marks a
+  JWE (RFC 7516 §9), and refuses a `crit` list that names a registered
+  header parameter or repeats a name (RFC 7515 §4.1.11). JWE encryption
+  refuses registered members it does not implement (`zip`, `b64`, `epk`,
+  `apu`, `apv`, `p2s`, `p2c`, `iv`, `tag`) and any `crit`.
 - **`jwt::decode_unverified` is for inspection only.** It returns the
   header and claims without any cryptographic check. Production code
   paths must call `jwt::decode` with a real verifier and `Validation`.
@@ -177,7 +197,8 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 - **Token size cap.** The JWS and JWE decoders reject any input larger
   than `jose_rs::MAX_TOKEN_BYTES` (1 MiB) before allocating any
   base64url buffer, to bound DoS from oversized attacker-supplied
-  tokens.
+  tokens. Signing and encryption apply the same limit to what they emit,
+  so the crate never produces a token it would refuse to decode.
 - **Debug output redaction.** `Jwk`'s `Debug` implementation redacts
   private components (`d`, `p`, `q`, `dp`, `dq`, `qi`, `k`) — logging a
   private `Jwk` will not spill the private material.
@@ -261,7 +282,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.7.2", features = ["post-quantum"] }
+jose-rs = { version = "0.8.0", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's

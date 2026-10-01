@@ -14,13 +14,28 @@ use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
 /// Encode claims as a JWT (JWS Compact Serialization).
+///
+/// Header rules are those of [`crate::jws::compact::sign`]; in particular
+/// `jku`, `jwk`, `x5u` and `x5c` are refused unless opted in through
+/// [`encode_with_options`].
 pub fn encode(
     signer: &dyn kryptering::Signer,
     header: &JoseHeader,
     claims: &Claims,
 ) -> Result<String> {
+    encode_with_options(signer, header, claims, &crate::jws::SignOptions::new())
+}
+
+/// [`encode`] with explicit [`SignOptions`](crate::jws::SignOptions), e.g. to
+/// emit an `x5c` chain via `allow_key_reference_headers`.
+pub fn encode_with_options(
+    signer: &dyn kryptering::Signer,
+    header: &JoseHeader,
+    claims: &Claims,
+    opts: &crate::jws::SignOptions,
+) -> Result<String> {
     let payload = serde_json::to_vec(claims)?;
-    crate::jws::compact::sign(signer, &payload, header)
+    crate::jws::compact::sign_with_options(signer, &payload, header, opts)
 }
 
 /// Decode and validate a JWT.
@@ -52,6 +67,9 @@ pub fn decode(
 /// - `encryption_key`: key material for JWE encryption (CEK, KEK, or RSA public key DER)
 /// - `alg`: JWE key management algorithm
 /// - `enc`: JWE content encryption algorithm
+///
+/// The inner JWS uses the default [`SignOptions`](crate::jws::SignOptions);
+/// use [`encode_nested_with_options`] to opt in to key-reference members.
 pub fn encode_nested(
     signer: &dyn kryptering::Signer,
     jws_header: &JoseHeader,
@@ -60,8 +78,35 @@ pub fn encode_nested(
     alg: crate::algorithm::JweAlgorithm,
     enc: crate::algorithm::JweEncryption,
 ) -> Result<String> {
+    encode_nested_with_options(
+        signer,
+        jws_header,
+        claims,
+        encryption_key,
+        alg,
+        enc,
+        &crate::jws::SignOptions::new(),
+    )
+}
+
+/// [`encode_nested`] with explicit [`SignOptions`](crate::jws::SignOptions)
+/// for the inner JWS, e.g. to carry an `x5c` chain via
+/// `allow_key_reference_headers`.
+///
+/// The options apply to the inner JWS only. The outer JWE header is built
+/// by this function (`alg`, `enc`, `cty: "JWT"`, RFC 7519 §5.2) and never
+/// carries caller-supplied members.
+pub fn encode_nested_with_options(
+    signer: &dyn kryptering::Signer,
+    jws_header: &JoseHeader,
+    claims: &Claims,
+    encryption_key: &[u8],
+    alg: crate::algorithm::JweAlgorithm,
+    enc: crate::algorithm::JweEncryption,
+    sign_options: &crate::jws::SignOptions,
+) -> Result<String> {
     // Step 1: Sign the claims as a regular JWT (JWS compact)
-    let signed_jwt = encode(signer, jws_header, claims)?;
+    let signed_jwt = encode_with_options(signer, jws_header, claims, sign_options)?;
 
     // Step 2: Encrypt the signed JWT inside a JWE
     let mut header = crate::header::JoseHeader::for_jwe(alg, enc);
@@ -126,8 +171,19 @@ pub fn encode_with_jwk(
     header: &JoseHeader,
     claims: &Claims,
 ) -> Result<String> {
+    encode_with_jwk_options(jwk, header, claims, &crate::jws::SignOptions::new())
+}
+
+/// [`encode_with_jwk`] with explicit [`SignOptions`](crate::jws::SignOptions),
+/// e.g. to emit an `x5c` chain via `allow_key_reference_headers`.
+pub fn encode_with_jwk_options(
+    jwk: &crate::jwk::Jwk,
+    header: &JoseHeader,
+    claims: &Claims,
+    opts: &crate::jws::SignOptions,
+) -> Result<String> {
     let payload = serde_json::to_vec(claims)?;
-    crate::jws::compact::sign_with_jwk(jwk, &payload, header)
+    crate::jws::compact::sign_with_jwk_options(jwk, &payload, header, opts)
 }
 
 /// Encode a nested JWT (sign then encrypt) using JWKs for both ops.
@@ -137,6 +193,9 @@ pub fn encode_with_jwk(
 /// is then encrypted with `encryption_jwk` (which must have the
 /// appropriate op permitted and `alg` set). Mirror of
 /// [`encode_nested`] using the JWK-first API.
+///
+/// The inner JWS uses the default [`SignOptions`](crate::jws::SignOptions);
+/// use [`encode_nested_with_jwk_options`] to opt in to key-reference members.
 pub fn encode_nested_with_jwk(
     signer_jwk: &crate::jwk::Jwk,
     jws_header: &JoseHeader,
@@ -144,7 +203,32 @@ pub fn encode_nested_with_jwk(
     encryption_jwk: &crate::jwk::Jwk,
     enc: crate::algorithm::JweEncryption,
 ) -> Result<String> {
-    let signed = encode_with_jwk(signer_jwk, jws_header, claims)?;
+    encode_nested_with_jwk_options(
+        signer_jwk,
+        jws_header,
+        claims,
+        encryption_jwk,
+        enc,
+        &crate::jws::SignOptions::new(),
+    )
+}
+
+/// [`encode_nested_with_jwk`] with explicit
+/// [`SignOptions`](crate::jws::SignOptions) for the inner JWS, e.g. to carry
+/// an `x5c` chain via `allow_key_reference_headers`.
+///
+/// All [`encode_nested_with_jwk`] checks apply on both layers. The options
+/// apply to the inner JWS only; the outer JWE header is built by this
+/// function and never carries caller-supplied members.
+pub fn encode_nested_with_jwk_options(
+    signer_jwk: &crate::jwk::Jwk,
+    jws_header: &JoseHeader,
+    claims: &Claims,
+    encryption_jwk: &crate::jwk::Jwk,
+    enc: crate::algorithm::JweEncryption,
+    sign_options: &crate::jws::SignOptions,
+) -> Result<String> {
+    let signed = encode_with_jwk_options(signer_jwk, jws_header, claims, sign_options)?;
     let encryption_alg_str = encryption_jwk
         .alg
         .as_deref()

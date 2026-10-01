@@ -24,6 +24,49 @@ const TYPED_MEMBERS: &[&str] = &[
     "alg", "enc", "kid", "typ", "cty", "jku", "jwk", "x5u", "x5c", "x5t", "x5t#S256", "crit",
 ];
 
+/// Registered header members that carry or point to key material: `jku`,
+/// `jwk`, `x5u` and `x5c` (RFC 7515 §4.1.2-4.1.6, RFC 7516 §4.1.4-4.1.7).
+///
+/// This crate never selects a key from, or dereferences, these members. A
+/// peer might: RFC 8725 §2.9 / §3.10 warn that blindly following `jku` or
+/// `x5u` can lead to SSRF, and an inline `jwk` / `x5c` is only as trustworthy
+/// as the signer that emitted it. An application that forwards
+/// caller-controlled data into a header could otherwise mint tokens carrying
+/// attacker-chosen key references under a trusted key. RFC 8725 does not
+/// require producers to omit these members; requiring an explicit opt-in is
+/// this crate's defensive default
+/// (`allow_key_reference_headers` in `jws::compact::SignOptions` or
+/// `jwe::JweEncryptOptions`).
+///
+/// Thumbprints (`x5t`, `x5t#S256`) and `kid` only name a key and are not
+/// covered.
+pub const KEY_REFERENCE_MEMBERS: &[&str] = &["jku", "jwk", "x5u", "x5c"];
+
+/// Registered header members whose only defined use is JWE (IANA "JSON Web
+/// Signature and Encryption Header Parameters" registry, usage location
+/// "JWE"):
+///
+/// - `enc`, `zip`: RFC 7516 §4.1.2, §4.1.3;
+/// - `epk`, `apu`, `apv`: ECDH-ES key agreement, RFC 7518 §4.6.1;
+/// - `iv`, `tag`: AES-GCM key wrapping, RFC 7518 §4.7.1;
+/// - `p2s`, `p2c`: PBES2 key encryption, RFC 7518 §4.8.1.
+///
+/// JWS signing refuses them. RFC 7516 §9 distinguishes a JWE header from a
+/// JWS header by the presence of `enc`, so a signed header carrying it
+/// claims to be a JWE; the others describe encryption processing that a JWS
+/// never performs.
+pub const JWE_ONLY_MEMBERS: &[&str] =
+    &["enc", "zip", "epk", "apu", "apv", "iv", "tag", "p2s", "p2c"];
+
+/// Whether `name` is a header parameter defined by RFC 7515, RFC 7516 or
+/// RFC 7518 ([`TYPED_MEMBERS`] ∪ [`JWE_ONLY_MEMBERS`]).
+///
+/// RFC 7515 §4.1.11 forbids producers from listing such names in `crit`.
+/// RFC 7797 `b64` is an extension and is not included.
+pub(crate) fn is_registered_member(name: &str) -> bool {
+    TYPED_MEMBERS.contains(&name) || JWE_ONLY_MEMBERS.contains(&name)
+}
+
 /// JOSE Header — the protected header used in JWS and JWE compact serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoseHeader {
@@ -78,7 +121,11 @@ pub struct JoseHeader {
     ///
     /// Must not contain a name that a typed field already serializes (`alg`,
     /// `enc`, `kid`, `crit`, ...): signing and encryption reject such headers
-    /// because they would produce an ambiguous duplicate JSON member.
+    /// because they would produce an ambiguous duplicate JSON member. JWE
+    /// encryption additionally rejects registered members it does not
+    /// implement (`zip`, `b64`, `epk`, `apu`, `apv`, `p2s`, `p2c`, `iv`,
+    /// `tag`); JWS signing rejects the JWE-only members
+    /// ([`JWE_ONLY_MEMBERS`]).
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, Value>,
 }
@@ -155,6 +202,75 @@ impl JoseHeader {
             None => Ok(()),
         }
     }
+
+    /// The first [`KEY_REFERENCE_MEMBERS`] entry present in this header.
+    ///
+    /// Only the typed fields are inspected: `extra` cannot hold these names
+    /// once [`ensure_no_duplicate_members`](Self::ensure_no_duplicate_members)
+    /// has passed.
+    pub(crate) fn key_reference_member(&self) -> Option<&'static str> {
+        [
+            ("jku", self.jku.is_some()),
+            ("jwk", self.jwk.is_some()),
+            ("x5u", self.x5u.is_some()),
+            ("x5c", self.x5c.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(name, present)| present.then_some(name))
+    }
+
+    /// The first [`JWE_ONLY_MEMBERS`] entry present in this header, whether
+    /// set through the typed `enc` field or through `extra`.
+    pub(crate) fn jwe_only_member(&self) -> Option<&'static str> {
+        if self.enc.is_some() {
+            return Some("enc");
+        }
+        JWE_ONLY_MEMBERS
+            .iter()
+            .copied()
+            .find(|name| self.extra.contains_key(*name))
+    }
+
+    /// Serialize this header as the base64url-encoded protected header of a
+    /// JWS or JWE.
+    ///
+    /// This is the only path by which the crate turns a caller-supplied
+    /// [`JoseHeader`] into authenticated bytes, so every emit-side header
+    /// rule lives here and a new signing or encryption path cannot skip it:
+    ///
+    /// 1. no `extra` member may duplicate a typed field
+    ///    ([`ensure_no_duplicate_members`](Self::ensure_no_duplicate_members));
+    /// 2. no [`KEY_REFERENCE_MEMBERS`] entry unless `allow_key_references`;
+    /// 3. the encoded header must not exceed [`crate::MAX_TOKEN_BYTES`], the
+    ///    limit this crate's decoders enforce.
+    ///
+    /// Algorithm-specific checks (`alg` agreement, `crit`, `b64`, `zip`) stay
+    /// with the JWS and JWE callers and must run before this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JoseError::InvalidHeader`] for a rule violation, or
+    /// [`JoseError::Json`] if serialization fails.
+    pub(crate) fn to_protected_b64(&self, allow_key_references: bool) -> Result<String> {
+        self.ensure_no_duplicate_members()?;
+        if !allow_key_references {
+            if let Some(name) = self.key_reference_member() {
+                return Err(JoseError::InvalidHeader(format!(
+                    "{name} in protected header requires allow_key_reference_headers \
+                     (key-reference members may be dereferenced by peers)"
+                )));
+            }
+        }
+        let encoded = crate::base64url::encode(&serde_json::to_vec(self)?);
+        if encoded.len() > crate::MAX_TOKEN_BYTES {
+            return Err(JoseError::InvalidHeader(format!(
+                "encoded protected header is {} bytes, exceeding MAX_TOKEN_BYTES ({})",
+                encoded.len(),
+                crate::MAX_TOKEN_BYTES
+            )));
+        }
+        Ok(encoded)
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +327,34 @@ mod tests {
         header.extra.insert("b64".into(), Value::Bool(false));
         header.extra.insert("tenant".into(), Value::Null);
         assert!(header.ensure_no_duplicate_members().is_ok());
+    }
+
+    /// RFC 7515 §4.1.11 producer rule: every name registered by RFC 7515,
+    /// RFC 7516 or RFC 7518 counts as registered, while extension names,
+    /// including RFC 7797 `b64` (which RFC 7797 §6 requires in `crit`), do
+    /// not.
+    #[test]
+    fn registered_members_cover_jose_rfcs_but_not_extensions() {
+        for name in TYPED_MEMBERS.iter().chain(JWE_ONLY_MEMBERS) {
+            assert!(is_registered_member(name), "{name} not registered");
+        }
+        for name in ["b64", "etsiU", "sigT", "tenant"] {
+            assert!(!is_registered_member(name), "{name} treated as registered");
+        }
+    }
+
+    /// `jwe_only_member` sees both the typed `enc` field and `extra`
+    /// entries (RFC 7516 §9: `enc` marks a JWE header).
+    #[test]
+    fn jwe_only_member_detects_typed_and_extra_members() {
+        assert_eq!(JoseHeader::new("HS256").jwe_only_member(), None);
+        let jwe = JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A128GCM);
+        assert_eq!(jwe.jwe_only_member(), Some("enc"));
+        for name in JWE_ONLY_MEMBERS.iter().filter(|n| **n != "enc") {
+            let mut header = JoseHeader::new("HS256");
+            header.extra.insert((*name).into(), Value::Null);
+            assert_eq!(header.jwe_only_member(), Some(*name));
+        }
     }
 
     /// Phase 10: for_alg produces the same alg string as JwsAlgorithm::as_str.

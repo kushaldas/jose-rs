@@ -87,6 +87,11 @@ pub fn verify_cert_binding(header: &JoseHeader, cert_der: &[u8]) -> Result<()> {
 
 /// Set the `x5t#S256` and `x5c` (leaf-only) members on a header from a
 /// DER-encoded signing certificate. Convenience for the sign side.
+///
+/// `x5c` is a key-reference member, so signing a header bound here requires
+/// [`SignOptions::allow_key_reference_headers`](crate::jws::SignOptions::allow_key_reference_headers)
+/// (for example via `sign_with_options`, `sign_flattened_opts`, or a
+/// `GeneralSigner` with custom `options`); the default options refuse it.
 pub fn bind_cert_to_header(header: &mut JoseHeader, cert_der: &[u8]) {
     header.x5t_s256 = Some(x5t_s256_of_der(cert_der));
     header.x5c = Some(vec![BASE64_STANDARD.encode(cert_der)]);

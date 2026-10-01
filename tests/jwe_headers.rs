@@ -90,25 +90,62 @@ fn dir_key_and_raw(size: usize) -> (jwk::Jwk, Vec<u8>) {
     (key, raw)
 }
 
-/// Assert that both `encrypt_with_header` and `encrypt_with_jwk_header`
-/// refuse `header` with `InvalidHeader` before producing any token.
-fn assert_both_reject(header: JoseHeader) {
+/// Run `header` through every public JWE header-encryption entry point
+/// (`encrypt_with_header`, `encrypt_with_header_options`,
+/// `encrypt_with_jwk_header`, `encrypt_with_jwk_header_options`) with
+/// `plaintext` and `opts`, returning each API's name and result.
+fn encrypt_all(
+    header: &JoseHeader,
+    plaintext: &[u8],
+    opts: &jwe::JweEncryptOptions,
+) -> Vec<(&'static str, jose_rs::Result<String>)> {
     let enc = JweEncryption::A128GCM;
     let (key, raw) = dir_key_and_raw(enc.cek_size());
-    assert!(
-        matches!(
-            jwe::encrypt_with_header(header.clone(), &raw, b"payload", JweAlgorithm::Dir, enc),
-            Err(JoseError::InvalidHeader(_))
+    let dir = JweAlgorithm::Dir;
+    let default_opts = jwe::JweEncryptOptions::new();
+    let mut results = vec![
+        (
+            "encrypt_with_header_options",
+            jwe::encrypt_with_header_options(header.clone(), &raw, plaintext, dir, enc, opts),
         ),
-        "encrypt_with_header accepted {header:?}"
-    );
-    assert!(
-        matches!(
-            jwe::encrypt_with_jwk_header(&key, header.clone(), b"payload", enc),
-            Err(JoseError::InvalidHeader(_))
+        (
+            "encrypt_with_jwk_header_options",
+            jwe::encrypt_with_jwk_header_options(&key, header.clone(), plaintext, enc, opts),
         ),
-        "encrypt_with_jwk_header accepted {header:?}"
-    );
+    ];
+    // The non-options variants always use the strict defaults.
+    if opts.allow_key_reference_headers == default_opts.allow_key_reference_headers {
+        results.push((
+            "encrypt_with_header",
+            jwe::encrypt_with_header(header.clone(), &raw, plaintext, dir, enc),
+        ));
+        results.push((
+            "encrypt_with_jwk_header",
+            jwe::encrypt_with_jwk_header(&key, header.clone(), plaintext, enc),
+        ));
+    }
+    // Every token that is emitted must decrypt with this crate.
+    for (api, result) in &results {
+        if let Ok(token) = result {
+            assert_eq!(
+                jwe::decrypt_with_jwk(&key, token).unwrap(),
+                plaintext,
+                "{api} emitted a token this crate cannot decrypt"
+            );
+        }
+    }
+    results
+}
+
+/// Assert that every JWE header-encryption API refuses `header` with
+/// `InvalidHeader` before producing any token.
+fn assert_both_reject(header: JoseHeader) {
+    for (api, result) in encrypt_all(&header, b"payload", &jwe::JweEncryptOptions::new()) {
+        assert!(
+            matches!(result, Err(JoseError::InvalidHeader(_))),
+            "{api} accepted {header:?}: {result:?}"
+        );
+    }
 }
 
 /// Regression: `extra` is flattened into the same JSON object as the typed
@@ -158,4 +195,92 @@ fn unsupported_zip_and_crit_are_rejected_at_encrypt() {
     let mut empty_crit = base;
     empty_crit.crit = Some(vec![]);
     assert_both_reject(empty_crit);
+}
+
+/// Regression (L-3): registered members that this crate does not implement
+/// for JWE compact (`b64`, ECDH-ES, PBES2 and AES-GCMKW parameters) are
+/// refused, as `zip` is, so a peer that implements them cannot read the
+/// token differently.
+#[test]
+fn unimplemented_registered_members_are_rejected_at_encrypt() {
+    for name in ["zip", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag"] {
+        let mut header = JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A128GCM);
+        header.extra.insert(name.into(), serde_json::json!(false));
+        assert_both_reject(header);
+    }
+}
+
+/// Every key-reference member, set through its typed field.
+fn key_reference_headers() -> Vec<(&'static str, JoseHeader)> {
+    let base = JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A128GCM);
+    let mut jku = base.clone();
+    jku.jku = Some("https://example.com/jwks".into());
+    let mut jwk_header = base.clone();
+    jwk_header.jwk = Some(serde_json::json!({"kty": "oct"}));
+    let mut x5u = base.clone();
+    x5u.x5u = Some("https://example.com/cert".into());
+    let mut x5c = base;
+    x5c.x5c = Some(vec!["AA".into()]);
+    vec![
+        ("jku", jku),
+        ("jwk", jwk_header),
+        ("x5u", x5u),
+        ("x5c", x5c),
+    ]
+}
+
+/// Regression (M-1): `jku`, `jwk`, `x5u` and `x5c` are refused by default
+/// and emitted, authenticated and decryptable, only with the explicit
+/// `allow_key_reference_headers` opt-in.
+#[test]
+fn key_reference_members_require_opt_in() {
+    let allow = jwe::JweEncryptOptions::new().with_key_reference_headers(true);
+    for (name, header) in key_reference_headers() {
+        assert_both_reject(header.clone());
+        for (api, result) in encrypt_all(&header, b"payload", &allow) {
+            let token = result.unwrap_or_else(|e| panic!("{api} refused opted-in {name}: {e}"));
+            let decoded = jwe::compact::decode_header(&token).unwrap();
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap()[name],
+                serde_json::to_value(&header).unwrap()[name],
+                "{api} did not carry {name}"
+            );
+        }
+    }
+}
+
+/// Regression (M-2): an oversized protected header is refused before any
+/// encryption, so the encrypt side never emits a token that `decrypt`
+/// refuses under `MAX_TOKEN_BYTES`.
+#[test]
+fn oversized_header_is_rejected_at_encrypt() {
+    let mut header = JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A128GCM);
+    header
+        .extra
+        .insert("blob".into(), "A".repeat(jose_rs::MAX_TOKEN_BYTES).into());
+    assert_both_reject(header);
+}
+
+/// Regression (M-2): a plaintext too large for the token limit is refused
+/// with `InvalidToken`, while one just under the limit is emitted and
+/// decrypts (checked inside `encrypt_all`).
+#[test]
+fn emitted_tokens_respect_max_token_bytes() {
+    let header = JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A128GCM);
+    let opts = jwe::JweEncryptOptions::new();
+
+    let too_big = vec![0u8; jose_rs::MAX_TOKEN_BYTES];
+    for (api, result) in encrypt_all(&header, &too_big, &opts) {
+        assert!(
+            matches!(result, Err(JoseError::InvalidToken(_))),
+            "{api} emitted an oversized token"
+        );
+    }
+
+    // Leaves room for the header, IV and tag segments.
+    let fits = vec![0u8; jose_rs::MAX_TOKEN_BYTES / 4 * 3 - 1024];
+    for (api, result) in encrypt_all(&header, &fits, &opts) {
+        let token = result.unwrap_or_else(|e| panic!("{api} refused a fitting token: {e}"));
+        assert!(token.len() <= jose_rs::MAX_TOKEN_BYTES);
+    }
 }
