@@ -185,6 +185,7 @@ pub struct SignatureResult {
     /// decoded — in which case `error` explains why).
     pub protected_header: Option<JoseHeader>,
     /// The unprotected `header` member as carried in the JWS, if any.
+    /// Not integrity-protected: never select a key or make a trust decision from it.
     pub unprotected_header: Option<serde_json::Value>,
     /// Whether this signature verified successfully.
     pub verified: bool,
@@ -273,6 +274,7 @@ pub fn sign_flattened(
 /// header, detached payload, and RFC 7797 / `crit` options.
 ///
 /// - `unprotected`: the per-signature `header` member (JAdES `etsiU`, etc.).
+///   Not integrity-protected: never select a key or make a trust decision from it.
 /// - `opts.b64 == false`: RFC 7797 unencoded payload; the embedded `payload`
 ///   member, when present, carries the raw bytes.
 pub fn sign_flattened_opts(
@@ -392,6 +394,7 @@ pub struct GeneralSigner<'a> {
     /// Protected JOSE header authenticated by this signature.
     pub protected: &'a JoseHeader,
     /// Optional unprotected per-signature header parameters.
+    /// Not integrity-protected: never select a key or make a trust decision from it.
     pub unprotected: Option<serde_json::Value>,
     /// Signing and critical-header validation options.
     pub options: SignOptions,
