@@ -12,3 +12,4 @@ history.
 | [0006](0006-explicit-ed25519-wire-identifier.md) | Support the explicit Ed25519 wire identifier | Accepted |
 | [0007](0007-configurable-jwk-thumbprint-hashes.md) | Allow explicit SHA-2 JWK thumbprint hashes | Accepted |
 | [0008](0008-precise-jwt-numeric-dates.md) | Preserve fractional JWT timestamps | Accepted |
+| [0009](0009-unambiguous-jwks-key-selection.md) | Reject ambiguous JWT key identifiers | Accepted |
