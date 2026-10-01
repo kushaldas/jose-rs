@@ -18,7 +18,7 @@
 #     dup-ext). Both sides verify; what each did lands in the cell's
 #     `observed` field. dup-kid / dup-alg pass iff jose-rs rejects; dup-ext
 #     (a non-registered member, which jose-rs keeps in `extra`) passes iff
-#     both sides agree on the value.
+#     both sides accept and both resolve the last value (`second`).
 #
 # Writes interop/interop-results.json with one entry per cell.
 # Exit status:
@@ -223,11 +223,18 @@ run_dup_cell() {
         || { echo "FAIL: jose-rs accepted a header with a duplicated typed member" >&2; return 1; }
       ;;
     dup-ext)
-      # jose-rs keeps unregistered members in a flattened map; no rejection
-      # is asserted, only that both sides resolve the same value.
-      "$JQ" -e -n --argjson r "$rs_obs" --argjson j "$js_obs" \
-        '($r.accepted == $j.accepted) and ($r.protected_header.tenant == $j.protected_header.tenant)' > /dev/null \
-        || { echo "FAIL: jose-rs and panva/jose disagree on a duplicated extension member" >&2; return 1; }
+      # jose-rs keeps unregistered members in a flattened map, so both
+      # sides must accept the token and resolve the duplicate to the last
+      # value. Comparing the two observations alone is not enough: if both
+      # sides rejected, both `tenant` values would be null and still agree.
+      local side obs
+      for side in jose_rs panva_jose; do
+        if [ "$side" = jose_rs ]; then obs="$rs_obs"; else obs="$js_obs"; fi
+        "$JQ" -e '.accepted == true' <<< "$obs" > /dev/null \
+          || { echo "FAIL: $side rejected a header with a duplicated extension member" >&2; return 1; }
+        "$JQ" -e '.protected_header.tenant == "second"' <<< "$obs" > /dev/null \
+          || { echo "FAIL: $side did not resolve the duplicated extension member to the last value" >&2; return 1; }
+      done
       ;;
   esac
 }

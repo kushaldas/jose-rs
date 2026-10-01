@@ -85,7 +85,7 @@ jq '.[] | select(.format=="jws-dup") | {cell, result, observed}' interop/interop
 | --- | --- | --- | --- | --- |
 | `dup-kid` | `{"alg":"ES256","kid":"first","kid":"second"}` | **rejects**: ``JSON error: duplicate field `kid` `` | **accepts**, `protectedHeader.kid == "second"` | jose-rs rejects |
 | `dup-alg` | `{"alg":"HS256","alg":"ES256","kid":…}` | **rejects**: ``JSON error: duplicate field `alg` `` | **accepts**, `protectedHeader.alg == "ES256"`; verifies as ES256 | jose-rs rejects |
-| `dup-ext` | `{"alg":"ES256","kid":…,"tenant":"first","tenant":"second"}` | **accepts**, `tenant == "second"` | **accepts**, `tenant == "second"` | both sides agree |
+| `dup-ext` | `{"alg":"ES256","kid":…,"tenant":"first","tenant":"second"}` | **accepts**, `tenant == "second"` | **accepts**, `tenant == "second"` | both sides accept and resolve `tenant == "second"` |
 
 Takeaways:
 
@@ -99,9 +99,11 @@ Takeaways:
   map, where jose-rs is **also last-key-wins** — it agrees with panva/jose,
   so there is no cross-implementation differential, but a duplicated private
   member is not rejected. Callers that make security decisions on private
-  header members should be aware of this. `dup-ext` will flip to a failure
-  (the two sides disagree) if jose-rs starts rejecting it, which is the
-  prompt to update this table.
+  header members should be aware of this. `dup-ext` requires *both* sides to
+  accept and to resolve the last value, so it fails if either side starts
+  rejecting the token or picks the first value (merely agreeing is not
+  enough: if both rejected, both `tenant` values would be null). A failure
+  is the prompt to update this table.
 
 ### Running a single cell
 
