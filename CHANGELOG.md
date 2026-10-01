@@ -19,6 +19,12 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Fixed
 
+- JWT JWK Set decoding rejects multiple entries matching the token's `kid`
+  instead of selecting the first. This includes identical or unsupported keys.
+  Mixed sets still retain unsupported entries; unknown-kid and unlabelled-set
+  fallback rules are unchanged. `JwkSet::find_unique_by_kid` exposes the same
+  unambiguous lookup for callers; legacy `find_by_kid` remains first-match.
+
 - JWK-based JWS verification now selects symmetric key material using the
   actual signature algorithm and enforces HS256/384/512 minimum key lengths
   even when the JWK omits `alg`. Valid unpinned 256-bit HMAC keys no longer

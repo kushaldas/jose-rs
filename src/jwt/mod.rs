@@ -286,6 +286,10 @@ pub fn decode_with_jwk(
 /// keys are labelled with `kid` is a hard error. If no `kid` is present, every
 /// key in the set is tried in order; the first one whose signature validates
 /// wins. Returns the last error if no key in the set validates the token.
+/// Multiple entries matching the token's `kid` are an error, regardless of
+/// key order, algorithm, or usability. Unsupported keys remain in the set:
+/// a uniquely selected unsupported key fails without falling back to another
+/// key. Entirely unlabelled sets retain the try-every-key fallback.
 ///
 /// The try-every-key fallback means a token that names no key can be accepted
 /// under any key in the set. Where the set mixes keys of differing trust, pair
@@ -303,7 +307,7 @@ pub fn decode_with_jwkset(
     // a token under a key the token did not name, letting an attacker
     // smuggle a signature past key-pinning policies.
     if let Some(kid) = header.kid.as_deref() {
-        if let Some(jwk) = set.find_by_kid(kid) {
+        if let Some(jwk) = set.find_unique_by_kid(kid)? {
             return decode_with_jwk(jwk, token, validation);
         }
         // Exception: a set in which no JWK carries a `kid` at all cannot be

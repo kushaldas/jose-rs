@@ -367,6 +367,10 @@ pub struct JwkSet {
 
 impl JwkSet {
     /// Parse a JWK Set from a JSON string.
+    ///
+    /// This parses structure, not key usability: unsupported key types/curves
+    /// and duplicate key identifiers are retained. Material and operation
+    /// checks happen when a key is used. Malformed typed fields still fail.
     pub fn from_json(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(JoseError::from)
     }
@@ -377,8 +381,38 @@ impl JwkSet {
     }
 
     /// Find a key in the set by its `kid`.
+    ///
+    /// Returns the first match, even if the identifier is ambiguous. For
+    /// verification key selection, prefer [`Self::find_unique_by_kid`].
     pub fn find_by_kid(&self, kid: &str) -> Option<&Jwk> {
         self.keys.iter().find(|k| k.kid.as_deref() == Some(kid))
+    }
+
+    /// Find exactly one key by its case-sensitive `kid`.
+    ///
+    /// Returns `Ok(None)` when absent and an error when two or more entries
+    /// match, even if their material is identical or one key is unsupported.
+    /// No keys are filtered by algorithm or usability before this check.
+    /// This selects an identifier; it does not validate or authorize a key.
+    ///
+    /// ```
+    /// use jose_rs::jwk::JwkSet;
+    /// let set = JwkSet::from_json(r#"{"keys":[]}"#)?;
+    /// assert!(set.find_unique_by_kid("issuer-key")?.is_none());
+    /// # Ok::<(), jose_rs::JoseError>(())
+    /// ```
+    pub fn find_unique_by_kid(&self, kid: &str) -> Result<Option<&Jwk>> {
+        let mut matches = self
+            .keys
+            .iter()
+            .filter(|key| key.kid.as_deref() == Some(kid));
+        let first = matches.next();
+        if matches.next().is_some() {
+            return Err(JoseError::Key(
+                "multiple JWKs match the requested kid".into(),
+            ));
+        }
+        Ok(first)
     }
 }
 
