@@ -4,17 +4,57 @@ use super::Jwk;
 use crate::error::{JoseError, Result};
 use std::collections::BTreeMap;
 
+/// Supported thumbprint hashes. SHA-256 remains the default.
+///
+/// This deliberately excludes legacy hashes even when the crate's
+/// `deprecated` feature is enabled. The hash choice must be agreed by the
+/// application; a bare thumbprint does not encode its algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ThumbprintHash {
+    /// SHA-256 (32-byte digest).
+    #[default]
+    Sha256,
+    /// SHA-384 (48-byte digest).
+    Sha384,
+    /// SHA-512 (64-byte digest).
+    Sha512,
+}
+
 /// Compute the JWK Thumbprint using SHA-256 (RFC 7638).
 ///
-/// Builds the required-members JSON object with fields in lexicographic order
-/// (RFC 7638 §3.2) using proper JSON serialization, hashes it with SHA-256,
-/// and returns the base64url-encoded digest.
+/// Equivalent to [`thumbprint`] with [`ThumbprintHash::Sha256`]. This
+/// compatibility entry point retains its existing output and error behavior.
+pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
+    thumbprint(jwk, ThumbprintHash::Sha256)
+}
+
+/// Compute a base64url-encoded JWK thumbprint with an explicit SHA-2 hash.
+///
+/// Hashes the UTF-8 JSON representation of the required members, ordered
+/// lexicographically (RFC 7638). Private asymmetric material and optional
+/// metadata do not contribute. For AKP keys, `alg` is a required member and
+/// does contribute; for octet keys, the secret `k` member contributes.
 ///
 /// The required-members JSON is serialized via `serde_json` to guarantee
-/// correct escaping of any character inside the JWK field values (critical
-/// for spec compliance and to prevent collision attacks on attacker-supplied
-/// JWKs).
-pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
+/// correct escaping. This identifies the supplied representation; it does not
+/// validate key material, authorize operations, or establish trust in a key.
+///
+/// # Errors
+///
+/// Returns an error for unsupported key types, missing required members,
+/// serialization failures, or backend digest errors.
+///
+/// # Examples
+///
+/// ```
+/// use jose_rs::jwk::{self, thumbprint::{thumbprint, thumbprint_sha256, ThumbprintHash}};
+/// let key = jwk::generate_ed25519()?;
+/// assert_eq!(thumbprint(&key, ThumbprintHash::default())?, thumbprint_sha256(&key)?);
+/// let sha384 = thumbprint(&key, ThumbprintHash::Sha384)?;
+/// assert_eq!(sha384.len(), 64); // Unpadded base64url of 48 bytes.
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn thumbprint(jwk: &Jwk, hash: ThumbprintHash) -> Result<String> {
     // BTreeMap gives lexicographic key ordering automatically.
     let mut required: BTreeMap<&str, &str> = BTreeMap::new();
 
@@ -96,7 +136,12 @@ pub fn thumbprint_sha256(jwk: &Jwk) -> Result<String> {
     }
 
     let thumbprint_json = serde_json::to_vec(&required)?;
-    let hash = kryptering::digest::digest(kryptering::HashAlgorithm::Sha256, &thumbprint_json)?;
+    let algorithm = match hash {
+        ThumbprintHash::Sha256 => kryptering::HashAlgorithm::Sha256,
+        ThumbprintHash::Sha384 => kryptering::HashAlgorithm::Sha384,
+        ThumbprintHash::Sha512 => kryptering::HashAlgorithm::Sha512,
+    };
+    let hash = kryptering::digest::digest(algorithm, &thumbprint_json)?;
     Ok(crate::base64url::encode(&hash))
 }
 

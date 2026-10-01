@@ -106,6 +106,11 @@ let roundtripped = jwk::software_key_to_jwk(&software_key).unwrap();
 
 // Thumbprint (RFC 7638)
 let thumbprint = jwk::thumbprint::thumbprint_sha256(&ec_jwk).unwrap();
+// Explicit SHA-384/SHA-512 are also available; SHA-256 remains the default.
+let sha384 = jwk::thumbprint::thumbprint(
+    &ec_jwk,
+    jwk::thumbprint::ThumbprintHash::Sha384,
+).unwrap();
 ```
 
 ### HSM-backed signing
