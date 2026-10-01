@@ -8,3 +8,4 @@ history.
 | # | Title | Status |
 |---|-------|--------|
 | [0001](0001-jose-security-boundary-hardening.md) | JOSE security boundary hardening | Accepted |
+| [0005](0005-operation-aware-jwk-signature-conversion.md) | Validate JWK signature keys against the requested operation | Accepted |

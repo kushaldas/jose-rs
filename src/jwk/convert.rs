@@ -10,6 +10,9 @@ use p521::elliptic_curve::sec1::ToEncodedPoint;
 /// If the JWK advertises an `alg`, it is cross-checked against `kty` (and
 /// `crv` for EC/OKP keys). Mismatches — e.g. `kty: "oct"` with
 /// `alg: "RS256"` — are rejected before any key construction.
+/// This material-conversion API does not authorize an operation. For JWS,
+/// use [`jwk_to_signature_key`] to select and validate the actual algorithm,
+/// including HMAC keys without `alg` metadata.
 pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     check_alg_kty_consistency(jwk)?;
     match jwk.kty.as_str() {
@@ -21,6 +24,67 @@ pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         "AKP" => jwk_to_akp(jwk),
         other => Err(JoseError::Key(format!("unsupported kty: {other}"))),
     }
+}
+
+/// Convert a JWK for an explicitly selected JWS signing or verification operation.
+///
+/// Enforces `use`, `key_ops`, and exact agreement with `alg` when present.
+/// The requested algorithm determines key type, curve, and HMAC minimum length
+/// even when the JWK omits `alg`; the caller's JWK is never modified. Signing
+/// requires private (or symmetric secret) material. Algorithms unsupported by
+/// the backend and operations other than `Sign`/`Verify` are rejected.
+/// AKP keys must retain their required `alg` member.
+///
+/// Callers must select `alg` under their application algorithm policy; this
+/// function checks key suitability, not whether a token's algorithm is trusted.
+/// The returned key must be used with that same algorithm and operation.
+///
+/// # Examples
+///
+/// ```
+/// use jose_rs::{jwk::{self, JwkOp}, JwsAlgorithm};
+/// let jwk = jwk::generate_symmetric(32)?;
+/// let key = jwk::jwk_to_signature_key(&jwk, JwsAlgorithm::HS256, JwkOp::Sign)?;
+/// let signer = kryptering::SoftwareSigner::new(JwsAlgorithm::HS256.to_crypto()?, key)?;
+/// assert!(jwk.alg.is_none());
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn jwk_to_signature_key(
+    jwk: &Jwk,
+    alg: crate::JwsAlgorithm,
+    op: super::JwkOp,
+) -> Result<kryptering::SoftwareKey> {
+    if !matches!(op, super::JwkOp::Sign | super::JwkOp::Verify) {
+        return Err(JoseError::Key(
+            "JWS requires sign or verify operation".into(),
+        ));
+    }
+    alg.to_crypto()?;
+    jwk.check_op(op)?;
+    if jwk.kty == "AKP" && jwk.alg.is_none() {
+        return Err(JoseError::Key("AKP JWK requires alg".into()));
+    }
+    if let Some(pinned) = jwk.alg.as_deref() {
+        if pinned != alg.as_str() {
+            return Err(JoseError::Key(format!(
+                "JWK alg {pinned} does not match requested algorithm {}",
+                alg.as_str()
+            )));
+        }
+    }
+
+    // Reuse all material/curve/length checks with the explicit operation's
+    // algorithm. Never replace a conflicting pin or mutate the caller's key.
+    // Jwk's Drop implementation wipes this temporary copy's secret fields.
+    let mut contextual = jwk.clone();
+    contextual.alg = Some(alg.as_str().into());
+    let key = jwk_to_software_key(&contextual)?;
+    if op == super::JwkOp::Sign && !key.has_private_key() {
+        return Err(JoseError::Key(
+            "signing requires private key material".into(),
+        ));
+    }
+    Ok(key)
 }
 
 /// Verify that `alg`, if present, is consistent with `kty` and `crv`.
