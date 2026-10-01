@@ -4,6 +4,7 @@ use crate::algorithm::JwsAlgorithm;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jwt::claims::Claims;
+use crate::jwt::NumericDate;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Validation configuration for JWT decoding.
@@ -187,6 +188,34 @@ impl Validation {
     }
 
     fn validate_internal(&self, claims: &Claims, header: Option<&JoseHeader>) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| JoseError::InvalidClaims("system clock is before UNIX_EPOCH".into()))?;
+        self.validate_at(claims, header, now.into())
+    }
+
+    /// Validate using an explicit, trusted clock value with nanosecond precision.
+    ///
+    /// Pass the authenticated protected header to enforce header-bound policy.
+    /// `None` skips header checks, like [`Self::validate`]. Do not derive `now`
+    /// from untrusted token claims. Expiration is exclusive: `now >= exp +
+    /// leeway` fails. Not-before and future-iat boundaries are inclusive;
+    /// maximum age rejects only ages greater than the configured limit.
+    ///
+    /// ```
+    /// use jose_rs::jwt::{Claims, Validation};
+    /// let claims: Claims = serde_json::from_str(r#"{"exp":10.5}"#)?;
+    /// let policy = Validation::new().with_leeway(0);
+    /// policy.validate_at(&claims, None, "10.499999999".parse()?)?;
+    /// assert!(policy.validate_at(&claims, None, "10.5".parse()?).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn validate_at(
+        &self,
+        claims: &Claims,
+        header: Option<&JoseHeader>,
+        now: NumericDate,
+    ) -> Result<()> {
         // Header-bound checks (run first — fail fast on a mis-typed token).
         if let Some(h) = header {
             if self.require_kid && h.kid.is_none() {
@@ -216,11 +245,10 @@ impl Validation {
             }
         }
 
-        // If the system clock is before 1970 something is very wrong — fail closed.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| JoseError::InvalidClaims("system clock is before UNIX_EPOCH".into()))?
-            .as_secs();
+        // A u128 holds the entire u64 seconds domain plus leeway and max age
+        // in nanoseconds without either overflow or fractional rounding.
+        let now = now.as_nanos();
+        let leeway = u128::from(self.leeway) * 1_000_000_000;
 
         // Presence requirements run before value checks: a token that omits
         // a required claim is rejected outright rather than silently passing.
@@ -240,20 +268,19 @@ impl Validation {
             ));
         }
 
-        // Check expiration — use saturating_add so an attacker-controlled exp
-        // near u64::MAX cannot wrap and falsely satisfy the comparison.
+        // RFC 7519: the current time must be strictly before expiration.
         if self.validate_exp {
             if let Some(exp) = claims.exp {
-                if now > exp.saturating_add(self.leeway) {
+                if now >= exp.as_nanos() + leeway {
                     return Err(JoseError::Expired);
                 }
             }
         }
 
-        // Check not-before — saturating_add prevents overflow at the high end.
+        // Preserve fractional not-before boundaries.
         if self.validate_nbf {
             if let Some(nbf) = claims.nbf {
-                if now.saturating_add(self.leeway) < nbf {
+                if now + leeway < nbf.as_nanos() {
                     return Err(JoseError::NotYetValid);
                 }
             }
@@ -262,7 +289,7 @@ impl Validation {
         // Reject future-dated iat (attacker-controlled or clock-skewed issuer).
         if self.validate_iat_not_future {
             if let Some(iat) = claims.iat {
-                if iat > now.saturating_add(self.leeway) {
+                if iat.as_nanos() > now + leeway {
                     return Err(JoseError::InvalidClaims("iat is in the future".into()));
                 }
             }
@@ -271,8 +298,7 @@ impl Validation {
         // Enforce max token age relative to iat.
         if let (Some(max_age), Some(iat)) = (self.max_age, claims.iat) {
             // now - iat > max_age + leeway → too old.
-            // Use saturating to handle any edge cases.
-            if now > iat.saturating_add(max_age).saturating_add(self.leeway) {
+            if now > iat.as_nanos() + u128::from(max_age) * 1_000_000_000 + leeway {
                 return Err(JoseError::Expired);
             }
         }
@@ -324,7 +350,7 @@ mod tests {
         let mut header = JoseHeader::new("HS256");
         header.typ = Some("JWT".into());
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new().with_typ("at+jwt");
         let err = validation
@@ -339,7 +365,7 @@ mod tests {
     fn typ_missing_when_required() {
         let header = JoseHeader::new("HS256"); // typ unset
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new().with_typ("JWT");
         assert!(validation.validate_with_header(&claims, &header).is_err());
@@ -351,7 +377,7 @@ mod tests {
         let mut header = JoseHeader::new("HS256");
         header.typ = Some("JWT".into());
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new().with_typ("JWT");
         validation.validate_with_header(&claims, &header).unwrap();
@@ -362,7 +388,7 @@ mod tests {
     fn alg_allow_list_rejects_unlisted() {
         let header = JoseHeader::new("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new().with_allowed_algorithms(vec![JwsAlgorithm::RS256]);
         let err = validation
@@ -377,7 +403,7 @@ mod tests {
     fn alg_allow_list_accepts_listed() {
         let header = JoseHeader::new("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new()
             .with_allowed_algorithms(vec![JwsAlgorithm::HS256, JwsAlgorithm::RS256]);
@@ -388,7 +414,7 @@ mod tests {
     #[test]
     fn max_age_rejects_old_iat() {
         let mut claims = Claims::default();
-        claims.iat = Some(now() - 3600); // issued 1h ago
+        claims.iat = Some((now() - 3600).into()); // issued 1h ago
 
         let validation = Validation::new().with_max_age(60); // 60s cap
         let err = validation.validate(&claims).unwrap_err();
@@ -399,7 +425,7 @@ mod tests {
     #[test]
     fn max_age_accepts_recent_iat() {
         let mut claims = Claims::default();
-        claims.iat = Some(now() - 10); // 10s ago
+        claims.iat = Some((now() - 10).into()); // 10s ago
 
         let validation = Validation::new().with_max_age(60);
         validation.validate(&claims).unwrap();
@@ -409,7 +435,7 @@ mod tests {
     #[test]
     fn max_age_rejects_missing_iat() {
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let validation = Validation::new().with_max_age(60);
         let err = validation.validate(&claims).unwrap_err().to_string();
@@ -420,7 +446,7 @@ mod tests {
     #[test]
     fn iat_in_future_rejected() {
         let mut claims = Claims::default();
-        claims.iat = Some(now() + 3600); // 1h in the future
+        claims.iat = Some((now() + 3600).into()); // 1h in the future
 
         let validation = Validation::new(); // default 60s leeway
         let err = validation.validate(&claims).unwrap_err().to_string();
@@ -431,7 +457,7 @@ mod tests {
     #[test]
     fn iat_within_leeway_accepted() {
         let mut claims = Claims::default();
-        claims.iat = Some(now() + 30); // 30s in the future, within 60s leeway
+        claims.iat = Some((now() + 30).into()); // 30s in the future, within 60s leeway
 
         let validation = Validation::new();
         validation.validate(&claims).unwrap();
@@ -442,7 +468,7 @@ mod tests {
     fn with_subject_builder_and_check() {
         let mut claims = Claims::default();
         claims.sub = Some("alice".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let v = Validation::new().with_subject("alice");
         v.validate(&claims).unwrap();
@@ -464,7 +490,7 @@ mod tests {
     #[test]
     fn require_exp_accepts_present_exp() {
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         Validation::new().require_exp().validate(&claims).unwrap();
     }
 
@@ -472,7 +498,7 @@ mod tests {
     #[test]
     fn require_nbf_rejects_missing_nbf() {
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let err = Validation::new()
             .require_nbf()
             .validate(&claims)
@@ -485,7 +511,7 @@ mod tests {
     #[test]
     fn require_iat_rejects_missing_iat() {
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let err = Validation::new()
             .require_iat()
             .validate(&claims)
@@ -498,8 +524,8 @@ mod tests {
     #[test]
     fn require_iat_accepts_present_iat() {
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
-        claims.iat = Some(now());
+        claims.exp = Some((now() + 3600).into());
+        claims.iat = Some((now()).into());
         Validation::new().require_iat().validate(&claims).unwrap();
     }
 
@@ -516,7 +542,7 @@ mod tests {
     #[test]
     fn exp_near_u64_max_does_not_wrap() {
         let mut claims = Claims::default();
-        claims.exp = Some(u64::MAX - 1);
+        claims.exp = Some((u64::MAX - 1).into());
         let validation = Validation::new().with_leeway(60);
         // Far-future exp must not be reported as expired.
         validation.validate(&claims).unwrap();
@@ -526,7 +552,7 @@ mod tests {
     #[test]
     fn nbf_near_u64_max_does_not_wrap() {
         let mut claims = Claims::default();
-        claims.nbf = Some(u64::MAX - 1);
+        claims.nbf = Some((u64::MAX - 1).into());
         let validation = Validation::new().with_leeway(60);
         // nbf in the far future means not-yet-valid — expected error, not a panic.
         let err = validation.validate(&claims).unwrap_err();

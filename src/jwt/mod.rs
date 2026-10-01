@@ -5,9 +5,11 @@
 //! validation (expiration, not-before, issuer, audience).
 
 pub mod claims;
+pub mod numeric_date;
 pub mod validation;
 
 pub use claims::{Audience, Claims};
+pub use numeric_date::NumericDate;
 pub use validation::Validation;
 
 use crate::error::{JoseError, Result};
@@ -400,7 +402,7 @@ mod tests {
         let mut claims = Claims::default();
         claims.iss = Some("test-issuer".into());
         claims.sub = Some("user-42".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_issuer("test-issuer");
@@ -416,7 +418,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         // Expired 2 hours ago — well past the default 60s leeway
-        claims.exp = Some(now() - 7200);
+        claims.exp = Some((now() - 7200).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new();
@@ -435,7 +437,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         // Not valid until 2 hours from now — well past the default 60s leeway
-        claims.nbf = Some(now() + 7200);
+        claims.nbf = Some((now() + 7200).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new();
@@ -454,7 +456,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.iss = Some("wrong-issuer".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_issuer("expected-issuer");
@@ -473,7 +475,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.aud = Some(Audience::Single("other-service".into()));
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_audience("my-service");
@@ -491,7 +493,7 @@ mod tests {
     fn custom_claims_roundtrip() {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         claims
             .extra
             .insert("role".into(), serde_json::Value::String("admin".into()));
@@ -513,7 +515,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.aud = Some(Audience::Single("my-service".into()));
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_audience("my-service");
@@ -530,7 +532,7 @@ mod tests {
             "service-a".into(),
             "service-b".into(),
         ]));
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
 
@@ -576,7 +578,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         // No issuer set
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_issuer("required-issuer");
@@ -590,7 +592,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         // No audience set
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new().with_audience("required-aud");
@@ -604,7 +606,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         // Expired 30 seconds ago — within default 60s leeway
-        claims.exp = Some(now() - 30);
+        claims.exp = Some((now() - 30).into());
 
         let token = encode(&hmac_signer(), &header, &claims).unwrap();
         let validation = Validation::new();
@@ -622,7 +624,7 @@ mod tests {
         let mut claims = Claims::default();
         claims.iss = Some("nested-issuer".into());
         claims.sub = Some("nested-user".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         // 32-byte CEK for A256GCM
         let cek = [0x42u8; 32];
@@ -656,7 +658,7 @@ mod tests {
         let jws_header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.iss = Some("kw-issuer".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let kek = [0x99u8; 16]; // 128-bit KEK
 
@@ -680,7 +682,7 @@ mod tests {
     fn nested_jwt_wrong_decryption_key_fails() {
         let jws_header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let cek = [0x42u8; 32];
         let wrong_cek = [0x99u8; 32];
@@ -704,7 +706,7 @@ mod tests {
     fn nested_jwt_wrong_verification_key_fails() {
         let jws_header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let cek = [0x42u8; 32];
 
@@ -733,7 +735,7 @@ mod tests {
         let jws_header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.iss = Some("cbc-nested".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         // 64-byte CEK for A256CBC-HS512 (32 HMAC + 32 AES)
         let cek = [0x55u8; 64];
@@ -768,7 +770,7 @@ mod tests {
         let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
         let mut claims = Claims::default();
         claims.iss = Some("nested-jwk".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode_nested_with_jwk(
             &signer_jwk,
@@ -801,7 +803,7 @@ mod tests {
 
         let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let err = encode_nested_with_jwk(
             &signer_jwk,
@@ -827,7 +829,7 @@ mod tests {
 
         let jws_header = JoseHeader::jwt_for_alg(crate::algorithm::JwsAlgorithm::HS256);
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let err = encode_nested_with_jwk(
             &signer_jwk,
@@ -853,7 +855,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.iss = Some("me".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode_with_jwk(&jwk, &header, &claims).unwrap();
         let validation = Validation::new().with_issuer("me");
@@ -877,7 +879,7 @@ mod tests {
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
         claims.iss = Some("issuer-1".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let validation = Validation::new().with_issuer("issuer-1");
@@ -896,7 +898,7 @@ mod tests {
         let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let err = decode_with_jwk(&jwk, &token, &Validation::new())
@@ -922,7 +924,7 @@ mod tests {
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("b".into()); // kid points at jwk_b
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet {
@@ -946,7 +948,7 @@ mod tests {
         let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k_b)).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet {
@@ -970,7 +972,7 @@ mod tests {
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("zzz".into());
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
@@ -995,7 +997,7 @@ mod tests {
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("signer-1".into()); // but the signer pins one
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet { keys: vec![jwk] };
@@ -1021,7 +1023,7 @@ mod tests {
         let mut header = JoseHeader::jwt("HS256");
         header.kid = Some("zzz".into());
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet {
@@ -1051,7 +1053,7 @@ mod tests {
         let signer = SoftwareSigner::new(hmac_algo(), hmac_key_from(&k)).unwrap();
         let header = JoseHeader::jwt("HS256"); // no kid
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet {
@@ -1080,7 +1082,7 @@ mod tests {
         let verifier = SoftwareVerifier::new(hmac_algo(), hmac_key_from(&k)).unwrap();
         let header = JoseHeader::jwt("HS256"); // no kid
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         decode(&verifier, &token, &Validation::new()).unwrap();
@@ -1101,7 +1103,7 @@ mod tests {
         let signer = SoftwareSigner::new(hmac_algo(), other).unwrap();
         let header = JoseHeader::jwt("HS256");
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
         let token = encode(&signer, &header, &claims).unwrap();
 
         let set = crate::jwk::JwkSet { keys: vec![jwk_a] };
@@ -1123,7 +1125,7 @@ mod tests {
         let header = JoseHeader::jwt("ML-DSA-65");
         let mut claims = Claims::default();
         claims.iss = Some("pq-issuer".into());
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode_with_jwk(&jwk, &header, &claims).unwrap();
         let validation = Validation::new().with_issuer("pq-issuer");
@@ -1144,7 +1146,7 @@ mod tests {
         let mut header = JoseHeader::jwt("ML-DSA-44");
         header.kid = Some("pq-b".into());
         let mut claims = Claims::default();
-        claims.exp = Some(now() + 3600);
+        claims.exp = Some((now() + 3600).into());
 
         let token = encode_with_jwk(&jwk_b, &header, &claims).unwrap();
 

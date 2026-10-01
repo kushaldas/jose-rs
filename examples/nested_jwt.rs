@@ -37,7 +37,7 @@ fn main() -> jose_rs::Result<()> {
     let mut claims = Claims {
         iss: Some("secure-service".into()),
         sub: Some("confidential-user".into()),
-        exp: Some(now + 3600),
+        exp: Some((now + 3600).into()),
         ..Default::default()
     };
     claims

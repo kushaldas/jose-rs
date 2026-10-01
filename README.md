@@ -77,6 +77,17 @@ let decoded = jwt::decode(&verifier, &token, &validation).unwrap();
 assert_eq!(decoded.sub.as_deref(), Some("user-42"));
 ```
 
+JWT `Claims.exp`, `nbf`, and `iat` use `NumericDate` with nanosecond precision.
+For integer assignments, use `claims.exp = Some(seconds.into())`; for exact
+fractions, use `claims.exp = Some("4102444800.125".parse()?)`. Parse original
+JSON into `Claims` to preserve decimal precision rather than passing through
+floating-point values. Numeric encodings over 128 bytes, nonzero precision
+below a nanosecond, negative values (including negative zero), out-of-range
+values, and exponents outside i32 are rejected. Missing/null optional dates
+keep their existing absence semantics. Expiration is exclusive, while
+not-before and maximum-age boundaries are inclusive. `Validation::validate_at`
+accepts an explicit trusted clock for deterministic checks.
+
 ### JWE (encrypt and decrypt)
 
 ```rust

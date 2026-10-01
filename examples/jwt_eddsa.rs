@@ -27,7 +27,7 @@ fn main() -> jose_rs::Result<()> {
     let claims = Claims {
         iss: Some("ed25519-issuer".into()),
         sub: Some("alice".into()),
-        exp: Some(now + 600),
+        exp: Some((now + 600).into()),
         ..Default::default()
     };
 
