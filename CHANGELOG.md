@@ -32,6 +32,11 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- `JweDecryptOptions::with_max_plaintext` sets an inclusive plaintext-byte
+  limit for option-aware JWE and nested JWT decryption. Oversized messages
+  fail without returning plaintext. Existing algorithm policy, token-size
+  bounds, and default behavior are unchanged; compression remains unsupported.
+
 - `jwt::NumericDate` provides exact decimal JSON parsing/serialization and
   integer/Duration conversions. `Validation::validate_at` accepts a trusted
   explicit timestamp for deterministic validation and boundary testing.
