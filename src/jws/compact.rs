@@ -592,7 +592,7 @@ pub fn sign_with_jwk_options(
     jwk.check_op(crate::jwk::JwkOp::Sign)?;
 
     // 4. Convert to SoftwareKey and build the signer.
-    let sw_key = crate::jwk::jwk_to_software_key(jwk)?;
+    let sw_key = crate::jwk::jwk_to_signature_key(jwk, jwk_alg, crate::jwk::JwkOp::Sign)?;
     let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
 
     // 5. Standard sign — applies the full phase-4 sign-side binding.
@@ -607,6 +607,8 @@ pub fn sign_with_jwk_options(
 /// appropriate `kryptering::SoftwareVerifier` internally, and runs
 /// verification. The caller does not need to pick an algorithm, build
 /// a verifier, or remember to check `use`/`key_ops`.
+/// HMAC key selection and minimum length are checked against the token's
+/// algorithm even when `jwk.alg` is absent. AKP keys still require `alg`.
 ///
 /// Returns the decoded payload on success. All the usual JWS-layer
 /// hardening (alg-header binding, `alg: "none"` rejection, non-empty
@@ -631,7 +633,7 @@ pub fn verify_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
     jwk.check_op(crate::jwk::JwkOp::Verify)?;
 
     // 4. Convert to a SoftwareKey and build the verifier.
-    let sw_key = crate::jwk::jwk_to_software_key(jwk)?;
+    let sw_key = crate::jwk::jwk_to_signature_key(jwk, header_alg, crate::jwk::JwkOp::Verify)?;
     let verifier = kryptering::SoftwareVerifier::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
 
     // 5. Standard verify — applies the full JWS-layer binding.

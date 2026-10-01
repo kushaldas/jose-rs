@@ -4,6 +4,22 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+### Fixed
+
+- JWK-based JWS verification now selects symmetric key material using the
+  actual signature algorithm and enforces HS256/384/512 minimum key lengths
+  even when the JWK omits `alg`. Valid unpinned 256-bit HMAC keys no longer
+  get misclassified as AES keys. JWT JWK/JWKSet verification inherits the fix.
+
+### Added
+
+- `jwk::jwk_to_signature_key(jwk, alg, op)` for bindings and explicit JWS
+  operations. It checks algorithm pins, operation permissions, key type/curve,
+  HMAC strength, and private material for signing without modifying the JWK.
+  Generic material conversion and one-shot signing's required `alg` pin are
+  unchanged. Callers remain responsible for selecting an allowed algorithm
+  and using the returned key with the same algorithm and operation.
+
 ## [0.8.0] - 2026-10-01
 
 `0.7.2` was prepared on the release branch but never published; its changes

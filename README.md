@@ -234,10 +234,17 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   contradicts its `kty` (e.g. `alg: "RS256"` on a `kty: "oct"` key, or
   `alg: "ES256"` on a `P-384` curve) is rejected at conversion time
   with a clear error, rather than failing opaquely downstream.
-- **HMAC key minimum length (RFC 7518 §3.2).** When an `oct` JWK
-  declares `alg: "HS256"`, `"HS384"`, or `"HS512"`, the `k` material
-  must be at least as long as the hash output (32, 48, or 64 bytes
-  respectively). Shorter keys are rejected at JWK import.
+- **HMAC key minimum length (RFC 7518 §3.2).** JWK-based JWS operations
+  enforce 32/48/64-byte minimums for HS256/384/512 against the actual
+  operation, including keys without `alg` metadata. Bindings constructing
+  software signers/verifiers should use
+  `jwk::jwk_to_signature_key(&jwk, alg, JwkOp::Sign /* or Verify */)`;
+  it also checks algorithm pins, permissions, key type/curve, and private
+  material for signing. Select `alg` under application policy and use the
+  returned key only for that algorithm and operation. Generic
+  `jwk_to_software_key` remains a material-conversion API: it checks pinned
+  HMAC lengths but cannot authorize an unspecified operation, and still
+  infers AES for unpinned 16/24/32-byte keys.
 - **Private JWK fields zeroize on drop.** `Jwk`'s `Drop` impl calls
   `zeroize::Zeroize` on `d`, `p`, `q`, `dp`, `dq`, `qi`, and `k` when
   present, so private material is wiped from the heap before the
