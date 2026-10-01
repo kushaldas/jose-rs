@@ -4,6 +4,8 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-01
+
 ### Breaking
 
 - `Claims::{exp, nbf, iat}` now use `Option<NumericDate>` instead of
