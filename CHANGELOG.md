@@ -4,6 +4,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+### Breaking
+
+- `Claims::{exp, nbf, iat}` now use `Option<NumericDate>` instead of
+  `Option<u64>`. Migrate integer assignments to `Some(seconds.into())`.
+  JSON dates retain up to nanosecond precision instead of being floored.
+  Nonzero subnanosecond values, negative zero, encodings over 128 bytes,
+  and exponents outside the signed 32-bit range are rejected explicitly.
+  Integer dates retain the full u64 range. Missing/null optional dates retain
+  their existing absence semantics.
+- Expiration now rejects at `now == exp + leeway`, as required by RFC 7519.
+  The system clock and all time checks retain their fractional component.
+  Not-before, future-issued-at, and maximum-age checks no longer floor dates.
+
 ### Fixed
 
 - JWK-based JWS verification now selects symmetric key material using the
@@ -12,6 +25,10 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   get misclassified as AES keys. JWT JWK/JWKSet verification inherits the fix.
 
 ### Added
+
+- `jwt::NumericDate` provides exact decimal JSON parsing/serialization and
+  integer/Duration conversions. `Validation::validate_at` accepts a trusted
+  explicit timestamp for deterministic validation and boundary testing.
 
 - `jwk::thumbprint::thumbprint` with `ThumbprintHash::{Sha256, Sha384, Sha512}`.
   The existing `thumbprint_sha256` function and SHA-256 default retain their

@@ -20,7 +20,7 @@ pkcs11 = ["kryptering/pkcs11"]
 [dependencies]
 kryptering = { version = "0.6", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 base64 = "0.22"
 thiserror = "2"
 aes-gcm = "0.10"

@@ -31,8 +31,8 @@ fn main() -> jose_rs::Result<()> {
     let claims = Claims {
         iss: Some("example-service".into()),
         sub: Some("user-42".into()),
-        iat: Some(now),
-        exp: Some(now + 3600),
+        iat: Some((now).into()),
+        exp: Some((now + 3600).into()),
         ..Default::default()
     };
 

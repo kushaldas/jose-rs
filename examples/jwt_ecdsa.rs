@@ -27,8 +27,8 @@ fn main() -> jose_rs::Result<()> {
     let claims = Claims {
         iss: Some("mobile-app".into()),
         sub: Some("device-abc123".into()),
-        exp: Some(now + 300), // 5 minutes
-        iat: Some(now),
+        exp: Some((now + 300).into()), // 5 minutes
+        iat: Some((now).into()),
         ..Default::default()
     };
 

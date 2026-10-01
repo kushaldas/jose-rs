@@ -41,10 +41,13 @@ use a Python environment with that package installed:
 ```sh
 cargo build --locked --manifest-path interop/rust-harness/Cargo.toml
 python interop/tests/ed25519_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+python interop/tests/numeric_dates_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 ```
 
 This check generates disposable keys in memory and verifies compact JWS in
 both directions. It is separate from the Node matrix below.
+The NumericDate check verifies signed JWTs with fractional dates in both
+directions; Rust integration tests cover nanosecond boundary decisions.
 
 ```
 just interop-build            # build Rust harness (release) + npm ci

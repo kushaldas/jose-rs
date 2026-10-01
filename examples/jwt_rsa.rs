@@ -30,8 +30,8 @@ fn main() -> jose_rs::Result<()> {
         iss: Some("auth.example.com".into()),
         sub: Some("user@example.com".into()),
         aud: Some(Audience::Single("api.example.com".into())),
-        exp: Some(now + 3600),
-        iat: Some(now),
+        exp: Some((now + 3600).into()),
+        iat: Some((now).into()),
         ..Default::default()
     };
 
