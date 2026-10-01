@@ -18,6 +18,8 @@ import {
   decodeProtectedHeader,
   CompactEncrypt,
   compactDecrypt,
+  FlattenedEncrypt,
+  flattenedDecrypt,
 } from 'jose'
 
 // Node's "ExperimentalWarning: ML-DSA-* Web Crypto API algorithm…" is
@@ -170,6 +172,41 @@ async function decryptCompact(alg, enc) {
   emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
 }
 
+/**
+ * Flattened JWE JSON Serialization (RFC 7516 §7.2.2), emitted as a JSON
+ * *string* in `jwe` so the matrix plumbing is identical to the compact cells.
+ */
+async function encryptFlattened(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwk, plaintext_b64u, header } = JSON.parse(readStdin())
+  if (header && ('alg' in header || 'enc' in header)) {
+    throw new Error('header input must not override `alg` / `enc`')
+  }
+  if (jwk.alg !== alg) throw new Error(`JWK alg ${jwk.alg} does not match expected ${alg}`)
+  const key = await importJWK(jwk, alg)
+  const jwe = await new FlattenedEncrypt(b64uDecode(plaintext_b64u))
+    .setProtectedHeader({ ...(header ?? {}), alg, enc })
+    .encrypt(key)
+  emit({ jwe: JSON.stringify(jwe) })
+}
+
+async function decryptFlattened(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwk, jwe } = JSON.parse(readStdin())
+  const parsed = typeof jwe === 'string' ? JSON.parse(jwe) : jwe
+  const hdr = decodeProtectedHeader(parsed)
+  if (hdr.alg !== alg) throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
+  if (hdr.enc !== enc) throw new Error(`token enc ${hdr.enc} does not match expected ${enc}`)
+  const key = await importJWK(jwk, alg)
+  const { plaintext, protectedHeader } = await flattenedDecrypt(parsed, key, {
+    keyManagementAlgorithms: [alg],
+    contentEncryptionAlgorithms: [enc],
+  })
+  emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
+}
+
 async function main() {
   const { cmd, alg, enc } = parseArgs(process.argv.slice(2))
   switch (cmd) {
@@ -181,6 +218,8 @@ async function main() {
     case 'verify-jwt': return verifyJwt(alg)
     case 'encrypt-compact': return encryptCompact(alg, enc)
     case 'decrypt-compact': return decryptCompact(alg, enc)
+    case 'encrypt-flattened': return encryptFlattened(alg, enc)
+    case 'decrypt-flattened': return decryptFlattened(alg, enc)
     default: throw new Error(`unknown subcommand: ${cmd}`)
   }
 }

@@ -1,9 +1,10 @@
 # Interop tests: jose-rs ↔ panva/jose
 
-Round-trips JWS compact / JWT / JWE compact between this crate and the npm
-`jose` package ([panva/jose](https://github.com/panva/jose)), with emphasis on
-**ML-DSA** (FIPS 204, `draft-ietf-cose-dilithium`), plus custom-protected-header
-and duplicate-header-member cells.
+Round-trips JWS compact / JWT / JWE compact / **JWE flattened JSON** between this
+crate and the npm `jose` package ([panva/jose](https://github.com/panva/jose))
+and Python's jwcrypto 1.6.1, with emphasis on **ML-DSA** (FIPS 204,
+`draft-ietf-cose-dilithium`), plus custom-protected-header and
+duplicate-header-member cells.
 
 The CI job (`.github/workflows/interop.yml`) is **non-blocking** —
 `continue-on-error: true` at the job level. A red check is a signal to look,
@@ -40,21 +41,36 @@ use a Python environment with that package installed:
 
 ```sh
 cargo build --locked --manifest-path interop/rust-harness/Cargo.toml
-python interop/tests/ed25519_jwcrypto.py interop/rust-harness/target/debug/jose-interop
-python interop/tests/numeric_dates_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+
+uv venv interop/.venv \
+  && uv pip install --python interop/.venv/bin/python 'jwcrypto==1.6.1'
+
+interop/.venv/bin/python interop/tests/ed25519_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+interop/.venv/bin/python interop/tests/numeric_dates_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+interop/.venv/bin/python interop/tests/jwe_json_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 ```
 
-This check generates disposable keys in memory and verifies compact JWS in
-both directions. It is separate from the Node matrix below.
-The NumericDate check verifies signed JWTs with fractional dates in both
-directions; Rust integration tests cover nanosecond boundary decisions.
+These checks generate disposable keys in memory and verify messages in both
+directions; they are separate from the Node matrix below. The Ed25519 check
+covers RFC 8037 §1.1 key shapes and RFC 7515 §4.1.9 legacy `EdDSA` labels; the
+NumericDate check covers signed JWTs with fractional dates in both directions
+(Rust integration tests cover nanosecond boundary decisions).
+
+The `jwe_json_jwcrypto.py` check covers the flattened JSON JWE (RFC 7516
+§7.2.2) over nine `alg`/`enc` combinations in both directions, asserting the
+emitted member shape on each side. It also **pins the documented divergence**
+from ADR 0011: jwcrypto's default flattened output puts `alg`/`enc` in the
+per-recipient *unprotected* `header` member (the shape RFC 7516 §A.5 uses),
+which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
+refusal is asserted, so the day the library starts accepting it the test has to
+change deliberately.
 
 ```
 just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **47 cells**:
+Full matrix is **55 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -62,6 +78,7 @@ Full matrix is **47 cells**:
 | Classical baseline | `compact` | EdDSA, ES256 × 4 directions = 8 | generic JWS regressions that might otherwise look like an ML-DSA bug |
 | Custom protected header | `hdr` | ES256, EdDSA × 2 directions = 4 | producer sets `kid` + a private `tenant` member; consumer must report both back unchanged |
 | JWE compact | `jwe` | 4 alg:enc × 2 directions = 8 | `dir:A256GCM`, `dir:A128CBC-HS256`, `A256KW:A256GCM`, `A256KW:A128CBC-HS256`; same custom header; plaintext + header compared |
+| JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
 
 The four JWS directions:
@@ -71,7 +88,7 @@ The four JWS directions:
 3. `rust-keygen-js-roundtrip` — Rust keygen; JS self-roundtrip with it (JWK-shape canary)
 4. `js-keygen-rust-roundtrip` — JS keygen; Rust self-roundtrip with it
 
-`hdr` cells use directions 1–2 only. `jwe` cells use
+`hdr` cells use directions 1–2 only. `jwe` and `jwe-json` cells use
 `rust-encrypt-js-decrypt` / `js-encrypt-rust-decrypt`: the producer generates
 the symmetric (`oct`) JWK and encrypts, the consumer imports that same JWK and
 decrypts — so `oct`-JWK shape is exercised in both directions. The `jwe` alg
@@ -141,9 +158,10 @@ Each cell's intermediate JWK / signed token is preserved under
 
 ## Harness contract
 
-Both harnesses expose the **same eight subcommands** (plus one Rust-only
-vector minter), reading JSON on stdin and writing JSON on stdout. Errors go to
-stderr and the process exits non-zero.
+Both harnesses expose the **same ten subcommands** (plus one Rust-only vector
+minter), reading JSON on stdin and writing JSON on stdout. Errors go to stderr
+and the process exits non-zero. `jwe` is carried as a *string* in both formats,
+so the driver is identical for compact and flattened JSON messages.
 
 | Subcommand                                  | stdin                                   | stdout                                        |
 | ------------------------------------------- | --------------------------------------- | --------------------------------------------- |
@@ -155,6 +173,8 @@ stderr and the process exits non-zero.
 | `verify-jwt --alg <ALG>`                    | `{jwk, jwt}`                            | `{ok, claims}`                                |
 | `encrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, plaintext_b64u, header?}`        | `{jwe}`                                       |
 | `decrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, jwe}`                            | `{ok, plaintext_b64u, protected_header}`      |
+| `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?}`        | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string   |
+| `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe}`                            | `{ok, plaintext_b64u, protected_header}`      |
 | `sign-compact-raw --alg <ALG>` (Rust only)  | `{jwk, header_raw, payload_b64u}`       | `{jws}` signed over `header_raw` verbatim     |
 
 `header` is an optional object of extra protected-header members (e.g.

@@ -13,6 +13,11 @@
 #   - format `jwe`: compact JWE, alg label `<ALG>:<ENC>` (e.g. `dir:A256GCM`),
 #     same custom header. Directions rust-encrypt-js-decrypt /
 #     js-encrypt-rust-decrypt; plaintext and header compared.
+#   - format `jwe-json`: the same key-management/content combinations in the
+#     RFC 7516 §7.2.2 flattened JSON Serialization. The emitted member set is
+#     also asserted (protected/encrypted_key/iv/ciphertext/tag, and
+#     `encrypted_key` absent for `dir`), so the cell checks the *serialization*,
+#     not just decryptability.
 #   - format `jws-dup`: negative vectors. Rust hand-builds a validly signed
 #     compact JWS whose protected header repeats a member (dup-kid, dup-alg,
 #     dup-ext). Both sides verify; what each did lands in the cell's
@@ -170,6 +175,50 @@ run_jwe_cell() {
   assert_header "$out_path"
 }
 
+# run_jwe_json_cell <direction> <alg:enc> — flattened JSON JWE (RFC 7516 §7.2.2).
+#
+# Same key material, header members and payload as `run_jwe_cell`; the only
+# difference is the serialization, which is the point: a JSON-serialization bug
+# must show up here even though the crypto is shared.
+run_jwe_json_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | "$producer" encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+
+  # Serialization-shape assertions on the emitted object: RFC 7516 §7.2.1
+  # presence rules, and nothing in an unprotected position.
+  printf '%s' "$jwe" | "$JQ" -e --arg alg "$alg" '
+    (.protected | type) == "string" and
+    (.ciphertext | type) == "string" and
+    (.iv | type) == "string" and
+    (.tag | type) == "string" and
+    (if $alg == "dir"
+       then (has("encrypted_key") | not)
+       else (.encrypted_key | type) == "string" end) and
+    (has("unprotected") | not) and
+    (has("header") | not) and
+    (has("recipients") | not) and
+    (has("aad") | not)
+  ' > /dev/null || { echo "flattened JSON members wrong for $alg: $jwe" >&2; return 1; }
+
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+  assert_header "$out_path"
+}
+
 # try_verify <rs|js> <alg> <pub-jwk-file> <jws> — never fails; prints
 # {accepted, protected_header?, error?} describing what that side did.
 try_verify() {
@@ -254,6 +303,7 @@ run_cell() {
     case "$fmt" in
       hdr) run_hdr_cell "$direction" "$alg"; exit 0 ;;
       jwe) run_jwe_cell "$direction" "$alg"; exit 0 ;;
+      jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
       jws-dup) run_dup_cell "$direction" "$alg"; exit 0 ;;
     esac
     local priv_path="$VECTORS/${cell}.priv.json"
@@ -403,6 +453,13 @@ done
 for alg in "${ALGS_JWE[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe" || true
+  done
+done
+
+# Flattened JSON JWE (RFC 7516 §7.2.2), same coverage as the compact family.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-json" || true
   done
 done
 

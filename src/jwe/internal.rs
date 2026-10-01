@@ -17,7 +17,7 @@
 //! 2. **Key material stays inside zeroizing owners.** CEKs move as
 //!    `Zeroizing<Vec<u8>>` and a raw CEK is never part of a public API.
 //!
-//! This module is the ADR-0012 extraction of the code that previously lived in
+//! This module is the ADR 0011 extraction of the code that previously lived in
 //! `jwe/compact.rs`; behaviour, error variants and messages are unchanged.
 
 use zeroize::Zeroizing;
@@ -731,4 +731,107 @@ fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Zeroizing<
     } else {
         Ok(Zeroizing::new(sw.export_spki_der()?))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared encryption core (compact and JSON serializations)
+// ---------------------------------------------------------------------------
+
+/// Key management plus content encryption, before any serialization.
+///
+/// `header_b64` is the exact string that was used as the additional
+/// authenticated data, so a serializer that emits it verbatim produces a
+/// message the recipient can authenticate.
+pub(crate) struct EncryptedCore {
+    /// `BASE64URL(UTF8(JWE Protected Header))`, also the AAD input.
+    pub header_b64: String,
+    /// Wrapped key (empty for `dir`).
+    pub encrypted_key: Vec<u8>,
+    /// Content IV.
+    pub iv: Vec<u8>,
+    /// Content ciphertext.
+    pub ciphertext: Vec<u8>,
+    /// Content authentication tag.
+    pub tag: Vec<u8>,
+}
+
+/// Build the content-authentication input (RFC 7516 §5.1 step 14).
+///
+/// `ASCII(Encoded Protected Header)`, or — when a JWE AAD value is present,
+/// which only the JSON serialization can carry —
+/// `ASCII(Encoded Protected Header || '.' || BASE64URL(JWE AAD))`.
+///
+/// `external_aad_b64` must be the *encoded* form: the RFC authenticates the
+/// base64url text, not the raw additional-authenticated-data octets, so the
+/// same bytes under two different encodings are different messages.
+pub(crate) fn aad_input(header_b64: &str, external_aad_b64: Option<&str>) -> Vec<u8> {
+    match external_aad_b64 {
+        None => header_b64.as_bytes().to_vec(),
+        Some(aad_b64) => format!("{header_b64}.{aad_b64}").into_bytes(),
+    }
+}
+
+/// Encrypt once, for any serialization.
+///
+/// Applies the whole emit-side policy in one place, so a new serializer
+/// cannot skip a rule:
+///
+/// 1. `header.alg` / `header.enc` must agree with the algorithms actually
+///    used (RFC 8725 §3.1);
+/// 2. [`validate_encrypt_header`] (unimplemented members, `crit`);
+/// 3. [`JoseHeader::to_protected_b64`] (duplicate members, key-reference
+///    members, header size);
+/// 4. a size pre-flight so a token this crate could not decode is never
+///    produced;
+/// 5. key management and content encryption over
+///    [`aad_input`](self::aad_input).
+///
+/// `aad_b64` is the encoded external AAD (`None` for compact and for JSON
+/// without an `aad` member).
+pub(crate) fn encrypt_core(
+    header: &JoseHeader,
+    key: &[u8],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+    aad_b64: Option<&str>,
+) -> Result<EncryptedCore> {
+    if header.alg != alg.as_str() {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header alg {} does not match JWE algorithm {}",
+            header.alg,
+            alg.as_str()
+        )));
+    }
+    if header.enc.as_deref() != Some(enc.as_str()) {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header enc {:?} does not match JWE encryption {}",
+            header.enc,
+            enc.as_str()
+        )));
+    }
+    // alg/enc agree; now the JWE-specific member rules, then the shared
+    // duplicate / key-reference / size rules while serializing.
+    validate_encrypt_header(header)?;
+    let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
+
+    // The ciphertext is at least as long as the plaintext, so refuse before
+    // any key wrapping or encryption when the token cannot possibly fit.
+    crate::ensure_emit_size(header_b64.len() + content::base64url_len(plaintext.len()) + 4)?;
+
+    // 1. Generate or use CEK, produce encrypted key.
+    let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
+
+    // 2. Content encryption.
+    let aad = aad_input(&header_b64, aad_b64);
+    let (iv, ciphertext, tag) = content::content_encrypt(enc, &cek, plaintext, &aad)?;
+
+    Ok(EncryptedCore {
+        header_b64,
+        encrypted_key,
+        iv,
+        ciphertext,
+        tag,
+    })
 }

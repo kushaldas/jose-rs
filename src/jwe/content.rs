@@ -7,7 +7,7 @@
 //! (compact: `ASCII(BASE64URL(header))`; JSON: the same, joined with the
 //! external-AAD field per RFC 7516 §5.1 / §7.1).
 //!
-//! Extracted from `compact.rs` unchanged by ADR-0012's preparatory refactor;
+//! Extracted from `compact.rs` unchanged by ADR 0011's preparatory refactor;
 //! behaviour is identical, including error variants and messages.
 
 use crate::algorithm::JweEncryption;

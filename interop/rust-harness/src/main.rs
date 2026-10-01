@@ -15,6 +15,12 @@
 //!       header with a duplicated member) that jose-rs's API cannot emit.
 //!   encrypt-compact --alg <ALG> --enc <ENC> (stdin: {jwk, plaintext_b64u, header?}) -> {jwe}
 //!   decrypt-compact --alg <ALG> --enc <ENC> (stdin: {jwk, jwe}) -> {ok, plaintext_b64u, protected_header}
+//!   encrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, plaintext_b64u, header?}) -> {jwe}
+//!       Like encrypt-compact but emits the RFC 7516 §7.2.2 flattened JSON
+//!       Serialization, as a JSON *string* in `jwe` (so the matrix plumbing is
+//!       identical for both formats).
+//!   decrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, jwe}) -> {ok, plaintext_b64u, protected_header}
+//!       `jwe` is the flattened JSON Serialization text.
 //!   sign-jwt       --alg <ALG>            (stdin: {jwk, claims}) -> JWT
 //!   verify-jwt     --alg <ALG>            (stdin: {jwk, jwt}) -> {ok, claims}
 //!
@@ -75,6 +81,8 @@ fn run() -> Result<()> {
         "sign-compact-raw" => sign_compact_raw(&require_alg(alg)?),
         "encrypt-compact" => encrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-compact" => decrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
+        "encrypt-flattened" => encrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
+        "decrypt-flattened" => decrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -348,6 +356,52 @@ fn encrypt_compact(alg: &str, enc: &str) -> Result<()> {
     )?;
     let jwe = jose_rs::jwe::encrypt_with_jwk_header(&input.jwk, header, &plaintext, enc_v)?;
     emit(&EncryptCompactOutput { jwe })
+}
+
+/// Encrypt into the flattened JSON Serialization (RFC 7516 §7.2.2).
+///
+/// Same header construction and same `jose_rs::jwe` policy as
+/// [`encrypt_compact`]; only the serialization differs, which is exactly the
+/// property the matrix is checking.
+fn encrypt_flattened(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptCompactInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    if input.jwk.alg.as_deref() != Some(alg) {
+        bail!("JWK alg {:?} does not match expected {alg}", input.jwk.alg);
+    }
+    let enc_v = JweEncryption::from_str(enc)?;
+    let header = build_header(
+        JoseHeader::for_jwe(JweAlgorithm::from_str(alg)?, enc_v),
+        input.header,
+    )?;
+    let jwe = jose_rs::jwe::json::encrypt_flattened_with_jwk_header(&input.jwk, header, &plaintext, enc_v)?;
+    emit(&EncryptCompactOutput {
+        jwe: jwe.to_json()?,
+    })
+}
+
+/// Decrypt a flattened JSON Serialization.
+fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptCompactInput = serde_json::from_str(&raw)?;
+    let jwe = jose_rs::jwe::json::FlattenedJwe::from_json(&input.jwe)?;
+    let header = jose_rs::jwe::json::decode_header(&jwe)?
+        .ok_or_else(|| anyhow!("flattened JWE has no protected header"))?;
+    if header.alg != alg {
+        bail!("token alg {} does not match expected {alg}", header.alg);
+    }
+    if header.enc.as_deref() != Some(enc) {
+        bail!("token enc {:?} does not match expected {enc}", header.enc);
+    }
+    let plaintext = jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?;
+    emit(&DecryptCompactOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        protected_header: header,
+    })
 }
 
 #[derive(Deserialize)]

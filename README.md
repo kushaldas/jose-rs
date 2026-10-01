@@ -7,7 +7,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 | Standard | RFC | Coverage |
 |---|---|---|
 | JWS | [7515](https://www.rfc-editor.org/rfc/rfc7515) | Compact + Flattened JSON + General JSON serialization |
-| JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact serialization |
+| JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact serialization + Flattened JSON serialization (single recipient, protected header; see *Security notes*) |
 | JWK | [7517](https://www.rfc-editor.org/rfc/rfc7517) | RSA / EC / oct / OKP / AKP key types (see *Supported algorithms* for curve coverage), JWK Sets, Thumbprints ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638)), key generation |
 | JWT | [7519](https://www.rfc-editor.org/rfc/rfc7519) | Claims, validation (exp/nbf/iss/aud/sub), nested JWT |
 | JWA | [7518](https://www.rfc-editor.org/rfc/rfc7518) | Implemented signature, encryption, and key management algorithms |
@@ -99,6 +99,27 @@ let plaintext = b"sensitive data";
 let token = jose_rs::jwe::encrypt(&cek, plaintext, JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
 let decrypted = jose_rs::jwe::decrypt(&cek, &token).unwrap();
 assert_eq!(decrypted, plaintext);
+```
+
+The same message in the JSON Serialization (RFC 7516 §7.2) — same algorithms,
+same policy, same key material:
+
+```rust
+use jose_rs::jwe::{compact, json};
+use jose_rs::{JweAlgorithm, JweEncryption};
+
+let cek = [0x42u8; 32];
+let flattened = json::encrypt_flattened(
+    &cek, b"sensitive data", JweAlgorithm::Dir, JweEncryption::A256GCM,
+).unwrap();
+println!("{}", flattened.to_json().unwrap());
+// {"protected":"…","iv":"…","ciphertext":"…","tag":"…"}
+
+// The two serializations are interchangeable for the shapes both support.
+let as_compact = flattened.to_compact().unwrap();
+assert_eq!(compact::decrypt(&cek, &as_compact).unwrap(), b"sensitive data");
+let from_compact = json::FlattenedJwe::from_compact(&as_compact).unwrap();
+assert_eq!(json::decrypt_flattened(&cek, &from_compact).unwrap(), b"sensitive data");
 ```
 
 ### JWK (key management)
@@ -210,6 +231,18 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   is itself rejected. RFC 7797 unencoded payloads (`b64: false`) are
   supported via `sign_with_options` / `verify_with_options`, and `b64`,
   when present, must be listed in `crit` (RFC 7797 §6).
+- **JWE JSON Serialization is protected-header-only.**
+  `jwe::json::FlattenedJwe` (RFC 7516 §7.2.2) requires a `protected` member,
+  because `alg` must be integrity protected, and refuses `unprotected`,
+  `header`, `recipients` and `aad` by name rather than ignoring them — they
+  are registered members whose presence changes what a recipient must believe.
+  Unrecognized *private* members are ignored while processing but retained, so
+  re-serializing does not drop them and `to_compact()` refuses rather than
+  silently discarding them. The parser rejects duplicate JSON member names
+  (which `serde_json` would otherwise resolve last-key-wins), non-string member
+  values, non-canonical base64url and oversized input; the parsed protected
+  header is available through `peek_protected_header()` for inspection only,
+  and no return value attests to it until decryption succeeds. See ADR 0011.
 - **RSA minimum key size.** Keys below 2048 bits are rejected at parse
   and at generation time (RFC 7518 §3.3 / §4.2).
 - **AES-GCM nonce collision bound.** Content encryption with A128GCM /

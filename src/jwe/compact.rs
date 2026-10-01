@@ -13,11 +13,9 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
-use crate::jwe::content::{base64url_len, content_encrypt};
 use crate::jwe::internal::{
     self, all_enc_algorithms, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op,
-    jwk_to_jwe_key_bytes, minimum_plaintext_len, parse_envelope, produce_cek, recover_cek,
-    validate_encrypt_header,
+    jwk_to_jwe_key_bytes, minimum_plaintext_len, parse_envelope, recover_cek,
 };
 
 pub use crate::jwe::internal::{JweDecryptOptions, JweEncryptOptions};
@@ -95,44 +93,19 @@ pub fn encrypt_with_header_options(
     enc: JweEncryption,
     opts: &JweEncryptOptions,
 ) -> Result<String> {
-    if header.alg != alg.as_str() {
-        return Err(JoseError::InvalidHeader(format!(
-            "protected header alg {} does not match JWE algorithm {}",
-            header.alg,
-            alg.as_str()
-        )));
-    }
-    if header.enc.as_deref() != Some(enc.as_str()) {
-        return Err(JoseError::InvalidHeader(format!(
-            "protected header enc {:?} does not match JWE encryption {}",
-            header.enc,
-            enc.as_str()
-        )));
-    }
-    // alg/enc agree; now the JWE-specific member rules, then the shared
-    // duplicate / key-reference / size rules while serializing.
-    validate_encrypt_header(&header)?;
-    let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
+    // All emit-side policy lives in the shared core, which the JSON
+    // serializations call too; this function only joins the five parts.
+    let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, None)?;
 
-    // The ciphertext is at least as long as the plaintext, so refuse before
-    // any key wrapping or encryption when the token cannot possibly fit.
-    crate::ensure_emit_size(header_b64.len() + base64url_len(plaintext.len()) + 4)?;
+    let encrypted_key_b64 = base64url::encode(&core.encrypted_key);
+    let iv_b64 = base64url::encode(&core.iv);
+    let ciphertext_b64 = base64url::encode(&core.ciphertext);
+    let tag_b64 = base64url::encode(&core.tag);
 
-    // 1. Generate or use CEK, produce encrypted key.
-    let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
-
-    // 2. Content encryption.
-    // AAD = ASCII(BASE64URL(header)) per RFC 7516 Section 5.1 step 14.
-    let aad = header_b64.as_bytes();
-    let (iv, ciphertext, tag) = content_encrypt(enc, &cek, plaintext, aad)?;
-
-    // 3. Assemble compact serialization.
-    let encrypted_key_b64 = base64url::encode(&encrypted_key);
-    let iv_b64 = base64url::encode(&iv);
-    let ciphertext_b64 = base64url::encode(&ciphertext);
-    let tag_b64 = base64url::encode(&tag);
-
-    let token = format!("{header_b64}.{encrypted_key_b64}.{iv_b64}.{ciphertext_b64}.{tag_b64}");
+    let token = format!(
+        "{}.{}.{}.{}.{}",
+        core.header_b64, encrypted_key_b64, iv_b64, ciphertext_b64, tag_b64
+    );
     // `decrypt` refuses tokens over MAX_TOKEN_BYTES.
     crate::ensure_emit_size(token.len())?;
     Ok(token)

@@ -38,7 +38,13 @@ new behaviour/policy.
 | # | Commit | Plan item | New artefacts |
 |---|---|---|---|
 | 1 | `refactor(jwe): split envelope internals from compact API` | J0 | `src/jwe/internal.rs`, `src/jwe/content.rs` (behaviour-preserving) |
-| 2 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, ADR 0012, `tests/jwe_json.rs`, jwcrypto + node interop |
+| 2 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, ADR 0011, `tests/jwe_json.rs`, jwcrypto + node interop |
+
+> **ADR numbering.** The numbers in this table were assigned before the
+> repository's ADR sequence was checked. Accepted ADRs run 0001–0010, so every
+> number below is **one lower in reality**: J1 = ADR 0011, J2 = ADR 0012,
+> J3 = ADR 0013, J4a = ADR 0014, J4b = ADR 0015, D1 = ADR 0016, K0 = ADR 0017,
+> and so on. New records take the next free number when they are written.
 | 3 | `feat(jwe): external AAD for JSON serializations` | J2 | options + ADR 0013, `tests/jwe_aad.rs`, interop |
 | 4 | `feat(jwe): shared and per-recipient unprotected headers` | J3 | header-union types, ADR 0014, `tests/jwe_unprotected.rs` |
 | 5 | `feat(jwe): general JSON serialization` | J4a | general envelope, ADR 0015, tests |
@@ -97,3 +103,5 @@ Node/panva matrix (`interop/tests/matrix.sh`), extended per feature.
 |---|--------|------|-------|
 | 0 | docs: working plan | — | this file |
 | 1 | refactor(jwe): shared internals | J0 | `src/jwe/internal.rs` + `src/jwe/content.rs`; compact API/wire unchanged |
+| 2 | docs: RFC texts + contributor guidelines | Q1 | `rfcs/rfc{7515,7516,7517,7518,7519,7797,8037,9278,9864}.txt` (IETF-sourced, checksums recorded), `AGENTS.md` |
+| 3 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, `src/member_map.rs` (strict duplicate-rejecting JSON objects), ADR 0011, `tests/jwe_json.rs`, `jwe-json` matrix family (8 cells) + `interop/tests/jwe_json_jwcrypto.py` (9 alg/enc combos, both directions, pinned ADR-0011 divergence) |

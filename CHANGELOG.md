@@ -4,6 +4,29 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+### Added
+
+- Flattened JWE JSON Serialization (RFC 7516 §7.2.2) in the new
+  `jose_rs::jwe::json` module: `encrypt_flattened*`, `decrypt_flattened*`,
+  `FlattenedJwe::from_json`/`to_json`, and `to_compact`/`from_compact` for
+  lossless conversion to and from the compact form. Every key-management and
+  content algorithm already supported by `jose_rs::jwe` works, and messages
+  produced by either serialization are readable by the other.
+  `protected` is required (so `alg` is always integrity protected) and
+  `unprotected`, `header`, `recipients` and `aad` are refused by name rather
+  than ignored; the parser also rejects duplicate JSON member names, non-string
+  member values and non-canonical base64url. See ADR 0011.
+
+### Internal
+
+- `jose_rs::jwe` is split into `content` (AEAD / AES-CBC-HMAC), `internal`
+  (envelope parsing, header policy, key management, encryption core) and the
+  `compact` / `json` serialization front ends, so both share one policy
+  implementation. No public API change.
+- New internal `MemberMap`: strict JSON object parsing that preserves member
+  order and rejects duplicate members instead of applying `serde_json`'s
+  last-key-wins default.
+
 ## [0.9.0] - 2026-10-01
 
 ### Breaking

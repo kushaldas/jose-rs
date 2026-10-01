@@ -22,6 +22,8 @@ pub mod jwk;
 /// JSON Web Signature compact and JSON serialization APIs.
 pub mod jws;
 pub mod jwt;
+/// Strict, duplicate-rejecting JSON object member handling (internal).
+pub(crate) mod member_map;
 
 #[cfg(test)]
 mod security_tests;
