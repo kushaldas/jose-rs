@@ -180,7 +180,16 @@ fn composite_flattened_and_general_jws_preserve_certificate_binding() {
         let mut header = JoseHeader::for_alg(JwsAlgorithm::MlDsa44Ed25519);
         jws::x5::bind_cert_to_header(&mut header, certificate);
 
-        let flattened = jws::json::sign_flattened(&signer, PAYLOAD, &header).unwrap();
+        // `x5c` is a key-reference member: refused by default, emitted only
+        // with an explicit opt-in.
+        assert!(matches!(
+            jws::json::sign_flattened(&signer, PAYLOAD, &header),
+            Err(jose_rs::JoseError::InvalidHeader(_))
+        ));
+        let opts = jws::SignOptions::new().with_key_reference_headers(true);
+
+        let flattened =
+            jws::json::sign_flattened_opts(&signer, PAYLOAD, &header, None, &opts).unwrap();
         assert_eq!(
             jws::json::verify_flattened(&verifier, &flattened).unwrap(),
             PAYLOAD
@@ -189,7 +198,11 @@ fn composite_flattened_and_general_jws_preserve_certificate_binding() {
             serde_json::from_slice(&base64url::decode(&flattened.protected).unwrap()).unwrap();
         jws::x5::verify_cert_binding(&protected, certificate).unwrap();
 
-        let general = jws::json::sign_general(&[(&signer, &header)], PAYLOAD).unwrap();
+        let entry = jws::json::GeneralSigner {
+            options: opts,
+            ..jws::json::GeneralSigner::new(&signer, &header)
+        };
+        let general = jws::json::sign_general_full(&[entry], PAYLOAD, true).unwrap();
         assert_eq!(
             jws::json::verify_general(&verifier, &general).unwrap(),
             PAYLOAD

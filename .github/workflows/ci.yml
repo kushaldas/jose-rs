@@ -58,23 +58,26 @@ jobs:
       - name: cargo clippy (all-features)
         run: cargo clippy --locked --all-features --all-targets -- -D warnings
 
-      # Unit tests — pure JOSE crypto paths. pkcs11 only needs libloading
-      # at build time; no runtime PKCS#11 module is needed because jose's
-      # HSM paths are exercised via downstream integration suites.
+      # Unit, integration (tests/*.rs) and doc tests for every feature
+      # combination. Do not add `--lib`: it skips the tests/ regression
+      # suites (header policy, RFC 7520 vectors, post-quantum composite)
+      # and the doctests. pkcs11 only needs libloading at build time; no
+      # runtime PKCS#11 module is needed because jose's HSM paths are
+      # exercised via downstream integration suites.
       - name: cargo test (no-default-features)
-        run: cargo test --locked --no-default-features --lib
+        run: cargo test --locked --no-default-features
 
       - name: cargo test (default, pkcs11)
-        run: cargo test --locked --lib
+        run: cargo test --locked
 
       - name: cargo test (deprecated)
-        run: cargo test --locked --no-default-features --features deprecated --lib
+        run: cargo test --locked --no-default-features --features deprecated
 
       - name: cargo test (post-quantum)
-        run: cargo test --locked --no-default-features --features post-quantum --lib
+        run: cargo test --locked --no-default-features --features post-quantum
 
       - name: cargo test (all-features)
-        run: cargo test --locked --all-features --lib
+        run: cargo test --locked --all-features
 
       - name: cargo doc
         run: cargo doc --locked --all-features --no-deps

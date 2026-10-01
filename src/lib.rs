@@ -42,3 +42,18 @@ pub const MIN_RSA_BITS: usize = 2048;
 /// realistic JOSE token (RFC 7519 §2 notes that JWTs are compact
 /// precisely to fit HTTP Authorization headers, URLs, and POST bodies).
 pub const MAX_TOKEN_BYTES: usize = 1024 * 1024;
+
+/// Refuse to emit a serialized token (or JWS JSON member) of `len` bytes
+/// that this crate's own decoders would reject under [`MAX_TOKEN_BYTES`].
+///
+/// Signing and encryption call this so that "every token this crate emits,
+/// this crate can consume" holds for size as well as header content.
+pub(crate) fn ensure_emit_size(len: usize) -> Result<()> {
+    if len > MAX_TOKEN_BYTES {
+        return Err(JoseError::InvalidToken(format!(
+            "emitted token size {len} exceeds MAX_TOKEN_BYTES ({MAX_TOKEN_BYTES}); \
+             this crate would refuse to decode it"
+        )));
+    }
+    Ok(())
+}

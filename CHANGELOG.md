@@ -4,6 +4,149 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-01
+
+`0.7.2` was prepared on the release branch but never published; its changes
+ship here. The header-policy changes below reject inputs that `0.7.1`
+accepted, hence the minor-version bump.
+
+### Breaking
+
+- Signing (every `jws::compact`, `jws::json` and `jwt::encode*` entry point)
+  and JWE encryption with a caller-supplied header now reject protected
+  headers that `0.7.1` accepted:
+  - a `JoseHeader::extra` entry that repeats a typed member (`alg`, `enc`,
+    `kid`, `typ`, `cty`, `jku`, `jwk`, `x5u`, `x5c`, `x5t`, `x5t#S256`,
+    `crit`). Previously this emitted a duplicate JSON member; set the typed
+    field instead. Other `extra` names (including `b64`) are unaffected.
+  - the key-reference members `jku`, `jwk`, `x5u` and `x5c`, unless the new
+    `allow_key_reference_headers` opt-in is set. Code signing a header built
+    with `jws::x5::bind_cert_to_header` must opt in, e.g.
+    `SignOptions::new().with_key_reference_headers(true)` with
+    `sign_with_options`, `sign_flattened_opts`, `jwt::encode_with_options`,
+    `jwt::encode_nested_with_options`, or a `GeneralSigner`.
+  - headers or tokens larger than `MAX_TOKEN_BYTES`, which this crate's
+    decoders already refused (`InvalidHeader` for the header,
+    `InvalidToken` for the token or a JWS JSON payload or signature
+    member; the signature is checked after signing because a custom or HSM
+    `Signer` controls its length).
+- JWS signing (every `jws::compact`, `jws::json` and `jwt::encode*` entry
+  point, including nested JWT) additionally rejects:
+  - JWE-only members (`enc`, `zip`, `epk`, `apu`, `apv`, `iv`, `tag`, `p2s`,
+    `p2c`) in the protected header, whether set through the typed `enc`
+    field or through `extra`. RFC 7516 §9 identifies a JWE header by the
+    presence of `enc`, so a signed JWS header carrying it claimed to be a
+    JWE; the others describe processing a JWS never performs (IANA JOSE
+    header registry, usage location "JWE").
+  - a `crit` list naming a header parameter registered by RFC 7515,
+    RFC 7516 or RFC 7518 (e.g. `crit: ["kid"]`), even if the caller lists it
+    in `SignOptions::understood_crit`, and a `crit` list naming any
+    parameter twice. RFC 7515 §4.1.11: producers "MUST NOT include Header
+    Parameter names defined by this specification or [JWA] for use with
+    JWS, duplicate names, ... in the `crit` list". RFC 7797 `b64` is still
+    allowed (and required with `b64: false`). Verification is unchanged: a
+    peer's token with a registered name in `crit` still verifies when the
+    caller declares it understood, as §4.1.11 only says recipients MAY
+    reject it.
+- JWS JSON signing (`sign_flattened_opts`, `sign_flattened_detached_opts`,
+  `sign_general_full`) now validates the unprotected `header` member: it must
+  be a JSON object whose member names are disjoint from the protected header
+  (RFC 7515 §7.2.1), must not contain `crit` or `b64` (which must be
+  integrity protected) or any JWE-only member (`zip`, `enc`, `epk`, ...), and
+  follows the key-reference opt-in.
+- `jws::SignOptions` and `jwe::JweEncryptOptions` are now
+  `#[non_exhaustive]`, so future policy switches are not breaking changes.
+  Outside this crate they can no longer be built with a struct literal,
+  including `..SignOptions::new()` update syntax. Start from `new()` and use
+  the new builders (`with_b64`, `with_understood_crit`,
+  `with_key_reference_headers`), or assign the public fields on a `mut`
+  binding. `SignOptions` also has a new public field,
+  `allow_key_reference_headers`.
+
+### Added
+
+- Expose `jwe::encrypt_with_header` and `jwe::encrypt_with_jwk_header`, also
+  available through `jwe::compact`, so bindings and applications can encrypt
+  with authenticated custom protected headers without patching or vendoring
+  the backend. Algorithm/header consistency and JWK operation permissions
+  remain enforced. The header must not repeat a typed member in `extra`,
+  carry `crit`, or carry a registered member this crate does not implement
+  for JWE compact (`zip`, `b64`, `epk`, `apu`, `apv`, `p2s`, `p2c`, `iv`,
+  `tag`), so these APIs never emit a token that the decrypt side refuses or
+  that a peer implementing those members would read differently.
+- `jwe::JweEncryptOptions` with `jwe::encrypt_with_header_options` and
+  `jwe::encrypt_with_jwk_header_options`, to opt in to key-reference members.
+- `jws::compact::sign_with_jwk_options`, `jwt::encode_with_options`,
+  `jwt::encode_with_jwk_options`, `jwt::encode_nested_with_options` and
+  `jwt::encode_nested_with_jwk_options`, so every JWK and JWT signing path,
+  nested JWT included, can take `SignOptions` (e.g. to emit an `x5c` chain
+  in the inner JWS header). The options apply to the inner JWS only; the
+  outer JWE header is still built by the library.
+- Builders `SignOptions::with_b64`, `SignOptions::with_understood_crit`,
+  `SignOptions::with_key_reference_headers` and
+  `JweEncryptOptions::with_key_reference_headers`.
+- `header::KEY_REFERENCE_MEMBERS`, the list of members covered by the opt-in,
+  and `header::JWE_ONLY_MEMBERS`, the members JWS signing refuses.
+- `rfcs/rfc8725.txt` (JWT Best Current Practices) for reference.
+- Interop matrix (`interop/`): custom protected-header JWS cells, JWE compact
+  cells (`dir` and `A256KW` with `A256GCM` / `A128CBC-HS256`, both
+  directions), and duplicate-member cells. The latter confirm that
+  panva/jose accepts a validly signed header with a duplicated `kid` or
+  `alg` and uses the last value, while jose-rs rejects it; a duplicated
+  extension member resolves to the last value in both.
+
+### Security
+
+- Reject protected headers whose `extra` map repeats a member already
+  serialized by a typed `JoseHeader` field. `extra` is flattened into the
+  same JSON object, so such a header was signed with a duplicate member,
+  e.g. `{"alg":"HS256","alg":"none"}`. The sign-side `alg` and `crit` checks
+  only saw the typed field, while last-key-wins parsers (JavaScript
+  `JSON.parse`, panva/jose) read the `extra` value. This crate's own
+  verifier already rejected such tokens as duplicate fields.
+- Every caller-supplied protected header is now serialized through a single
+  checked path (`JoseHeader::to_protected_b64`), so a new signing or
+  encryption path cannot skip the duplicate-member, key-reference or size
+  rules.
+- Refuse key-reference members (`jku`, `jwk`, `x5u`, `x5c`) on emit unless
+  opted in. This crate never dereferences them, but a peer might (RFC 8725
+  §2.9 / §3.10), so an application forwarding caller-controlled data into a
+  header could otherwise mint key references under a trusted key.
+- Enforce `MAX_TOKEN_BYTES` on emit, before any signing or encryption where
+  possible, so the crate never produces a token (for example from a large
+  caller-supplied header value) that its own decoders refuse.
+- Refuse JWS JSON unprotected headers that contradict or duplicate the
+  protected header, or that carry members which must be integrity
+  protected, closing the unprotected-header variant of the same ambiguity.
+- Refuse JWE-only members in JWS headers (protected and unprotected), so a
+  signed JWS header can no longer claim to be a JWE (RFC 7516 §9).
+- Enforce the RFC 7515 §4.1.11 producer rules for `crit` (no registered
+  names, no duplicates) on every signing path.
+
+### Tests
+
+- Table-driven regression tests across all 18 public JWS/JWT signing entry
+  points and all 4 JWE header-encryption entry points: duplicate members,
+  key-reference opt-in, header and token size limits, unprotected-header
+  rules, JWE-only members in JWS headers, registered and duplicate `crit`
+  names, and unimplemented JWE members. Every token the JWE tests emit is
+  also decrypted. A nested-JWT round trip checks that an opted-in `x5c`
+  chain survives sign, encrypt, decrypt and verify. Each test's rustdoc
+  cites the RFC section it enforces.
+- `tests/header_parsing.rs` pins the decode-side half of the design: a
+  duplicated typed member (including the `\u0061lg` escape) fails to parse,
+  and every JWS/JWT verify and JWE decrypt entry point rejects a token with
+  such a header even when its signature is valid.
+- A unit test keeps the reserved member list in sync with the `JoseHeader`
+  fields; unit tests pin the registered-name set used for `crit`, and that
+  verification still accepts a peer's registered `crit` name when declared
+  understood.
+
+### Changed
+
+- Bumped the crate version to `0.8.0` (from `0.7.1`; `0.7.2` was not
+  released).
+
 ## [0.7.1] - 2026-09-28
 
 ### Security

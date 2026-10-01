@@ -21,13 +21,14 @@ _default:
 build:
     cargo build --locked --all-features
 
-# Unit tests (all features). Mirrors `cargo test (all-features)` in CI.
+# Unit, integration and doc tests (all features). Mirrors
+# `cargo test (all-features)` in CI. No `--lib`: that would skip tests/.
 test:
-    cargo test --locked --all-features --lib
+    cargo test --locked --all-features
 
-# Unit tests, post-quantum feature only — isolates ML-DSA regressions.
+# All tests, post-quantum feature only — isolates ML-DSA regressions.
 test-pq:
-    cargo test --locked --no-default-features --features post-quantum --lib
+    cargo test --locked --no-default-features --features post-quantum
 
 # Clippy across the whole target graph.
 clippy:

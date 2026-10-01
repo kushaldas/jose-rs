@@ -40,12 +40,106 @@ pub fn encrypt(
     encrypt_with_header(JoseHeader::for_jwe(alg, enc), key, plaintext, alg, enc)
 }
 
-pub(crate) fn encrypt_with_header(
+/// Options controlling JWE encryption with a caller-supplied protected
+/// header ([`encrypt_with_header_options`], [`encrypt_with_jwk_header_options`]).
+///
+/// [`Default`] / [`JweEncryptOptions::new`] is the strict policy used by
+/// [`encrypt_with_header`] and [`encrypt_with_jwk_header`].
+///
+/// The struct is `#[non_exhaustive]` so new policy switches can be added
+/// without breaking callers: start from [`JweEncryptOptions::new`] and use
+/// the `with_*` builders.
+///
+/// ```
+/// use jose_rs::jwe::JweEncryptOptions;
+///
+/// let opts = JweEncryptOptions::new().with_key_reference_headers(true);
+/// assert!(opts.allow_key_reference_headers);
+/// ```
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct JweEncryptOptions {
+    /// Permit the key-reference members `jku`, `jwk`, `x5u` and `x5c`
+    /// ([`crate::header::KEY_REFERENCE_MEMBERS`]) in the protected header.
+    /// Defaults to `false`.
+    ///
+    /// RFC 7516 §4.1.4-4.1.7 uses these to identify the recipient's key.
+    /// This crate never reads them, but a peer may dereference or trust
+    /// them, so they are refused unless the caller opts in.
+    pub allow_key_reference_headers: bool,
+}
+
+impl JweEncryptOptions {
+    /// Strict defaults: no key-reference header members.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set [`allow_key_reference_headers`](Self::allow_key_reference_headers).
+    #[must_use]
+    pub fn with_key_reference_headers(mut self, allow: bool) -> Self {
+        self.allow_key_reference_headers = allow;
+        self
+    }
+}
+
+/// Encrypt plaintext with an explicit authenticated protected header.
+///
+/// Key formats are the same as for [`encrypt`]. The header's `alg` and `enc`
+/// must match the supplied algorithms (RFC 8725 §3.1). Every serialized
+/// header member is authenticated as additional authenticated data; changing
+/// it invalidates the token. JWK metadata is not checked by this raw-key API;
+/// use [`encrypt_with_jwk_header`] to enforce JWK operation permissions.
+///
+/// Uses the strict [`JweEncryptOptions::new`] policy; see
+/// [`encrypt_with_header_options`] to permit key-reference members.
+///
+/// # Errors
+///
+/// Returns [`JoseError::InvalidHeader`] when:
+///
+/// - `header.alg` / `header.enc` disagree with `alg` / `enc`;
+/// - `header.extra` repeats a member that a typed [`JoseHeader`] field
+///   already serializes (`alg`, `enc`, `kid`, `typ`, `cty`, `jku`, `jwk`,
+///   `x5u`, `x5c`, `x5t`, `x5t#S256`, `crit`), which would put an ambiguous
+///   duplicate key in the protected header (RFC 7515 §4);
+/// - `header.extra` contains a registered member this crate does not
+///   implement for JWE compact: `zip` (compression, which RFC 8725 §3.6
+///   advises against), `b64`, `epk`, `apu`, `apv`, `p2s`, `p2c`, `iv` or
+///   `tag`;
+/// - `header.crit` is set (no JWE critical extensions are implemented);
+/// - the header carries `jku`, `jwk`, `x5u` or `x5c` (see
+///   [`JweEncryptOptions::allow_key_reference_headers`]);
+/// - the encoded header exceeds [`crate::MAX_TOKEN_BYTES`].
+///
+/// Returns [`JoseError::InvalidToken`] when the resulting token would exceed
+/// [`crate::MAX_TOKEN_BYTES`]. Together these mirror [`decrypt`], so every
+/// token this function returns can be decrypted by this crate. Other errors
+/// are returned for unsupported algorithms, invalid key material or key
+/// sizes, or an encryption failure.
+pub fn encrypt_with_header(
     header: JoseHeader,
     key: &[u8],
     plaintext: &[u8],
     alg: JweAlgorithm,
     enc: JweEncryption,
+) -> Result<String> {
+    encrypt_with_header_options(header, key, plaintext, alg, enc, &JweEncryptOptions::new())
+}
+
+/// [`encrypt_with_header`] with explicit [`JweEncryptOptions`].
+///
+/// # Errors
+///
+/// As for [`encrypt_with_header`], except that key-reference members are
+/// accepted when `opts.allow_key_reference_headers` is set.
+pub fn encrypt_with_header_options(
+    header: JoseHeader,
+    key: &[u8],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
 ) -> Result<String> {
     if header.alg != alg.as_str() {
         return Err(JoseError::InvalidHeader(format!(
@@ -61,9 +155,14 @@ pub(crate) fn encrypt_with_header(
             enc.as_str()
         )));
     }
+    // alg/enc agree; now the JWE-specific member rules, then the shared
+    // duplicate / key-reference / size rules while serializing.
+    validate_encrypt_header(&header)?;
+    let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
-    let header_json = serde_json::to_vec(&header)?;
-    let header_b64 = base64url::encode(&header_json);
+    // The ciphertext is at least as long as the plaintext, so refuse before
+    // any key wrapping or encryption when the token cannot possibly fit.
+    crate::ensure_emit_size(header_b64.len() + base64url_len(plaintext.len()) + 4)?;
 
     // 1. Generate or use CEK, produce encrypted key.
     let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
@@ -79,9 +178,78 @@ pub(crate) fn encrypt_with_header(
     let ciphertext_b64 = base64url::encode(&ciphertext);
     let tag_b64 = base64url::encode(&tag);
 
-    Ok(format!(
-        "{header_b64}.{encrypted_key_b64}.{iv_b64}.{ciphertext_b64}.{tag_b64}"
-    ))
+    let token = format!("{header_b64}.{encrypted_key_b64}.{iv_b64}.{ciphertext_b64}.{tag_b64}");
+    // `decrypt` refuses tokens over MAX_TOKEN_BYTES.
+    crate::ensure_emit_size(token.len())?;
+    Ok(token)
+}
+
+/// Length of the unpadded base64url encoding of `n` bytes.
+fn base64url_len(n: usize) -> usize {
+    n.div_ceil(3) * 4 - (3 - n % 3) % 3
+}
+
+/// Registered header members this crate does not implement for JWE compact
+/// encryption, and so must not emit (RFC 7516 / RFC 7518 registry):
+///
+/// - `zip`: content compression (RFC 7516 §4.1.3); not implemented, and
+///   RFC 8725 §3.6 advises against compressing before encryption;
+/// - `b64`: RFC 7797 unencoded payload, a JWS-only member;
+/// - `epk`, `apu`, `apv`: ECDH-ES key agreement (RFC 7518 §4.6.1), parsed
+///   but not wired for encryption;
+/// - `p2s`, `p2c`: PBES2 (RFC 7518 §4.8.1), not wired;
+/// - `iv`, `tag`: AES-GCM key wrapping (RFC 7518 §4.7.1), not implemented.
+///
+/// Emitting any of these would describe processing that did not happen, so
+/// a peer that implements them would read the token differently.
+const UNIMPLEMENTED_JWE_MEMBERS: &[&str] =
+    &["zip", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag"];
+
+/// Validate the JWE-specific content of a caller-supplied protected header
+/// before it is serialized and used as additional authenticated data.
+///
+/// Callers must already have checked that `header.alg` / `header.enc` match
+/// the algorithms actually used. The shared rules (duplicate members,
+/// key-reference members, size) are applied afterwards by
+/// [`JoseHeader::to_protected_b64`]. Rules enforced here:
+///
+/// 1. `extra` must not contain an [`UNIMPLEMENTED_JWE_MEMBERS`] entry; for
+///    `zip` the check and message match [`decrypt_with_options`], so a
+///    token this crate emits is always one it can decrypt.
+/// 2. `crit` must be absent. No JWE critical extensions are implemented, and
+///    an empty `crit` array is invalid (RFC 7515 §4.1.11).
+///
+/// # Errors
+///
+/// Returns [`JoseError::InvalidHeader`] naming the first rule violated.
+fn validate_encrypt_header(header: &JoseHeader) -> Result<()> {
+    // Rule 1. `extra["crit"]` is not handled here: it duplicates a typed
+    // field, which `to_protected_b64` rejects before anything is emitted.
+    if header.extra.contains_key("zip") {
+        return Err(JoseError::InvalidHeader(
+            "unsupported zip header: content compression is not supported".into(),
+        ));
+    }
+    if let Some(name) = UNIMPLEMENTED_JWE_MEMBERS
+        .iter()
+        .find(|name| header.extra.contains_key(**name))
+    {
+        return Err(JoseError::InvalidHeader(format!(
+            "unsupported JWE header member {name}: not implemented for JWE compact encryption"
+        )));
+    }
+
+    // Rule 2: any `crit` is unsupported; distinguish the empty case so the
+    // error points at the RFC violation rather than an unknown extension.
+    if let Some(crit) = &header.crit {
+        return Err(JoseError::InvalidHeader(if crit.is_empty() {
+            "crit header must not be empty (RFC 7515 §4.1.11)".into()
+        } else {
+            format!("unsupported crit extensions: {crit:?}")
+        }));
+    }
+
+    Ok(())
 }
 
 /// Determine which `JwkOp` governs a JWE alg on the encrypt side.
@@ -181,11 +349,43 @@ pub fn encrypt_with_jwk(
     )
 }
 
-pub(crate) fn encrypt_with_jwk_header(
+/// Encrypt plaintext using a JWK and an explicit authenticated protected header.
+///
+/// The key-management algorithm comes from `jwk.alg`, which must be set and
+/// match `header.alg`; `header.enc` must match `enc`. Enforces `Encrypt` for
+/// `dir` and `WrapKey` for AES key wrap and RSA-OAEP. All serialized protected
+/// header members are authenticated, allowing application fields such as
+/// `kid`, `typ`, and `cty` without modifying the encryption implementation.
+///
+/// # Errors
+///
+/// Returns an error when the JWK algorithm or operation permissions reject
+/// encryption, the header algorithms disagree, key material is invalid, or
+/// encryption fails. The header is validated exactly as in
+/// [`encrypt_with_header`] (duplicate typed members, unimplemented members
+/// such as `zip`, `crit`, key-reference members, and the size limit), using
+/// the strict [`JweEncryptOptions::new`] policy.
+pub fn encrypt_with_jwk_header(
     jwk: &crate::jwk::Jwk,
     header: JoseHeader,
     plaintext: &[u8],
     enc: JweEncryption,
+) -> Result<String> {
+    encrypt_with_jwk_header_options(jwk, header, plaintext, enc, &JweEncryptOptions::new())
+}
+
+/// [`encrypt_with_jwk_header`] with explicit [`JweEncryptOptions`].
+///
+/// # Errors
+///
+/// As for [`encrypt_with_jwk_header`], except that key-reference members are
+/// accepted when `opts.allow_key_reference_headers` is set.
+pub fn encrypt_with_jwk_header_options(
+    jwk: &crate::jwk::Jwk,
+    header: JoseHeader,
+    plaintext: &[u8],
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
 ) -> Result<String> {
     let jwk_alg_str = jwk
         .alg
@@ -194,7 +394,7 @@ pub(crate) fn encrypt_with_jwk_header(
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_with_header(header, &key_bytes, plaintext, alg, enc)
+    encrypt_with_header_options(header, &key_bytes, plaintext, alg, enc, opts)
 }
 
 /// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.

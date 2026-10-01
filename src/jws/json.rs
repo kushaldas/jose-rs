@@ -23,14 +23,107 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jws::compact::{
-    signing_input, signing_input_from_segment, validate_header_b64_opts, validate_header_opts,
-    validate_sign_header_opts,
+    prepare_sign_header, signing_input, signing_input_from_segment, validate_header_b64_opts,
+    validate_header_opts, PreparedSignHeader,
 };
 use crate::jws::{SignOptions, VerifyOptions};
 
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
+
+/// Header members that must only appear in a JWS protected header.
+///
+/// - `crit` MUST be integrity protected (RFC 7515 §4.1.11).
+/// - `b64` MUST be integrity protected (RFC 7797 §3), since it changes how
+///   the payload is interpreted.
+///
+/// JWE-only members such as `zip` and `enc` are refused separately
+/// ([`crate::header::JWE_ONLY_MEMBERS`]), as in the protected header. `alg`
+/// is covered by the protected/unprotected disjointness rule because the
+/// protected [`JoseHeader`] always carries it.
+const PROTECTED_ONLY_MEMBERS: &[&str] = &["crit", "b64"];
+
+/// Validate a caller-supplied per-signature unprotected `header` member
+/// before signing.
+///
+/// Unprotected members are not covered by the signature, yet RFC 7515 lets a
+/// consumer read header parameters from the union of the protected and
+/// unprotected headers. This crate's verifiers read only the protected
+/// header, so the checks below exist to keep emitted JWS JSON unambiguous
+/// for peers that merge the two:
+///
+/// 1. the value must be a JSON object (a JOSE Header is one);
+/// 2. no member may also appear in the protected header (RFC 7515 §7.2.1
+///    requires the two sets of names to be disjoint), which in particular
+///    keeps a contradicting `alg` or `kid` out;
+/// 3. no [`PROTECTED_ONLY_MEMBERS`] entry;
+/// 4. no [`crate::header::JWE_ONLY_MEMBERS`] entry: RFC 7516 §9 identifies
+///    a JWE by the presence of `enc`, so a peer merging the headers would
+///    see one, and the others describe encryption a JWS never performs;
+/// 5. no key-reference member (`jku`, `jwk`, `x5u`, `x5c`) unless
+///    [`SignOptions::allow_key_reference_headers`] is set, matching the
+///    protected-header policy.
+///
+/// # Errors
+///
+/// Returns [`JoseError::InvalidHeader`] naming the offending member.
+fn validate_unprotected_header(
+    unprotected: Option<&serde_json::Value>,
+    protected: &JoseHeader,
+    opts: &SignOptions,
+) -> Result<()> {
+    let Some(unprotected) = unprotected else {
+        return Ok(());
+    };
+    let members = unprotected.as_object().ok_or_else(|| {
+        JoseError::InvalidHeader("unprotected header must be a JSON object".into())
+    })?;
+    let protected_value = serde_json::to_value(protected)?;
+    let protected_members = protected_value
+        .as_object()
+        .expect("JoseHeader serializes to a JSON object");
+    for name in members.keys() {
+        if protected_members.contains_key(name) {
+            return Err(JoseError::InvalidHeader(format!(
+                "unprotected header member {name} also appears in the protected header \
+                 (RFC 7515 §7.2.1)"
+            )));
+        }
+        if PROTECTED_ONLY_MEMBERS.contains(&name.as_str()) {
+            return Err(JoseError::InvalidHeader(format!(
+                "{name} must not appear in the unprotected header"
+            )));
+        }
+        if crate::header::JWE_ONLY_MEMBERS.contains(&name.as_str()) {
+            return Err(JoseError::InvalidHeader(format!(
+                "{name} is a JWE-only header member and must not appear in a JWS header \
+                 (RFC 7516 §9; IANA JOSE header registry)"
+            )));
+        }
+        if !opts.allow_key_reference_headers
+            && crate::header::KEY_REFERENCE_MEMBERS.contains(&name.as_str())
+        {
+            return Err(JoseError::InvalidHeader(format!(
+                "{name} in unprotected header requires allow_key_reference_headers"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Base64url-encode a signature for a JWS JSON `signature` member.
+///
+/// [`verify_flattened_opts`] and [`verify_general`] refuse a `signature`
+/// member over [`crate::MAX_TOKEN_BYTES`], and the signer may be a
+/// caller-supplied or HSM-backed [`kryptering::Signer`] whose output length
+/// this crate does not control. Checking here keeps "every artifact this
+/// crate emits, this crate can verify" true for the signature as well.
+fn encode_signature(sig: &[u8]) -> Result<String> {
+    let encoded = base64url::encode(sig);
+    crate::ensure_emit_size(encoded.len())?;
+    Ok(encoded)
+}
 
 /// Maximum number of signature entries accepted in a General JWS.
 ///
@@ -92,6 +185,7 @@ pub struct SignatureResult {
     /// decoded — in which case `error` explains why).
     pub protected_header: Option<JoseHeader>,
     /// The unprotected `header` member as carried in the JWS, if any.
+    /// Not integrity-protected: never select a key or make a trust decision from it.
     pub unprotected_header: Option<serde_json::Value>,
     /// Whether this signature verified successfully.
     pub verified: bool,
@@ -180,6 +274,7 @@ pub fn sign_flattened(
 /// header, detached payload, and RFC 7797 / `crit` options.
 ///
 /// - `unprotected`: the per-signature `header` member (JAdES `etsiU`, etc.).
+///   Not integrity-protected: never select a key or make a trust decision from it.
 /// - `opts.b64 == false`: RFC 7797 unencoded payload; the embedded `payload`
 ///   member, when present, carries the raw bytes.
 pub fn sign_flattened_opts(
@@ -197,6 +292,8 @@ pub fn sign_flattened_opts(
             JoseError::InvalidToken("unencoded (b64=false) payload must be valid UTF-8".into())
         })?
     };
+    // `verify_flattened` refuses a payload member over MAX_TOKEN_BYTES.
+    crate::ensure_emit_size(payload_member.len())?;
     let mut jws = sign_flattened_detached_opts(signer, payload, header, unprotected, opts)?;
     jws.payload = Some(payload_member);
     Ok(jws)
@@ -221,16 +318,16 @@ pub fn sign_flattened_detached_opts(
     unprotected: Option<serde_json::Value>,
     opts: &SignOptions,
 ) -> Result<FlattenedJws> {
-    let b64 = validate_sign_header_opts(header, signer, opts)?;
-    let header_json = serde_json::to_vec(header)?;
-    let protected_b64 = base64url::encode(&header_json);
+    let PreparedSignHeader { b64, protected_b64 } = prepare_sign_header(header, signer, opts)?;
+    validate_unprotected_header(unprotected.as_ref(), header, opts)?;
     let input = signing_input(&protected_b64, payload, b64);
     let sig = signer.sign(&input).map_err(JoseError::Crypto)?;
+    let signature = encode_signature(&sig)?;
     Ok(FlattenedJws {
         payload: None,
         protected: protected_b64,
         header: unprotected,
-        signature: base64url::encode(&sig),
+        signature,
     })
 }
 
@@ -297,6 +394,7 @@ pub struct GeneralSigner<'a> {
     /// Protected JOSE header authenticated by this signature.
     pub protected: &'a JoseHeader,
     /// Optional unprotected per-signature header parameters.
+    /// Not integrity-protected: never select a key or make a trust decision from it.
     pub unprotected: Option<serde_json::Value>,
     /// Signing and critical-header validation options.
     pub options: SignOptions,
@@ -390,20 +488,32 @@ pub fn sign_general_full(
         None
     };
 
-    let mut signatures = Vec::with_capacity(signers.len());
+    if let Some(member) = &payload_member {
+        // `verify_general` refuses a payload member over MAX_TOKEN_BYTES.
+        crate::ensure_emit_size(member.len())?;
+    }
+
+    // Validate and serialize every entry before signing any of them, so an
+    // invalid later entry cannot waste (possibly HSM-backed) signatures.
+    let mut prepared = Vec::with_capacity(signers.len());
     for entry in signers {
-        // Re-validates each header's alg/crit binding; the returned b64 equals
-        // `shared_b64` (agreement enforced above), so the precomputed segment
-        // applies to every entry.
-        validate_sign_header_opts(entry.protected, entry.signer, &entry.options)?;
-        let header_json = serde_json::to_vec(entry.protected)?;
-        let protected_b64 = base64url::encode(&header_json);
+        // Validates each header's alg/crit/key-reference policy; the returned
+        // b64 equals `shared_b64` (agreement enforced above), so the
+        // precomputed payload segment applies to every entry.
+        let PreparedSignHeader { protected_b64, .. } =
+            prepare_sign_header(entry.protected, entry.signer, &entry.options)?;
+        validate_unprotected_header(entry.unprotected.as_ref(), entry.protected, &entry.options)?;
+        prepared.push(protected_b64);
+    }
+
+    let mut signatures = Vec::with_capacity(signers.len());
+    for (entry, protected_b64) in signers.iter().zip(prepared) {
         let input = signing_input_from_segment(&protected_b64, payload_segment);
         let sig = entry.signer.sign(&input).map_err(JoseError::Crypto)?;
         signatures.push(JwsSignature {
             protected: protected_b64,
             header: entry.unprotected.clone(),
-            signature: base64url::encode(&sig),
+            signature: encode_signature(&sig)?,
         });
     }
 
@@ -651,6 +761,7 @@ mod tests {
         SignOptions {
             b64: false,
             understood_crit: Vec::new(),
+            allow_key_reference_headers: false,
         }
     }
 
@@ -1105,6 +1216,7 @@ mod tests {
             options: SignOptions {
                 b64: false,
                 understood_crit: Vec::new(),
+                allow_key_reference_headers: false,
             },
         };
 
@@ -1157,6 +1269,7 @@ mod tests {
             &SignOptions {
                 b64: false,
                 understood_crit: Vec::new(),
+                allow_key_reference_headers: false,
             },
         )
         .unwrap();
@@ -1209,6 +1322,7 @@ mod tests {
             &SignOptions {
                 b64: false,
                 understood_crit: Vec::new(),
+                allow_key_reference_headers: false,
             },
         )
         .unwrap();

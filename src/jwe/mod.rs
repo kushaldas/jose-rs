@@ -11,5 +11,7 @@
 
 pub mod compact;
 pub use compact::{
-    decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_jwk, JweDecryptOptions,
+    decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_header,
+    encrypt_with_header_options, encrypt_with_jwk, encrypt_with_jwk_header,
+    encrypt_with_jwk_header_options, JweDecryptOptions, JweEncryptOptions,
 };
