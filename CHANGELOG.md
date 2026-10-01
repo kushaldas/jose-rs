@@ -13,6 +13,11 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- `jwk::thumbprint::thumbprint` with `ThumbprintHash::{Sha256, Sha384, Sha512}`.
+  The existing `thumbprint_sha256` function and SHA-256 default retain their
+  outputs and errors. All supported hashes share the same required-member
+  canonicalization; legacy hashes are not exposed by this API.
+
 - Explicit `JwsAlgorithm::Ed25519` wire-name support for compact/JSON JWS
   and JWT, using the existing Ed25519 backend. JWK `alg: "Ed25519"` now
   requires OKP/Ed25519 material. `EdDSA` remains supported but is not an
