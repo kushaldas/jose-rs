@@ -112,6 +112,19 @@ fn validate_unprotected_header(
     Ok(())
 }
 
+/// Base64url-encode a signature for a JWS JSON `signature` member.
+///
+/// [`verify_flattened_opts`] and [`verify_general`] refuse a `signature`
+/// member over [`crate::MAX_TOKEN_BYTES`], and the signer may be a
+/// caller-supplied or HSM-backed [`kryptering::Signer`] whose output length
+/// this crate does not control. Checking here keeps "every artifact this
+/// crate emits, this crate can verify" true for the signature as well.
+fn encode_signature(sig: &[u8]) -> Result<String> {
+    let encoded = base64url::encode(sig);
+    crate::ensure_emit_size(encoded.len())?;
+    Ok(encoded)
+}
+
 /// Maximum number of signature entries accepted in a General JWS.
 ///
 /// A General JWS is attacker-controlled input on verify. Keeping this bounded
@@ -307,11 +320,12 @@ pub fn sign_flattened_detached_opts(
     validate_unprotected_header(unprotected.as_ref(), header, opts)?;
     let input = signing_input(&protected_b64, payload, b64);
     let sig = signer.sign(&input).map_err(JoseError::Crypto)?;
+    let signature = encode_signature(&sig)?;
     Ok(FlattenedJws {
         payload: None,
         protected: protected_b64,
         header: unprotected,
-        signature: base64url::encode(&sig),
+        signature,
     })
 }
 
@@ -496,7 +510,7 @@ pub fn sign_general_full(
         signatures.push(JwsSignature {
             protected: protected_b64,
             header: entry.unprotected.clone(),
-            signature: base64url::encode(&sig),
+            signature: encode_signature(&sig)?,
         });
     }
 

@@ -395,6 +395,63 @@ fn emitted_tokens_respect_max_token_bytes() {
     assert_eq!(json::verify_flattened(&verifier, &flattened).unwrap(), fits);
 }
 
+/// A signer, standing in for a misbehaving HSM or custom
+/// [`kryptering::Signer`], whose signature base64url-encodes to more than
+/// `MAX_TOKEN_BYTES`.
+struct OversizedSigner;
+
+impl kryptering::Signer for OversizedSigner {
+    fn algorithm(&self) -> kryptering::SignatureAlgorithm {
+        JwsAlgorithm::HS256.to_crypto().unwrap()
+    }
+
+    fn sign(&self, _data: &[u8]) -> kryptering::Result<Vec<u8>> {
+        Ok(vec![0u8; jose_rs::MAX_TOKEN_BYTES])
+    }
+}
+
+/// Regression (review): the signer's output length is not under this
+/// crate's control, so an oversized signature must be refused on emit. The
+/// JWS JSON verifiers reject a `signature` member over `MAX_TOKEN_BYTES`
+/// (and compact `verify` the whole token, RFC 7515 sec. 7.1), so emitting
+/// one would produce an artifact this crate cannot verify.
+#[test]
+fn oversized_signature_is_refused_on_emit() {
+    let header = JoseHeader::for_alg(JwsAlgorithm::HS256);
+    let signer: &dyn kryptering::Signer = &OversizedSigner;
+    for (api, result) in [
+        (
+            "compact::sign",
+            ok(jws::compact::sign(signer, b"payload", &header)),
+        ),
+        (
+            "json::sign_flattened",
+            ok(json::sign_flattened(signer, b"payload", &header)),
+        ),
+        (
+            "json::sign_flattened_detached",
+            ok(json::sign_flattened_detached(signer, b"payload", &header)),
+        ),
+        (
+            "json::sign_general",
+            ok(json::sign_general(&[(signer, &header)], b"payload")),
+        ),
+        (
+            "json::sign_general_full",
+            ok(json::sign_general_full(
+                &[GeneralSigner::new(signer, &header)],
+                b"payload",
+                false,
+            )),
+        ),
+    ] {
+        assert!(
+            matches!(&result, Err(JoseError::InvalidToken(m)) if m.contains("MAX_TOKEN_BYTES")),
+            "{api} emitted an oversized signature: {result:?}"
+        );
+    }
+}
+
 /// Sign `unprotected` as the per-signature header through every JSON entry
 /// point that accepts one.
 fn sign_with_unprotected(

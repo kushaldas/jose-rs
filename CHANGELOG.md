@@ -27,7 +27,9 @@ accepted, hence the minor-version bump.
     `jwt::encode_nested_with_options`, or a `GeneralSigner`.
   - headers or tokens larger than `MAX_TOKEN_BYTES`, which this crate's
     decoders already refused (`InvalidHeader` for the header,
-    `InvalidToken` for the token or a JWS JSON payload member).
+    `InvalidToken` for the token or a JWS JSON payload or signature
+    member; the signature is checked after signing because a custom or HSM
+    `Signer` controls its length).
 - JWS signing (every `jws::compact`, `jws::json` and `jwt::encode*` entry
   point, including nested JWT) additionally rejects:
   - JWE-only members (`enc`, `zip`, `epk`, `apu`, `apv`, `iv`, `tag`, `p2s`,
