@@ -10,6 +10,12 @@
 //! - `A128CBC-HS256`, `A192CBC-HS384`, `A256CBC-HS512` -- AES-CBC with HMAC
 
 pub mod compact;
+
+/// Shared content-encryption implementation (crate-private).
+mod content;
+/// Shared envelope parsing, header policy and key management (crate-private).
+mod internal;
+
 pub use compact::{
     decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_header,
     encrypt_with_header_options, encrypt_with_jwk, encrypt_with_jwk_header,
