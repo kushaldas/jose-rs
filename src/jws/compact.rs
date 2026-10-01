@@ -500,6 +500,9 @@ pub(crate) fn validate_header_b64_opts(header_b64: &str, opts: &VerifyOptions) -
 /// Returns the decoded payload on success. The token's `alg` header is
 /// cross-checked against `verifier.algorithm()` — mismatches are rejected
 /// before any cryptographic operation. `alg: "none"` is always rejected.
+/// A raw Ed25519 verifier supports both `Ed25519` and legacy `EdDSA` wire
+/// names because it identifies only the primitive. To require one exact name,
+/// use [`verify_with_jwk`] with a pinned `jwk.alg`, or a JWT algorithm allowlist.
 pub fn verify(verifier: &dyn kryptering::Verifier, token: &str) -> Result<Vec<u8>> {
     verify_with_options(verifier, token, &VerifyOptions::new())
 }

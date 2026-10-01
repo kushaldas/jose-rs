@@ -74,6 +74,19 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
 }
 
 /// Generate an Ed25519 key pair as a JWK.
+///
+/// The key has no `alg` pin. Choose `Ed25519` for the fully specified wire
+/// identifier or `EdDSA` for legacy interoperability before one-shot signing.
+/// The two identifiers are not interchangeable in a pinned JWK.
+///
+/// ```
+/// use jose_rs::{jwk, jws::compact, JoseHeader, JwsAlgorithm};
+/// let mut key = jwk::generate_ed25519()?;
+/// key.alg = Some(JwsAlgorithm::Ed25519.as_str().into());
+/// let token = compact::sign_with_jwk(&key, b"payload", &JoseHeader::new("Ed25519"))?;
+/// assert_eq!(compact::verify_with_jwk(&key.to_public_jwk(), &token)?, b"payload");
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
 pub fn generate_ed25519() -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 

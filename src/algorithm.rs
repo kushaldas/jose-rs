@@ -34,8 +34,12 @@ pub enum JwsAlgorithm {
     ES384,
     /// ECDSA using P-521 and SHA-512
     ES512,
-    /// EdDSA (Ed25519)
+    /// Legacy EdDSA identifier (currently Ed25519 only).
+    /// Distinct from [`Self::Ed25519`] in algorithm allowlists and JWK pins.
     EdDSA,
+    /// Fully specified Ed25519 identifier (RFC 9864 section 2.2).
+    /// Uses the same primitive as [`Self::EdDSA`] without aliasing its wire name.
+    Ed25519,
     /// ECDSA using secp256k1 and SHA-256
     ES256K,
     /// ML-DSA-44 (FIPS 204) — post-quantum digital signature (draft-ietf-cose-dilithium)
@@ -85,6 +89,8 @@ impl JwsAlgorithm {
     ///
     /// Returns `Err` for algorithms that kryptering does not yet support
     /// (ES256K) or that have no meaningful cryptographic operation (None).
+    /// `EdDSA` and `Ed25519` map to the same primitive; compare JOSE enum
+    /// values, not this mapping, when enforcing a wire-algorithm allowlist.
     pub fn to_crypto(self) -> Result<kryptering::SignatureAlgorithm> {
         use kryptering::{EcCurve, HashAlgorithm, SignatureAlgorithm};
         match self {
@@ -109,7 +115,7 @@ impl JwsAlgorithm {
                 EcCurve::P521,
                 HashAlgorithm::Sha512,
             )),
-            Self::EdDSA => Ok(SignatureAlgorithm::Ed25519),
+            Self::EdDSA | Self::Ed25519 => Ok(SignatureAlgorithm::Ed25519),
             Self::ES256K => Err(JoseError::UnsupportedAlgorithm(
                 "ES256K (secp256k1) is not yet supported by kryptering".into(),
             )),
@@ -166,6 +172,7 @@ impl JwsAlgorithm {
             "ES384" => Ok(Self::ES384),
             "ES512" => Ok(Self::ES512),
             "EdDSA" => Ok(Self::EdDSA),
+            "Ed25519" => Ok(Self::Ed25519),
             "ES256K" => Ok(Self::ES256K),
             #[cfg(feature = "post-quantum")]
             "ML-DSA-44" => Ok(Self::MlDsa44),
@@ -207,6 +214,7 @@ impl JwsAlgorithm {
             Self::ES384 => "ES384",
             Self::ES512 => "ES512",
             Self::EdDSA => "EdDSA",
+            Self::Ed25519 => "Ed25519",
             Self::ES256K => "ES256K",
             #[cfg(feature = "post-quantum")]
             Self::MlDsa44 => "ML-DSA-44",

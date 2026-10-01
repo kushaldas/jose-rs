@@ -107,7 +107,7 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         // JWS ECDSA.
         "ES256" | "ES384" | "ES512" | "ES256K" => &["EC"],
         // EdDSA.
-        "EdDSA" => &["OKP"],
+        "EdDSA" | "Ed25519" => &["OKP"],
         // Post-quantum ML-DSA and composite ML-DSA.
         "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" | "ML-DSA-44-ES256" | "ML-DSA-65-ES256"
         | "ML-DSA-87-ES384" | "ML-DSA-44-Ed25519" | "ML-DSA-65-Ed25519" | "ML-DSA-87-Ed448" => {
@@ -140,7 +140,7 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         "ES384" => Some("P-384"),
         "ES512" => Some("P-521"),
         "ES256K" => Some("secp256k1"),
-        "EdDSA" => Some("Ed25519"),
+        "EdDSA" | "Ed25519" => Some("Ed25519"),
         _ => None,
     };
     if let Some(want) = expected_crv {

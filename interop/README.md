@@ -35,6 +35,17 @@ new `[[bin]]` target lands on the library.
 
 ## Running locally
 
+For focused Ed25519 and legacy EdDSA compatibility with jwcrypto 1.6.1,
+use a Python environment with that package installed:
+
+```sh
+cargo build --locked --manifest-path interop/rust-harness/Cargo.toml
+python interop/tests/ed25519_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+```
+
+This check generates disposable keys in memory and verifies compact JWS in
+both directions. It is separate from the Node matrix below.
+
 ```
 just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON

@@ -13,6 +13,12 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- Explicit `JwsAlgorithm::Ed25519` wire-name support for compact/JSON JWS
+  and JWT, using the existing Ed25519 backend. JWK `alg: "Ed25519"` now
+  requires OKP/Ed25519 material. `EdDSA` remains supported but is not an
+  alias in JWK pins or JWT allowlists. Downstream exhaustive matches on
+  `JwsAlgorithm` must handle the new variant. No dependency or feature change.
+
 - `jwk::jwk_to_signature_key(jwk, alg, op)` for bindings and explicit JWS
   operations. It checks algorithm pins, operation permissions, key type/curve,
   HMAC strength, and private material for signing without modifying the JWK.

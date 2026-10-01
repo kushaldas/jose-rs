@@ -14,7 +14,15 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 
 ## Supported algorithms
 
-**JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, EdDSA
+**JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, Ed25519, EdDSA (Ed25519 only)
+
+`Ed25519` is the fully specified wire identifier from
+[RFC 9864 section 2.2](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.2).
+It requires `kty: "OKP"` and `crv: "Ed25519"`. Existing `EdDSA` tokens
+remain supported. These identifiers stay distinct in JWK algorithm pins and
+JWT allowlists; no protected headers or metadata are silently renamed.
+Raw backend Ed25519 verifiers identify only the primitive and accept both
+wire names. Use a pinned JWK or JWT allowlist to require one exact name.
 
 **JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 /
 ML-DSA-87 (FIPS 204), plus the six composite algorithms from
