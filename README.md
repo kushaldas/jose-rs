@@ -30,16 +30,19 @@ ML-DSA-87 (FIPS 204), plus the six composite algorithms from
 ML-DSA-65-ES256, ML-DSA-87-ES384, ML-DSA-44-Ed25519,
 ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
-**JWE key management**: dir, A128KW/A192KW/A256KW, ECDH-ES (P-256/P-384/P-521), RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
+**JWE key management**: dir, A128KW/A192KW/A256KW, ECDH-ES and ECDH-ES+A128KW/+A192KW/+A256KW (P-256/P-384/P-521), RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 
-`ECDH-ES` needs a JWK (a curve cannot be named by a byte string), agrees the
-content key with exactly one recipient, generates its ephemeral key per message,
-and provides **no origin authentication**: anyone with the recipient's public key
-can produce a message the recipient will decrypt. `ECDH-ES+A128KW`/`+A192KW`/
-`+A256KW` (the modes that reach several recipients) are not implemented yet. See
-ADRs 0016 and 0017.
+Every ECDH mode needs a JWK — a curve cannot be named by a byte string — and
+generates its ephemeral key per message. `ECDH-ES` agrees the *content* key with
+exactly one recipient and conveys no key at all; `ECDH-ES+A128KW`/`+A192KW`/
+`+A256KW` agree a key-encryption key and carry the content key wrapped under it,
+which is the form that can reach several recipients — still refused for more than
+one, because RFC 7516 gives a recipient element no protected header of its own to
+carry that recipient's `epk` in (ADR 0018). None of them provides **origin
+authentication**: anyone with the recipient's public key can produce a message the
+recipient will decrypt. See ADRs 0016, 0017 and 0018.
 
 ## Feature flags
 

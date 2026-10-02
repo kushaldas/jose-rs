@@ -66,12 +66,12 @@ const JWE_KW_ALGS = new Set(['A128KW', 'A192KW', 'A256KW'])
 
 async function genKey(alg, enc, crv) {
   if (!alg) throw new Error('--alg is required')
-  if (alg === 'ECDH-ES') {
+  if (alg === 'ECDH-ES' || alg.startsWith('ECDH-ES+')) {
     // panva takes the JOSE agreement `alg` value here and maps it to the ECDH
     // primitive with the requested curve; `use: enc` and the `alg` pin are added
     // afterwards so the key says what it is for, exactly as the Rust harness
     // pins it.
-    if (!crv) throw new Error('gen-key --alg ECDH-ES requires --crv')
+    if (!crv) throw new Error(`gen-key --alg ${alg} requires --crv`)
     const { privateKey } = await generateKeyPair(alg, { crv, use: 'enc', extractable: true })
     const jwk = await exportJWK(privateKey)
     jwk.alg = alg

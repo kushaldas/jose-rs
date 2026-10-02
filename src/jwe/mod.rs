@@ -37,10 +37,12 @@
 //!
 //! Not implemented, and refused by name rather than ignored: content
 //! compression (`zip`), which this crate cannot decrypt and therefore will not
-//! emit; and the key-agreement-with-wrapping modes (`ECDH-ES+A128KW`,
-//! `+A192KW`, `+A256KW`), whose agreement half already exists
-//! ([`crate::jwk::agreement`], ADR 0016) and whose direct form is implemented
-//! above (ADR 0017).
+//! emit; and key agreement addressing more than one recipient of a general JWE,
+//! which needs one `epk` per recipient and has nowhere authenticated to put it
+//! (ADR 0018). The agreement modes themselves — `ECDH-ES` (ADR 0017) and
+//! `ECDH-ES+A128KW`/`+A192KW`/`+A256KW` (ADR 0018) — are implemented, in the
+//! compact and flattened serializations, through
+//! [`crate::jwk::agreement`] (ADR 0016).
 
 pub mod compact;
 pub mod general;

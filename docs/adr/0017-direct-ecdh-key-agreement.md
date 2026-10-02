@@ -126,6 +126,12 @@ A JWK's operation permission for `ECDH-ES` is `deriveKey` on **both** sides (RFC
 7517 §4.3), not `encrypt`/`wrapKey`: an agreement neither encrypts nor wraps. A
 key pinned to `sign`, or with `use: "sig"`, cannot be a recipient.
 
+> **Amended by [ADR 0018](0018-ecdh-key-agreement-with-key-wrapping.md):** the
+> wrapping modes described below as unimplemented are now implemented for a
+> single recipient. Everything this record decided about *direct* agreement —
+> ephemeral key generation, `epk` placement, the empty encrypted key, refusing
+> more than one recipient — still stands, unchanged.
+
 `ECDH-ES+A128KW`/`+A192KW`/`+A256KW` remain unimplemented; a test asserts the
 refusal by name so the gap is a decision rather than an accident.
 

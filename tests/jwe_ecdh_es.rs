@@ -559,19 +559,64 @@ fn a_public_only_recipient_key_cannot_decrypt() {
 }
 
 #[test]
-fn agreement_with_key_wrapping_is_still_unimplemented() {
-    // ECDH-ES+AxxxKW is the mode that lets one ciphertext reach several
-    // recipients. Asserting the gap here keeps it a decision rather than an
-    // accident.
+fn agreement_with_key_wrapping_conveys_an_encrypted_key() {
+    // `ECDH-ES+A*KW` agrees a key-encryption key instead of the CEK, so the CEK
+    // is transported: what makes it the multi-recipient form of agreement, and
+    // what makes a *present, non-empty* encrypted key the discriminator between
+    // the two modes (ADR 0018).
     for name in ["ECDH-ES+A128KW", "ECDH-ES+A192KW", "ECDH-ES+A256KW"] {
         let mut key = recipient("P-256");
         key.alg = Some(name.into());
-        let err = compact::encrypt_with_jwk(&key, b"x", JweEncryption::A128GCM)
-            .unwrap_err()
-            .to_string();
+        let token =
+            compact::encrypt_with_jwk(&key, b"wrapped by agreement", JweEncryption::A128GCM)
+                .expect(name);
+        let segments: Vec<&str> = token.split('.').collect();
         assert!(
-            err.contains("is not implemented by this crate"),
-            "{name}: {err}"
+            !segments[1].is_empty(),
+            "{name}: encrypted key must be present"
+        );
+        assert_eq!(
+            compact::decrypt_with_jwk(&key, &token).expect(name),
+            b"wrapped by agreement"
         );
     }
+}
+
+#[test]
+fn the_two_agreement_modes_derive_different_keys_from_the_same_pair() {
+    // Same recipient key, same enc: only the Concat KDF's AlgorithmID input
+    // differs by mode (`enc` for direct, `alg` for wrapping, RFC 7518 §4.6.2).
+    // Without that difference a recipient pinned to one mode would happily
+    // decrypt a message produced for the other.
+    let mut direct_key = recipient("P-256");
+    direct_key.alg = Some("ECDH-ES".into());
+    let mut wrapped_key = recipient("P-256");
+    // Same key material, different pin: copy the halves across rather than
+    // generating a second pair, so the comparison is about the pin only.
+    wrapped_key.crv = direct_key.crv.clone();
+    wrapped_key.x = direct_key.x.clone();
+    wrapped_key.y = direct_key.y.clone();
+    wrapped_key.d = direct_key.d.clone();
+    wrapped_key.alg = Some("ECDH-ES+A128KW".into());
+
+    let direct =
+        compact::encrypt_with_jwk(&direct_key, b"mode matters", JweEncryption::A128GCM).unwrap();
+    let wrapped =
+        compact::encrypt_with_jwk(&wrapped_key, b"mode matters", JweEncryption::A128GCM).unwrap();
+
+    // Each decrypts its own message, and neither decrypts the other's: the
+    // recipient's pin fixes the mode, so the mismatch surfaces as an algorithm
+    // refusal rather than a silently wrong key.
+    assert_eq!(
+        compact::decrypt_with_jwk(&direct_key, &direct).unwrap(),
+        b"mode matters"
+    );
+    assert_eq!(
+        compact::decrypt_with_jwk(&wrapped_key, &wrapped).unwrap(),
+        b"mode matters"
+    );
+    let err = compact::decrypt_with_jwk(&wrapped_key, &direct)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ECDH-ES+A128KW"), "{err}");
 }

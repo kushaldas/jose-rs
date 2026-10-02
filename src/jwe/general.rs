@@ -576,8 +576,13 @@ pub fn encrypt_general_with_jwks_options(
     let mut pinned: Option<JweAlgorithm> = None;
     for jwk in jwks {
         let alg = json_mod::pinned_alg(jwk)?;
-        // Refused per key, before any material is built: a recipient pinned to
-        // direct agreement cannot be addressed by a general JWE at all.
+        // Refused per key, before any material is built, and with the reason each
+        // mode actually has: direct agreement cannot address a general JWE at all,
+        // while the wrapping modes could but have nowhere authenticated to put
+        // one `epk` per recipient (ADR 0017, ADR 0018).
+        if internal::agreement_kek_len(alg).is_some() {
+            return Err(internal::per_recipient_epk_unsupported(alg));
+        }
         if internal::alg_is_agreement(alg) {
             return Err(internal::direct_agreement_not_multi(alg));
         }

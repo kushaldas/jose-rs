@@ -222,8 +222,8 @@ pub(crate) fn unimplemented_jwe_members(alg: JweAlgorithm) -> &'static [&'static
 pub(crate) fn direct_agreement_not_multi(alg: JweAlgorithm) -> JoseError {
     JoseError::UnsupportedAlgorithm(format!(
         "{} agrees the content encryption key with one recipient, so it cannot address a general \
-         JWE; use the flattened serialization for one recipient, or a key-wrapping algorithm \
-         (ECDH-ES+A128KW/A192KW/A256KW, not yet implemented) for several",
+         JWE; use the flattened or compact serialization for one recipient, or ECDH-ES+A128KW/\
+         +A192KW/+A256KW to wrap a shared CEK for several",
         alg.as_str()
     ))
 }
@@ -1010,6 +1010,151 @@ fn agreement_member(header: &JoseHeader, name: &str) -> Result<Option<String>> {
     }
 }
 
+/// The key-encryption key length an agreement-with-wrapping algorithm names.
+///
+/// `None` for every other algorithm, including `ECDH-ES` itself: in direct mode
+/// there is no KEK, the KDF output *is* the CEK. This is also the predicate this
+/// crate uses to ask "is this an agreement algorithm that wraps?".
+///
+/// The length comes from the **algorithm**, never from `enc`: `keydatalen` is the
+/// KEK's bit length in this mode (RFC 7518 §4.6.2), while the CEK it wraps is
+/// sized by `enc` — an `ECDH-ES+A128KW` + `A256GCM` message derives a 128-bit KEK
+/// for a 256-bit CEK.
+pub(crate) fn agreement_kek_len(alg: JweAlgorithm) -> Option<usize> {
+    match alg {
+        JweAlgorithm::EcdhEsA128kw => Some(16),
+        JweAlgorithm::EcdhEsA192kw => Some(24),
+        JweAlgorithm::EcdhEsA256kw => Some(32),
+        _ => None,
+    }
+}
+
+/// The refusal when a key-agreement algorithm is asked to address a general JWE.
+///
+/// In wrapping modes the cryptography scales to several recipients on its own —
+/// one CEK, one agreement per recipient — but each recipient needs its *own*
+/// ephemeral value, and RFC 7516 gives a recipient element no protected header of
+/// its own to carry it in. Publishing it in the element's unprotected `header` is
+/// what RFC 7520 §5.13 and other implementations do, and this crate does not read
+/// or write an unauthenticated key contribution until that trade-off is decided
+/// (ADR 0018, which records the argument and the alternatives).
+pub(crate) fn per_recipient_epk_unsupported(alg: JweAlgorithm) -> JoseError {
+    JoseError::UnsupportedAlgorithm(format!(
+        "{} addresses several recipients by agreeing a separate key-encryption key with each, \
+         which needs one epk per recipient; RFC 7516 gives a recipient element no protected \
+         header of its own to carry it in, so only the single-recipient (flattened and compact) \
+         forms are supported for this algorithm",
+        alg.as_str()
+    ))
+}
+
+/// Publish `ephemeral`'s public half as the message's `epk` member.
+///
+/// Public half only: the ephemeral private scalar must never travel in the
+/// message (RFC 7518 §4.6.1.1).
+fn with_epk(header: &JoseHeader, ephemeral: &crate::jwk::Jwk) -> Result<JoseHeader> {
+    let mut with_epk = header.clone();
+    with_epk.extra.insert(
+        "epk".into(),
+        serde_json::to_value(own_public_jwk(ephemeral))?,
+    );
+    Ok(with_epk)
+}
+
+/// Read the sender's ephemeral public key from a received agreement message.
+///
+/// The **authenticated protected header only**: the JSON serializations already
+/// refuse `epk` in an unprotected position (ADR 0013), so a recipient never
+/// derives a key from a value the sender did not integrity protect.
+fn epk_from_header(header: &JoseHeader) -> Result<crate::jwk::Jwk> {
+    let epk_value = header
+        .extra
+        .get("epk")
+        .ok_or_else(|| JoseError::InvalidHeader(
+            "key agreement requires an epk (ephemeral public key) member in the protected header (RFC 7518 §4.6.1.1)"
+                .into(),
+        ))?;
+    serde_json::from_value(epk_value.clone())
+        .map_err(|e| JoseError::InvalidHeader(format!("epk is not a well-formed JWK: {e}")))
+}
+
+/// The sender's half of a key agreement, with the ephemeral key already published.
+///
+/// Holds the agreement handles rather than a derived key, and is consumed by
+/// either mode: direct agreement derives the CEK, wrapping modes derive a KEK and
+/// wrap. Nothing here hands out `Z` (ADR 0016).
+struct AgreementSender {
+    own: crate::jwk::agreement::AgreementKey,
+    peer: crate::jwk::agreement::PeerKey,
+    /// The caller's header plus the `epk` member naming [`Self::own`].
+    header: JoseHeader,
+}
+
+/// Generate this operation's ephemeral key and pair it with `recipient`.
+///
+/// The curve is the **recipient's** (`peer_key` refuses an off-curve or
+/// private-bearing peer): agreement is only defined within one curve, and this
+/// way a P-521 recipient cannot be talked into a P-521→P-256 downgrade through a
+/// caller-chosen ephemeral key. `epk` is not an input anywhere in this crate,
+/// which is how RFC 7518 §4.6's "MUST generate a new ephemeral key ... for each
+/// key agreement operation" stays true.
+fn agreement_sender(header: &JoseHeader, recipient: &crate::jwk::Jwk) -> Result<AgreementSender> {
+    use crate::jwk::agreement::{agreement_key, peer_key};
+    // Senders legitimately hold the recipient's *private* JWK (the RFC's own
+    // examples do), so `d` is dropped rather than refused — but only the public
+    // half is ever used, and only the public half is ever published.
+    let peer = peer_key(&recipient.to_public_jwk())?;
+    let ephemeral = crate::jwk::generate_ec(peer.curve().as_crv_str())?;
+    let own = agreement_key(&ephemeral)?;
+    Ok(AgreementSender {
+        own,
+        peer,
+        header: with_epk(header, &ephemeral)?,
+    })
+}
+
+impl AgreementSender {
+    /// Concat KDF over this agreement, with the header's `apu`/`apv` as inputs.
+    ///
+    /// `alg_id` and `key_len` are decided by the caller because the two
+    /// agreement modes disagree about both — see [`Self::derive_cek`] and
+    /// [`Self::wrap`].
+    fn derive(
+        &self,
+        alg_id: &str,
+        apu: Option<&str>,
+        apv: Option<&str>,
+        key_len: usize,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.own.derive_key(&self.peer, alg_id, apu, apv, key_len)
+    }
+
+    /// Direct agreement: the KDF output **is** the CEK, so AlgorithmID is the
+    /// ASCII `enc` value and keydatalen the CEK length (`enc.cek_size()`).
+    fn derive_cek(&self, enc: JweEncryption) -> Result<Zeroizing<Vec<u8>>> {
+        let apu = agreement_member(&self.header, "apu")?;
+        let apv = agreement_member(&self.header, "apv")?;
+        self.derive(enc.as_str(), apu.as_deref(), apv.as_deref(), enc.cek_size())
+    }
+
+    /// Agreement with key wrapping: AlgorithmID is the ASCII **`alg`** value and
+    /// keydatalen the KEK length the algorithm names (§4.6.2) — so the same two
+    /// keys derive a different KEK here than the CEK they derive under `ECDH-ES`,
+    /// which is what stops a message from being read under the wrong mode.
+    fn wrap(&self, alg: JweAlgorithm, cek: &[u8]) -> Result<Vec<u8>> {
+        let kek_len = agreement_kek_len(alg).ok_or_else(|| {
+            JoseError::UnsupportedAlgorithm(format!(
+                "{} does not wrap a key with an agreed key-encryption key",
+                alg.as_str()
+            ))
+        })?;
+        let apu = agreement_member(&self.header, "apu")?;
+        let apv = agreement_member(&self.header, "apv")?;
+        let kek = self.derive(alg.as_str(), apu.as_deref(), apv.as_deref(), kek_len)?;
+        kryptering::keywrap::wrap(jwe_alg_to_keywrap(alg)?, &kek, cek).map_err(JoseError::Crypto)
+    }
+}
+
 /// Direct key agreement (`ECDH-ES`): agree the CEK and return the header that
 /// carries the ephemeral public key.
 ///
@@ -1028,39 +1173,12 @@ fn agree_direct(
     recipient: &crate::jwk::Jwk,
     enc: JweEncryption,
 ) -> Result<(JoseHeader, Zeroizing<Vec<u8>>)> {
-    use crate::jwk::agreement::{agreement_key, peer_key};
-
-    // The recipient's key is the *peer* half here, so it must be public
-    // material. Senders legitimately hold the recipient's private JWK, so `d` is
-    // dropped rather than refused — but only the public half is ever placed in
-    // the message.
-    let public = recipient.to_public_jwk();
-    let peer = peer_key(&public)?;
-
-    // Generate on the recipient's curve: agreement is only defined between two
-    // points on one curve, and this way a P-521 recipient cannot be talked into
-    // a P-256 ephemeral key.
-    let ephemeral = crate::jwk::generate_ec(peer.curve().as_crv_str())?;
-    let own = agreement_key(&ephemeral)?;
-
-    let apu = agreement_member(header, "apu")?;
-    let apv = agreement_member(header, "apv")?;
-    // RFC 7518 §4.6: in Direct Key Agreement mode the KDF output is the CEK, so
-    // `keydatalen` is the `enc` key length and AlgorithmID is the ASCII `enc`.
-    let cek = own.derive_key(
-        &peer,
-        enc.as_str(),
-        apu.as_deref(),
-        apv.as_deref(),
-        enc.cek_size(),
-    )?;
-
-    let mut with_epk = header.clone();
-    with_epk.extra.insert(
-        "epk".into(),
-        serde_json::to_value(own_public_jwk(&ephemeral))?,
-    );
-    Ok((with_epk, cek))
+    // The sender's half, the recipient's half and the header carrying `epk` are
+    // built by one function shared with the wrapping modes, so "where does the
+    // ephemeral key come from" has exactly one answer in this crate.
+    let sender = agreement_sender(header, recipient)?;
+    let cek = sender.derive_cek(enc)?;
+    Ok((sender.header, cek))
 }
 
 /// The public-only JWK to publish as `epk`: the freshly generated key with its
@@ -1094,15 +1212,7 @@ fn agree_direct_recover(
         ));
     }
 
-    let epk_value = header
-        .extra
-        .get("epk")
-        .ok_or_else(|| JoseError::InvalidHeader(
-            "ECDH-ES requires an epk (ephemeral public key) member in the protected header (RFC 7518 §4.6.1.1)"
-                .into(),
-        ))?;
-    let epk: crate::jwk::Jwk = serde_json::from_value(epk_value.clone())
-        .map_err(|e| JoseError::InvalidHeader(format!("epk is not a well-formed JWK: {e}")))?;
+    let epk = epk_from_header(header)?;
     let peer = peer_key(&epk)?;
     let own = agreement_key(recipient)?;
 
@@ -1115,6 +1225,56 @@ fn agree_direct_recover(
         apv.as_deref(),
         enc.cek_size(),
     )
+}
+
+/// Recover the CEK from a message that agreed a key-encryption key and wrapped it.
+///
+/// Mirror of [`AgreementSender::wrap`]: AlgorithmID `alg`, keydatalen the KEK
+/// length, then AES-KW. Unlike direct mode this mode **must** convey an encrypted
+/// key — a message that omits it has no CEK to recover, and reading it as though
+/// the agreement supplied the CEK directly would mix two key-management schemes
+/// (that is the substitution this check exists to block).
+fn agree_wrap_recover(
+    header: &JoseHeader,
+    recipient: &crate::jwk::Jwk,
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    encrypted_key: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    use crate::jwk::agreement::{agreement_key, peer_key};
+
+    let kek_len = agreement_kek_len(alg).ok_or_else(|| {
+        JoseError::UnsupportedAlgorithm(format!(
+            "{} does not wrap a key with an agreed key-encryption key",
+            alg.as_str()
+        ))
+    })?;
+    if encrypted_key.is_empty() {
+        return Err(JoseError::InvalidToken(format!(
+            "{}: an encrypted key is required (the CEK is wrapped under the agreed key)",
+            alg.as_str()
+        )));
+    }
+
+    let epk = epk_from_header(header)?;
+    let peer = peer_key(&epk)?;
+    let own = agreement_key(recipient)?;
+    let apu = agreement_member(header, "apu")?;
+    let apv = agreement_member(header, "apv")?;
+    let kek = own.derive_key(&peer, alg.as_str(), apu.as_deref(), apv.as_deref(), kek_len)?;
+
+    let cek = kryptering::keywrap::unwrap(jwe_alg_to_keywrap(alg)?, &kek, encrypted_key)
+        .map_err(JoseError::Crypto)?;
+    if cek.len() != enc.cek_size() {
+        return Err(JoseError::Key(format!(
+            "{}: unwrapped CEK length {} does not match the {} bytes {} requires",
+            alg.as_str(),
+            cek.len(),
+            enc.cek_size(),
+            enc.as_str()
+        )));
+    }
+    Ok(Zeroizing::new(cek))
 }
 
 /// Check a `dir` key against the CEK size the content algorithm requires.
@@ -1152,6 +1312,9 @@ pub(crate) fn recover_cek(
         return match (key, alg) {
             (KeyMaterial::Jwk(recipient), JweAlgorithm::EcdhEs) => {
                 agree_direct_recover(header, recipient, enc, encrypted_key)
+            }
+            (KeyMaterial::Jwk(recipient), other) if agreement_kek_len(other).is_some() => {
+                agree_wrap_recover(header, recipient, other, enc, encrypted_key)
             }
             (KeyMaterial::Jwk(_), other) => Err(JoseError::UnsupportedAlgorithm(format!(
                 "{} is not implemented by this crate",
@@ -1279,12 +1442,27 @@ pub(crate) fn check_kek_size(alg: JweAlgorithm, key: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The AES key wrapping a key-management algorithm performs.
+///
+/// The `A*KW` algorithms and the ECDH-agreement-with-wrapping algorithms share
+/// this mapping on purpose: they run *the same* RFC 3394 wrap, and differ only in
+/// where the key-encryption key came from — held by both parties already, or
+/// derived from the agreement. Accepting both here keeps a third spelling of
+/// "128-bit AES-KW" out of the codebase; it does **not** make the raw-byte path
+/// reachable for agreement, which is dispatched away long before this is called
+/// ([`recover_cek`], [`encrypt_core_multi`]).
 pub(crate) fn jwe_alg_to_keywrap(alg: JweAlgorithm) -> Result<kryptering::KeyWrapAlgorithm> {
     use kryptering::{AesKeySize, KeyWrapAlgorithm};
     match alg {
-        JweAlgorithm::A128KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128)),
-        JweAlgorithm::A192KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192)),
-        JweAlgorithm::A256KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes256)),
+        JweAlgorithm::A128KW | JweAlgorithm::EcdhEsA128kw => {
+            Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128))
+        }
+        JweAlgorithm::A192KW | JweAlgorithm::EcdhEsA192kw => {
+            Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192))
+        }
+        JweAlgorithm::A256KW | JweAlgorithm::EcdhEsA256kw => {
+            Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes256))
+        }
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
             "{} is not a key wrap algorithm",
             alg.as_str()
@@ -1642,21 +1820,34 @@ pub(crate) fn encrypt_core_multi(
     // because publishing the ephemeral public key *changes* the protected header
     // that is then used as the AAD input. `Cow` so that every other algorithm
     // keeps borrowing the caller's header.
-    let (header, agreed): (std::borrow::Cow<'_, JoseHeader>, Option<Zeroizing<Vec<u8>>>) = match (
-        first, alg,
-    ) {
+    let (header, agreed, sender): (
+        std::borrow::Cow<'_, JoseHeader>,
+        Option<Zeroizing<Vec<u8>>>,
+        Option<AgreementSender>,
+    ) = match (first, alg) {
         (KeyMaterial::Jwk(recipient), JweAlgorithm::EcdhEs) => {
             if !rest.is_empty() {
                 // The agreed key *is* the CEK, and it is agreed with exactly
                 // one recipient. Two recipients would need two different
                 // CEKs, and one ciphertext cannot be encrypted under two.
-                return Err(JoseError::UnsupportedAlgorithm(
-                        "ECDH-ES agrees the content encryption key with one recipient, so it cannot address a general JWE; use ECDH-ES+A128KW/A192KW/A256KW (not yet implemented) or the flattened serialization for a single recipient"
-                            .into(),
-                    ));
+                return Err(direct_agreement_not_multi(alg));
             }
             let (header, cek) = agree_direct(header, recipient, enc)?;
-            (std::borrow::Cow::Owned(header), Some(cek))
+            (std::borrow::Cow::Owned(header), Some(cek), None)
+        }
+        // Agreement with key wrapping: the CEK is generated normally and wrapped
+        // per recipient, so all this mode needs up front is the ephemeral key to
+        // publish (which changes the protected header, hence "before serialize").
+        (KeyMaterial::Jwk(recipient), other) if agreement_kek_len(other).is_some() => {
+            if !rest.is_empty() {
+                return Err(per_recipient_epk_unsupported(other));
+            }
+            let sender = agreement_sender(header, recipient)?;
+            (
+                std::borrow::Cow::Owned(sender.header.clone()),
+                None,
+                Some(sender),
+            )
         }
         (KeyMaterial::Jwk(_), other) => {
             return Err(JoseError::UnsupportedAlgorithm(format!(
@@ -1670,7 +1861,7 @@ pub(crate) fn encrypt_core_multi(
                 other.as_str()
             )))
         }
-        _ => (std::borrow::Cow::Borrowed(header), None),
+        _ => (std::borrow::Cow::Borrowed(header), None, None),
     };
     let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
@@ -1686,10 +1877,16 @@ pub(crate) fn encrypt_core_multi(
     )?;
 
     // 1. Generate or use the CEK, wrap it for the first recipient. Direct key
-    // agreement has already agreed it, and conveys nothing.
-    let (cek, first_wrapped) = match agreed {
-        Some(cek) => (cek, Vec::new()),
-        None => produce_cek(first.bytes()?, alg, enc)?,
+    // agreement has already agreed it, and conveys nothing; agreement with
+    // wrapping generates it normally and wraps it with the agreed KEK.
+    let (cek, first_wrapped) = match (agreed, sender) {
+        (Some(cek), _) => (cek, Vec::new()),
+        (None, Some(sender)) => {
+            let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
+            let wrapped = sender.wrap(alg, &cek)?;
+            (cek, wrapped)
+        }
+        (None, None) => produce_cek(first.bytes()?, alg, enc)?,
     };
 
     // 2. Content encryption — once, over the shared AAD input.

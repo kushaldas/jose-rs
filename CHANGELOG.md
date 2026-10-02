@@ -49,6 +49,17 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- **ECDH key agreement with key wrapping (`ECDH-ES+A128KW`, `+A192KW`,
+  `+A256KW`, RFC 7518 §4.6)** in the compact and flattened serializations: the
+  agreement output is a key-encryption key of the length the algorithm names, the
+  content encryption key is generated normally and carried wrapped under it, the
+  Concat KDF's AlgorithmID input is the ASCII `alg` rather than `enc`, and the
+  mode's whole key schedule is independent of direct agreement's, so a message
+  cannot be read under the other mode's key. One recipient per message for now —
+  several recipients need one `epk` each, and RFC 7516 gives a recipient element
+  no protected header of its own (ADR 0018). Decrypts RFC 7520 §5.4's message;
+  interoperates with panva in both directions and with jwcrypto (whose JSON
+  serialization ships `epk` unprotected, as for `ECDH-ES`). See ADR 0018.
 - **Direct ECDH key agreement (`ECDH-ES`, RFC 7518 §4.6)** in both JWE
   serializations: the content encryption key is agreed with the recipient rather
   than carried, so nothing is conveyed as the encrypted key, an ephemeral key pair

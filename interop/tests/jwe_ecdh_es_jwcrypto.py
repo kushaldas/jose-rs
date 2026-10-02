@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check direct ECDH key agreement (`ECDH-ES`, RFC 7518 §4.6) against jwcrypto.
+"""Check ECDH key agreement (`ECDH-ES` and `ECDH-ES+A*KW`, RFC 7518 §4.6) against jwcrypto.
 
 Pass the built ``jose-interop`` executable as the sole argument. Keys are made by
 the Rust harness and imported into jwcrypto, so both sides work on the same JWK;
@@ -25,6 +25,13 @@ What is checked, per curve and content algorithm:
 panva (the Node ``jwe-ecdh`` matrix family) puts ``epk`` in the protected header
 in both serializations and interoperates in both directions, so the divergence is
 jwcrypto's and is one-directional.
+
+The same three checks then run for the **key wrapping** modes
+(``ECDH-ES+A128KW``/``+A192KW``/``+A256KW``), where the message additionally
+carries the CEK wrapped under the agreed key. Those checks are what show the two
+implementations agree on the Concat KDF's mode-dependent inputs — AlgorithmID the
+ASCII ``alg`` rather than ``enc``, and ``keydatalen`` the KEK's length — since a
+disagreement there is a tag failure, not a negotiation.
 """
 
 import base64
@@ -64,8 +71,21 @@ def _run(binary, argv, payload):
     )
 
 
-def rust(binary, command, enc, payload, crv=None):
-    argv = [command, "--alg", "ECDH-ES", "--enc", enc]
+KW_COMBOS = [
+    ("ECDH-ES+A128KW", "P-256", "A256GCM"),
+    ("ECDH-ES+A192KW", "P-384", "A128CBC-HS256"),
+    ("ECDH-ES+A256KW", "P-521", "A128GCM"),
+]
+
+# A 256-bit CEK wrapped by a 128-bit agreed key: RFC 3394 adds one 64-bit
+# integrity block, so the encrypted key is 40 octets. Length is asserted rather
+# than eyeballed because it is what distinguishes "wrapped the CEK" from
+# "wrapped the KEK" without trusting either implementation's own report.
+KW_WRAPPED_LEN = {"A128GCM": 24, "A128CBC-HS256": 40, "A192CBC-HS384": 48, "A256GCM": 40}
+
+
+def rust(binary, command, enc, payload, crv=None, alg="ECDH-ES"):
+    argv = [command, "--alg", alg, "--enc", enc]
     if crv:
         argv += ["--crv", crv]
     result = _run(binary, argv, payload)
@@ -74,8 +94,8 @@ def rust(binary, command, enc, payload, crv=None):
     return json.loads(result.stdout)
 
 
-def rust_stderr(binary, command, enc, payload):
-    result = _run(binary, [command, "--alg", "ECDH-ES", "--enc", enc], payload)
+def rust_stderr(binary, command, enc, payload, alg="ECDH-ES"):
+    result = _run(binary, [command, "--alg", alg, "--enc", enc], payload)
     return "" if result.returncode == 0 else result.stderr.decode()
 
 
@@ -198,6 +218,110 @@ def jwcrypto_to_rust(binary, crv, enc):
     )
 
 
+def rust_to_jwcrypto_kw(binary, alg, crv, enc):
+    """jose-rs emits a wrapped-key agreement message; jwcrypto reads both forms."""
+    label = f"jose-rs -> jwcrypto [{alg} {crv}/{enc}]"
+    private = rust(binary, "gen-key", enc, {}, crv=crv, alg=alg)
+    public = rust(binary, "export-pub", enc, private)
+    recipient = jwk.JWK(**private)
+
+    flattened = rust(
+        binary,
+        "encrypt-flattened",
+        enc,
+        {"jwk": public, "plaintext_b64u": b64u(PLAINTEXT)},
+        alg=alg,
+    )["jwe"]
+    message = json.loads(flattened)
+    wrapped = unb64u(message.get("encrypted_key", ""))
+    check(
+        f"{label}: carries the CEK wrapped under the agreed key",
+        len(wrapped) == KW_WRAPPED_LEN[enc],
+        f"{len(wrapped)} octets, expected {KW_WRAPPED_LEN[enc]}",
+    )
+    obj = jwe.JWE()
+    try:
+        obj.deserialize(flattened)
+        obj.decrypt(recipient)
+    except Exception as error:  # noqa: BLE001
+        check(f"{label}: flattened", False, f"jwcrypto refused it: {error}")
+        return
+    check(f"{label}: flattened plaintext", obj.payload == PLAINTEXT, obj.payload)
+
+    compact = rust(
+        binary,
+        "encrypt-compact",
+        enc,
+        {"jwk": public, "plaintext_b64u": b64u(PLAINTEXT)},
+        alg=alg,
+    )["jwe"]
+    check(
+        f"{label}: compact conveys the wrapped key",
+        compact.split(".")[1] != "",
+        compact[:40],
+    )
+    obj = jwe.JWE()
+    try:
+        obj.deserialize(compact)
+        obj.decrypt(recipient)
+    except Exception as error:  # noqa: BLE001
+        check(f"{label}: compact", False, f"jwcrypto refused it: {error}")
+        return
+    check(f"{label}: compact plaintext", obj.payload == PLAINTEXT, obj.payload)
+
+
+def jwcrypto_to_rust_kw(binary, alg, crv, enc):
+    """jwcrypto emits a wrapped-key agreement message; jose-rs reads the compact form."""
+    label = f"jwcrypto -> jose-rs [{alg} {crv}/{enc}]"
+    private = rust(binary, "gen-key", enc, {}, crv=crv, alg=alg)
+
+    # A fresh object per serialization: reusing one JWE instance and serializing
+    # it compactly first makes jwcrypto's later JSON output drop the `header`
+    # member it had produced, which would test the library's object model rather
+    # than its wire behaviour.
+    def produce():
+        token = jwe.JWE(plaintext=PLAINTEXT, protected={"alg": alg, "enc": enc})
+        token.add_recipient(jwk.JWK(**private))
+        return token
+
+    compact = produce().serialize(compact=True)
+    check(
+        f"{label}: jwcrypto conveys the wrapped key",
+        compact.split(".")[1] != "",
+        compact[:40],
+    )
+    out = _run(
+        binary,
+        ["decrypt-compact", "--alg", alg, "--enc", enc],
+        {"jwk": private, "jwe": compact},
+    )
+    if out.returncode != 0:
+        check(f"{label}: compact plaintext", False, out.stderr.decode())
+        return
+    got = json.loads(out.stdout)
+    check(
+        f"{label}: compact plaintext",
+        unb64u(got["plaintext_b64u"]) == PLAINTEXT,
+        got,
+    )
+    check(
+        f"{label}: reports the authenticated epk",
+        got.get("protected_header", {}).get("epk", {}).get("crv") == crv,
+        got,
+    )
+
+    # Same divergence as direct agreement, asserted for this mode too.
+    flattened = produce().serialize()
+    refused = rust_stderr(
+        binary, "decrypt-flattened", enc, {"jwk": private, "jwe": flattened}, alg=alg
+    )
+    check(
+        f"{label}: jose-rs refuses jwcrypto's unprotected epk by name",
+        bool(refused) and "epk" in refused and "integrity protected" in refused,
+        refused,
+    )
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: jwe_ecdh_es_jwcrypto.py /path/to/jose-interop")
@@ -205,15 +329,18 @@ def main():
     for crv, enc in COMBOS:
         rust_to_jwcrypto(binary, crv, enc)
         jwcrypto_to_rust(binary, crv, enc)
+    for alg, crv, enc in KW_COMBOS:
+        rust_to_jwcrypto_kw(binary, alg, crv, enc)
+        jwcrypto_to_rust_kw(binary, alg, crv, enc)
 
     for line in PASSES:
         print(f"  ok   {line}")
     if FAILURES:
         for line in FAILURES:
             print(f"  FAIL {line}")
-        print(f"\nECDH-ES / jwcrypto: {len(PASSES)} passed, {len(FAILURES)} failed")
+        print(f"\nECDH agreement / jwcrypto: {len(PASSES)} passed, {len(FAILURES)} failed")
         sys.exit(1)
-    print(f"\nECDH-ES / jwcrypto: {len(PASSES)} passed, 0 failed")
+    print(f"\nECDH agreement / jwcrypto: {len(PASSES)} passed, 0 failed")
 
 
 if __name__ == "__main__":

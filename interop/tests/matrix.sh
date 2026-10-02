@@ -62,6 +62,9 @@ ALGS_JWE=("dir:A256GCM" "dir:A128CBC-HS256" "A256KW:A256GCM" "A256KW:A128CBC-HS2
 DIRECTIONS_JWE=("rust-encrypt-js-decrypt" "js-encrypt-rust-decrypt")
 # ECDH-ES cells: "<curve>:<content enc>", key management is always ECDH-ES.
 ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A256GCM")
+# ECDH with key wrapping: `alg:curve:enc`. One wrapping algorithm per curve, so
+# the three KDF AlgorithmID/keydatalen pairings are each covered once.
+ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM")
 # Duplicate-member negative cells (signature alg is ES256 throughout).
 DIRECTIONS_DUP=("dup-kid" "dup-alg" "dup-ext")
 
@@ -521,6 +524,9 @@ run_cell() {
       jwe-crit) run_jwe_crit_cell "$direction" "$alg"; exit 0 ;;
       jwe-general) run_jwe_general_cell "$direction" "$alg"; exit 0 ;;
       jwe-ecdh) run_jwe_ecdh_cell "$direction" "$alg"; exit 0 ;;
+      jwe-ecdh-kw)
+        # `alg:curve:enc` — the same cell, with the wrapping algorithm named.
+        run_jwe_ecdh_cell "$direction" "${alg#*:}" "${alg%%:*}"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
         [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
@@ -649,7 +655,7 @@ run_cell() {
 # reported back as authenticated metadata, and it must carry public material only
 # (RFC 7518 §4.6.1.1), which is a claim about the *producer's* serialization.
 run_jwe_ecdh_cell() {
-  local direction="$1" crv="${2%%:*}" enc="${2#*:}" alg="ECDH-ES"
+  local direction="$1" crv="${2%%:*}" enc="${2#*:}" alg="${3:-ECDH-ES}"
   local priv_path="$VECTORS/${CELL}.priv.json"
   local pub_path="$VECTORS/${CELL}.pub.json"
   local enc_path="$VECTORS/${CELL}.encrypted.json"
@@ -681,10 +687,20 @@ run_jwe_ecdh_cell() {
   ' "$out_path" > /dev/null \
     || { echo "epk shape wrong: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
 
-  # And no key was transported: the compact serialization's second segment is
-  # the empty octet sequence in direct mode (RFC 7518 §4.6).
-  [ "$(printf '%s' "$jwe" | cut -d. -f2)" = "" ] \
-    || { echo "ECDH-ES must not convey an encrypted key" >&2; return 1; }
+  # The compact serialization's second segment is the discriminator between the
+  # two agreement modes: the empty octet sequence in direct mode, and the wrapped
+  # CEK in the wrapping modes (RFC 7518 §4.6). Asserting it here means a cell
+  # cannot silently change mode — an implementation that agreed the CEK where it
+  # should have wrapped it would fail even though both sides "decrypt".
+  local encrypted_key_segment; encrypted_key_segment="$(printf '%s' "$jwe" | cut -d. -f2)"
+  case "$alg" in
+    ECDH-ES)
+      [ "$encrypted_key_segment" = "" ] \
+        || { echo "ECDH-ES must not convey an encrypted key" >&2; return 1; } ;;
+    *)
+      [ -n "$encrypted_key_segment" ] \
+        || { echo "$alg must convey the CEK wrapped under the agreed key" >&2; return 1; } ;;
+  esac
 }
 
 if [ "${1:-}" = "--cell" ]; then
@@ -763,6 +779,16 @@ done
 for alg in "${ALGS_ECDH[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-ecdh" || true
+  done
+done
+
+# ECDH with key wrapping (RFC 7518 §4.6): the CEK is agreed-then-wrapped, so the
+# cell also proves the two sides agree on the Concat KDF's AlgorithmID (`alg`,
+# not `enc`) and keydatalen (the KEK's length) — a mismatch there is a
+# authentication-tag failure, not a negotiation.
+for alg in "${ALGS_ECDH_KW[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-ecdh-kw" || true
   done
 done
 

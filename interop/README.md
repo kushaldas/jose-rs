@@ -81,13 +81,19 @@ change deliberately.
 
 ### Direct ECDH agreement against jwcrypto (`jwe_ecdh_es_jwcrypto.py`)
 
-60 checks over P-256/P-384/P-521 with GCM and CBC-HMAC content encryption:
+84 checks over P-256/P-384/P-521 with GCM and CBC-HMAC content encryption, in both
+agreement modes:
 jose-rs → jwcrypto in both serializations (with the `epk` shape and the empty
 encrypted key asserted), and jwcrypto → jose-rs in the compact form — which is the
 real crypto cross-check, since only a matching Concat KDF opens jwcrypto's
 ciphertext.
 
-It also pins one **divergence**. jwcrypto ships `epk` in the *unprotected*
+It also pins the wrapped key's length against RFC 3394's framing rather than
+trusting either implementation's account of it — 40 octets means a 256-bit CEK
+wrapped under a 128-bit agreed key, which is the pairing that catches a library
+reading `keydatalen` off `enc`.
+
+And it pins one **divergence**. jwcrypto ships `epk` in the *unprotected*
 `header` member of its JWE JSON Serialization, and jose-rs refuses a peer key it
 cannot authenticate (ADRs 0013/0017), so that one combination is refused by name
 before any cryptographic work. Its compact form puts `epk` in the protected header
@@ -121,7 +127,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **87 cells**:
+Full matrix is **93 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -132,6 +138,7 @@ Full matrix is **87 cells**:
 | JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | JWE flattened JSON + external AAD | `jwe-json-aad` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.1 `aad` member: emitted with the right encoding, decryptable by the peer **with** the out-of-band bytes, and **refused without them** |
 | JWE critical extensions | `jwe-crit` | 4 alg:enc × 2 directions = 8 | RFC 7516 §4.1.13: jose-rs emits `crit` only for a caller-declared parameter, and the parameter must be integrity protected. jwcrypto refuses to read an extension it cannot process and panva refuses to emit one, so the cell asserts the peer's rejection **and** a control message without `crit` that the peer accepts |
+| JWE ECDH agreement with key wrapping | `jwe-ecdh-kw` | 3 algorithms × 2 directions = 6 | `ECDH-ES+A128KW`/`+A192KW`/`+A256KW` (RFC 7518 §4.6): one wrapping algorithm per curve, and the cell asserts the compact form's encrypted-key segment is **non-empty** — the converse of the `jwe-ecdh` assertion — so a cell that quietly switched key-management mode fails instead of passing on a tag it no longer proves |
 | JWE direct ECDH agreement | `jwe-ecdh` | 3 curves × 2 enc × 2 directions = 8 | RFC 7518 §4.6 (`ECDH-ES`): the producer encrypts to the recipient's **public** half and the consumer reads it with the private half, so the cell proves the agreement needs no `d` on the send side. The consuming side must report an authenticated `epk` on the recipient's curve with no private part, and the compact form's encrypted-key segment must be empty |
 | JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
@@ -245,7 +252,7 @@ not be overridden. `protected_header` is the header as that library parsed it.
 
 `gen-key --alg ECDH-ES --crv <P-256|P-384|P-521>` produces an agreement recipient
 key (curve chosen by the caller, `alg` pinned, `use: enc`); both harnesses do it,
-so either side can play producer in an `jwe-ecdh` cell.
+so either side can play producer in an `jwe-ecdh` or `jwe-ecdh-kw` cell.
 
 The two agreement probe commands have no JS counterpart and no matrix cells — they
 exist for `tests/ecdh_kdf_vectors.py`, which compares them against OpenSSL and
