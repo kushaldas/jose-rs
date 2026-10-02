@@ -525,6 +525,16 @@ staged-file review and human merge — lives in
 [`docs/definition-of-done.md`](docs/definition-of-done.md), where it is labelled
 as judgement instead of pretending to be automated (ADR 0033).
 
+### Dependencies, MSRV and platform checks
+
+[`docs/dependencies.md`](docs/dependencies.md) records the locked versions, the feature
+map, the duplicated RustCrypto trait families and why they are documented rather than
+force-upgraded, the advisory ignore and its mitigation, and the platform promises (no
+`unsafe`, no async, no network, no filesystem in the library).
+`tests/dependency_policy.rs` checks those claims against the manifest and the lock, so
+the page cannot rot into folklore; `./scripts/dependency-report.sh` regenerates its inputs
+(ADR 0036).
+
 ### Performance baselines
 
 ```sh

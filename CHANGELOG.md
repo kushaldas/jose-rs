@@ -19,6 +19,20 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- A checked dependency, MSRV and platform record (Q2): `docs/dependencies.md` states the
+  declared MSRV and the rule that raising it is breaking, the backend as the ceiling on
+  feature work (A0-A3, each naming the missing primitive), the feature-to-dependency
+  mapping, every direct dependency with its locked version, the duplicated RustCrypto
+  trait families and which consumer forces each, the coordinated-upgrade sequence, the
+  compile-time refusals that make SHA-1/DES/3DES key-encryption schemes unreachable, and
+  the single advisory ignore with its mitigation. `tests/dependency_policy.rs` (8 tests)
+  asserts all of it against `Cargo.toml`, `Cargo.lock` and `.cargo/audit.toml` - including
+  that `dev-dependencies` stays empty and `src/` contains no `unsafe`, process, network or
+  filesystem access. `scripts/dependency-report.sh` regenerates the inputs. No dependency
+  changed. See ADR 0036.
+
+### Added
+
 - A performance baseline harness and its invariants (Q1): `examples/perf_baseline.rs`
   measures the axes the roadmap names — recipient counts, repeated key conversion, KDF
   cost, post-quantum encodings, the new parsers — printing markdown or `--json` with a
