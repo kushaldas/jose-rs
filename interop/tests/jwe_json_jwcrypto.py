@@ -13,7 +13,9 @@ Three things are checked per (alg, enc) combination:
 2b. the same pair with **external additional authenticated data** (RFC 7516
    §7.2.1) in play, including the requirement that jose-rs refuses the message
    when the out-of-band bytes are withheld.
-3. the shape jwcrypto produces by default — ``alg``/``kid`` in the
+3. the **general** serialization (RFC 7516 §7.2.1) with two recipients, both
+   directions, including that a recipient element may not carry `enc`;
+4. the shape jwcrypto produces by default — ``alg``/``kid`` in the
    per-recipient unprotected ``header`` member, as RFC 7516 §A.5 does — is read
    *and* policed: a key that pins the algorithm accepts it, a message whose
    unauthenticated ``alg`` has been tampered with is refused
@@ -275,6 +277,70 @@ def check_unprotected_alg_shape(binary: str, alg: str, enc: str) -> None:
     assert reported.get("alg") == alg, reported
 
 
+def check_general_serialization(binary: str, alg: str, enc: str) -> None:
+    """General JWE JSON Serialization (RFC 7516 §7.2.1), both directions.
+
+    Two recipients, one ciphertext. ``dir`` is skipped: direct key agreement
+    conveys no encrypted key, so a second recipient cannot be represented —
+    jwcrypto, panva and jose-rs all refuse it, which is itself worth knowing.
+    """
+    if alg == "dir":
+        return
+    key_a = rust(binary, "gen-key", alg, enc, {})
+    key_b = rust(binary, "gen-key", alg, enc, {})
+
+    # jwcrypto -> jose-rs.
+    token = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({"alg": alg, "enc": enc, **EXTRA_HEADER}),
+        recipient=jwk.JWK(**key_a),
+    )
+    token.add_recipient(jwk.JWK(**key_b))
+    message = json.loads(token.serialize())
+    assert isinstance(message.get("recipients"), list), message.keys()
+    assert len(message["recipients"]) == 2, message["recipients"]
+    assert all(isinstance(r.get("encrypted_key"), str) for r in message["recipients"]), (
+        message["recipients"]
+    )
+    for index, key in enumerate((key_a, key_b)):
+        decrypted = rust(binary, "decrypt-general", alg, enc, {
+            "jwk": key,
+            "jwe": json.dumps(message),
+            "recipient": index,
+        })
+        assert base64.urlsafe_b64decode(decrypted["plaintext_b64u"] + "==") == PLAINTEXT, (
+            f"recipient {index} did not decrypt"
+        )
+        assert decrypted["recipient_count"] == 2, decrypted
+
+    # jose-rs -> jwcrypto. jwcrypto selects the recipient by trying the key, so
+    # each key is simply handed over and must find its own element.
+    produced = rust(binary, "encrypt-general", alg, enc, {
+        "jwks": [key_a, key_b],
+        "plaintext_b64u": b64u(PLAINTEXT),
+        "header": EXTRA_HEADER,
+    })
+    emitted = json.loads(produced["jwe"])
+    assert len(emitted.get("recipients", [])) == 2, emitted.keys()
+    assert "unprotected" not in emitted, emitted.keys()
+    for key in (key_a, key_b):
+        received = jwe.JWE()
+        received.deserialize(produced["jwe"])
+        received.decrypt(jwk.JWK(**key))
+        assert received.payload == PLAINTEXT, "jwcrypto could not open our general JWE"
+
+    # A recipient element cannot carry `enc`: it decides how the ciphertext and
+    # tag octets are split, so it has to be integrity protected (ADR 0013).
+    tampered = json.loads(json.dumps(message))
+    tampered["recipients"][0]["header"] = {"enc": "A128GCM"}
+    stderr = rust_expect_failure(binary, "decrypt-general", alg, enc, {
+        "jwk": key_a,
+        "jwe": json.dumps(tampered),
+        "recipient": 0,
+    })
+    assert "integrity protected" in stderr, stderr
+
+
 def main(binary: str) -> None:
     """Verify each producer using the other implementation."""
     for alg, enc in COMBOS:
@@ -282,6 +348,7 @@ def main(binary: str) -> None:
         check_jwcrypto_to_rust(binary, alg, enc)
         check_external_aad_both_directions(binary, alg, enc)
         check_unprotected_alg_shape(binary, alg, enc)
+        check_general_serialization(binary, alg, enc)
     print(json.dumps({
         "cell": "jwe-json-jwcrypto",
         "result": "PASS",

@@ -551,49 +551,65 @@ pub(crate) fn produce_cek(
     alg: JweAlgorithm,
     enc: JweEncryption,
 ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
-    let cek_len = enc.cek_size();
+    // Direct key agreement: the key *is* the CEK, so there is nothing to wrap
+    // and no `encrypted_key` member to emit.
+    if alg == JweAlgorithm::Dir {
+        check_dir_key(key, enc)?;
+        return Ok((Zeroizing::new(key.to_vec()), Vec::new()));
+    }
+    let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
+    let wrapped = wrap_cek(&cek, key, alg, enc)?;
+    Ok((cek, wrapped))
+}
 
+/// Wrap an existing CEK for one recipient.
+///
+/// Split out of [`produce_cek`] because the General JWE Serialization
+/// (RFC 7516 §7.2.1) encrypts the *same* CEK once per recipient: content
+/// encryption happens a single time and only the key-management step repeats.
+///
+/// # Errors
+///
+/// [`JoseError::UnsupportedAlgorithm`] for `dir` (which conveys no key) or
+/// unimplemented key management, [`JoseError::Key`] for a wrong-length KEK,
+/// [`JoseError::Crypto`] for a wrap failure.
+pub(crate) fn wrap_cek(
+    cek: &[u8],
+    key: &[u8],
+    alg: JweAlgorithm,
+    _enc: JweEncryption,
+) -> Result<Vec<u8>> {
     match alg {
-        // Direct: the provided key *is* the CEK.
-        JweAlgorithm::Dir => {
-            if key.len() != cek_len {
-                return Err(JoseError::Key(format!(
-                    "dir: key length {} does not match required CEK size {}",
-                    key.len(),
-                    cek_len
-                )));
-            }
-            Ok((Zeroizing::new(key.to_vec()), Vec::new()))
-        }
+        // `dir` has no per-recipient key: the shared key is the CEK itself.
+        // Asking to "wrap it for another recipient" is asking for a second copy
+        // of the CEK, which is not what direct key agreement means.
+        JweAlgorithm::Dir => Err(JoseError::UnsupportedAlgorithm(
+            "dir conveys no encrypted key, so a general JWE cannot address a second recipient; \
+             use a key-wrapping or key-transport algorithm to reach several recipients"
+                .into(),
+        )),
 
         // AES Key Wrap.
         JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
             check_kek_size(alg, key)?;
             let kw_alg = jwe_alg_to_keywrap(alg)?;
-            let cek = Zeroizing::new(content::random_bytes(cek_len));
-            let wrapped =
-                kryptering::keywrap::wrap(kw_alg, key, &cek).map_err(JoseError::Crypto)?;
-            Ok((cek, wrapped))
+            kryptering::keywrap::wrap(kw_alg, key, cek).map_err(JoseError::Crypto)
         }
 
         // RSA-OAEP.
         JweAlgorithm::RsaOaep256 => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = Zeroizing::new(content::random_bytes(cek_len));
-            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                .map_err(JoseError::Crypto)?;
-            Ok((cek, encrypted))
+            kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, cek, None)
+                .map_err(JoseError::Crypto)
         }
 
         #[cfg(feature = "deprecated")]
         JweAlgorithm::RsaOaep => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = Zeroizing::new(content::random_bytes(cek_len));
-            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                .map_err(JoseError::Crypto)?;
-            Ok((cek, encrypted))
+            kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, cek, None)
+                .map_err(JoseError::Crypto)
         }
 
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
@@ -601,6 +617,19 @@ pub(crate) fn produce_cek(
             alg.as_str()
         ))),
     }
+}
+
+/// Check a `dir` key against the CEK size the content algorithm requires.
+fn check_dir_key(key: &[u8], enc: JweEncryption) -> Result<()> {
+    let cek_len = enc.cek_size();
+    if key.len() != cek_len {
+        return Err(JoseError::Key(format!(
+            "dir: key length {} does not match required CEK size {}",
+            key.len(),
+            cek_len
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -972,18 +1001,91 @@ pub(crate) fn encrypt_core(
         header_b64.len() + aad_len + content::base64url_len(plaintext.len()) + 4,
     )?;
 
-    // 1. Generate or use CEK, produce encrypted key.
-    let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
+    let (core, wrapped) = encrypt_core_multi(header, &[key], plaintext, alg, enc, opts, aad_b64)?;
+    Ok(EncryptedCore {
+        encrypted_key: wrapped.into_iter().next().unwrap_or_default(),
+        ..core
+    })
+}
 
-    // 2. Content encryption.
+/// Shared body of a general-serialization encryption.
+///
+/// The whole emit-side policy runs **once** — the protected header, the AAD
+/// input and the content encryption are shared by every recipient — and only
+/// key management repeats, which is what RFC 7516 §7.2.1 requires: one
+/// ciphertext, one encrypted CEK per recipient.
+///
+/// All recipients share the key-management algorithm. Per-recipient algorithms
+/// would put `alg` in the element's unprotected header, where it is not
+/// integrity protected, and this crate will not *emit* an algorithm a recipient
+/// cannot authenticate (ADR 0013).
+///
+/// Returns the shared envelope plus `keys[i]`'s wrapped CEK, positionally.
+pub(crate) fn encrypt_core_multi(
+    header: &JoseHeader,
+    keys: &[&[u8]],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+    aad_b64: Option<&str>,
+) -> Result<(EncryptedCore, Vec<Vec<u8>>)> {
+    let Some((&first, rest)) = keys.split_first() else {
+        return Err(JoseError::InvalidHeader(
+            "a JWE must name at least one recipient key".into(),
+        ));
+    };
+
+    if header.alg != alg.as_str() {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header alg {} does not match JWE algorithm {}",
+            header.alg,
+            alg.as_str()
+        )));
+    }
+    if header.enc.as_deref() != Some(enc.as_str()) {
+        return Err(JoseError::InvalidHeader(format!(
+            "protected header enc {:?} does not match JWE encryption {}",
+            header.enc,
+            enc.as_str()
+        )));
+    }
+    validate_encrypt_header(header)?;
+    let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
+
+    // The ciphertext is at least as long as the plaintext, so refuse before any
+    // key wrapping or encryption when the token cannot possibly fit. The
+    // external AAD (plus its `.` separator) is part of the serialized message,
+    // so it counts against the limit too, as does each additional recipient's
+    // encrypted key.
+    let aad_len = aad_b64.map_or(0, |aad| aad.len() + 1);
+    let extra_keys_len = content::base64url_len(plaintext.len()).saturating_mul(rest.len());
+    crate::ensure_emit_size(
+        header_b64.len() + aad_len + content::base64url_len(plaintext.len()) + 4 + extra_keys_len,
+    )?;
+
+    // 1. Generate or use the CEK, wrap it for the first recipient.
+    let (cek, first_wrapped) = produce_cek(first, alg, enc)?;
+
+    // 2. Content encryption — once, over the shared AAD input.
     let aad = aad_input(&header_b64, aad_b64);
     let (iv, ciphertext, tag) = content::content_encrypt(enc, &cek, plaintext, &aad)?;
 
-    Ok(EncryptedCore {
-        header_b64,
-        encrypted_key,
-        iv,
-        ciphertext,
-        tag,
-    })
+    // 3. Same CEK, wrapped for each remaining recipient.
+    let mut wrapped = Vec::with_capacity(keys.len());
+    wrapped.push(first_wrapped);
+    for key in rest {
+        wrapped.push(wrap_cek(&cek, key, alg, enc)?);
+    }
+
+    Ok((
+        EncryptedCore {
+            header_b64,
+            encrypted_key: Vec::new(),
+            iv,
+            ciphertext,
+            tag,
+        },
+        wrapped,
+    ))
 }

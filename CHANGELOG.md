@@ -31,6 +31,14 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `crit` and the unimplemented key-agreement parameters are refused in
   unprotected positions outright. jose-rs never emits unprotected parameters.
   See ADR 0013.
+- The **General JWE JSON Serialization** (RFC 7516 §7.2.1, multiple recipients
+  sharing one ciphertext) is implemented in `jwe::general`: `GeneralJwe` parses
+  and re-serializes it, `encrypt_general*` addresses several recipients with one
+  CEK and one content encryption, and decryption is scoped to a recipient the
+  caller names — an element index, or the key's own `kid` — because the header
+  the content tag is validated under is per-recipient. Recipient arrays are
+  bounded at `MAX_RECIPIENTS = 32`, per-recipient header names must be disjoint
+  from the shared ones, and `dir` cannot address two recipients. See ADR 0014.
 
 ### Internal
 

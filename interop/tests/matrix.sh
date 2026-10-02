@@ -191,6 +191,80 @@ run_jwe_cell() {
 # emitted an `aad` member, and (b) that the consumer *refuses* the same message
 # when the out-of-band bytes are withheld — i.e. the peer really folded them
 # into the content AAD input rather than shipping them as decoration.
+# run_jwe_general_cell <direction> <alg:enc>
+#
+# General JWE JSON Serialization (RFC 7516 §7.2.1): one ciphertext, one element
+# per recipient. Both producers address two recipients; both consumers must open
+# the right element. The asymmetry is the point: panva's `generalDecrypt` tries
+# the key against each element itself, while jose-rs requires the caller to name
+# the recipient (or to name it through the key's own kid), because the header
+# the content tag is validated under is per-recipient.
+run_jwe_general_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_a="$VECTORS/${CELL}.key-a.json"
+  local key_b="$VECTORS/${CELL}.key-b.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  # `dir` conveys no encrypted key, so it cannot address a second recipient —
+  # RFC 7516 says so, and panva enforces it on emit. The runner only feeds us
+  # key-wrapping pairs; assert it rather than assume it.
+  [ "$alg" = "dir" ] && { echo "general JWE cannot use dir" >&2; return 1; }
+
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_a"
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_b"
+  "$JQ" -n --argjson a "$(cat "$key_a")" --argjson b "$(cat "$key_b")" \
+    --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwks:[$a,$b], plaintext_b64u:$p, header:($h - ["tenant"])}' \
+    | "$producer" encrypt-general --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+
+  # Shape: a recipients array of two elements, each with its own encrypted key,
+  # over one shared ciphertext. No shared unprotected header is emitted.
+  printf '%s' "$jwe" | "$JQ" -e '
+    (.protected | type) == "string" and
+    (.ciphertext | type) == "string" and
+    (.recipients | type) == "array" and
+    (.recipients | length) == 2 and
+    (.recipients | all(.encrypted_key | type == "string")) and
+    ((has("unprotected") | not))
+  ' > /dev/null || { echo "general JWE members wrong for $alg: $jwe" >&2; return 1; }
+
+  # Recipient 0, named explicitly, with key A.
+  "$JQ" -n --argjson jwk "$(cat "$key_a")" --arg jwe "$jwe" \
+    '{jwk:$jwk, jwe:$jwe, recipient:0}' \
+    | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "recipient 0 plaintext mismatch" >&2; return 1; }
+  "$JQ" -e '.recipient_count == 2' "$out_path" > /dev/null \
+    || { echo "recipient count wrong: $(cat "$out_path")" >&2; return 1; }
+
+  # Recipient 1, resolved from the key's own kid where the consumer supports
+  # that resolution, with key B.
+  "$JQ" -n --argjson jwk "$(cat "$key_b")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "recipient 1 plaintext mismatch" >&2; return 1; }
+
+  # The consumer that names recipients must also refuse to mix them up: key B
+  # cannot open recipient 0. (panva searches, so this is only assertable on the
+  # jose-rs side — recorded as a divergence in interop/README.md rather than
+  # faked here.)
+  if [ "$consumer" = rs ]; then
+    "$JQ" -e '.recipient == 1' "$out_path" > /dev/null \
+      || { echo "kid resolution picked the wrong recipient: $(cat "$out_path")" >&2; return 1; }
+    if "$JQ" -n --argjson jwk "$(cat "$key_b")" --arg jwe "$jwe" \
+        '{jwk:$jwk, jwe:$jwe, recipient:0}' \
+        | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "consumer opened recipient 0 with recipient 1's key" >&2
+      return 1
+    fi
+  fi
+}
+
 run_jwe_json_cell() {
   local direction="$1" alg="${2%%:*}" enc="${2#*:}" aad_b64u="${3:-}" unprot="${4:-no}"
   local key_path="$VECTORS/${CELL}.key.json"
@@ -356,6 +430,7 @@ run_cell() {
       jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-aad)
         run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
+      jwe-general) run_jwe_general_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
         [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
@@ -533,6 +608,15 @@ done
 # authenticate the ciphertext.
 for alg in "${ALGS_JWE[@]}"; do
   run_cell "js-encrypt-rust-decrypt" "$alg" "jwe-json-unprot" || true
+done
+
+# General JSON JWE with two recipients (RFC 7516 §7.2.1). `dir` is excluded:
+# direct key agreement conveys no encrypted key, so a second recipient is not
+# representable (RFC 7516 §5, and panva refuses it on emit).
+for alg in "A256KW:A256GCM" "A256KW:A128CBC-HS256"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-general" || true
+  done
 done
 
 # Duplicate-member negative vectors (L-4): does a last-key-wins JSON parser

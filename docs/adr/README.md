@@ -17,3 +17,4 @@ history.
 | [0011](0011-jwe-flattened-json-serialization.md) | Flattened JWE JSON Serialization requires a protected header | Accepted |
 | [0012](0012-jwe-external-aad.md) | External additional authenticated data is authenticated, never confidential | Accepted |
 | [0013](0013-jwe-unprotected-headers.md) | An unauthenticated `alg` is only ever read against a key that pins it | Accepted |
+| [0014](0014-jwe-general-serialization.md) | A recipient is named by the caller, never chosen by the library | Accepted |

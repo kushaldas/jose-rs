@@ -24,8 +24,9 @@
 //! the three locations must be disjoint (RFC 7516 §7.2.1). This crate never
 //! *emits* unprotected parameters.
 //!
-//! Still refused by name: `recipients`, the general syntax and multiple
-//! recipients (ADR 0014).
+//! A message carrying `recipients` is the *general* syntax and is refused here
+//! by name: parse it with [`crate::jwe::general::GeneralJwe`], which flattens to
+//! this module's type internally and so shares every rule below (ADR 0014).
 //!
 //! External additional authenticated data *is* supported: pass it with
 //! [`crate::jwe::JweEncryptOptions::with_external_aad`] when encrypting and
@@ -64,8 +65,8 @@ use crate::member_map::MemberMap;
 /// change how the ciphertext must be interpreted.
 const REJECTED_MEMBERS: &[(&str, &str)] = &[(
     "recipients",
-    "general JWE JSON serialization (multiple recipients) is not implemented \
-         by this crate version; use the flattened syntax or the compact serialization",
+    "this is a general JWE JSON serialization (RFC 7516 §7.2.1); parse it with \
+         jose_rs::jwe::general::GeneralJwe::from_json and decrypt a named recipient",
 )];
 
 /// Members that identify the object as a JWS rather than a JWE
@@ -73,7 +74,7 @@ const REJECTED_MEMBERS: &[(&str, &str)] = &[(
 ///
 /// Checked before `ciphertext` is reported missing so a mis-routed token
 /// produces "this is a JWS" instead of a confusing structural error.
-const JWS_MEMBERS: &[&str] = &["payload", "signatures", "signature"];
+pub(crate) const JWS_MEMBERS: &[&str] = &["payload", "signatures", "signature"];
 
 /// A flattened JWE JSON Serialization (RFC 7516 §7.2.2), parsed but not yet
 /// authenticated.
@@ -169,28 +170,7 @@ impl FlattenedJwe {
             }
         }
 
-        let protected = match map.take_string("protected")? {
-            None => {
-                // RFC 7516 §7.2.1 permits an absent protected header, but this
-                // crate always requires one: `enc` must be integrity protected
-                // (it decides how the ciphertext and tag octets are split), and
-                // a message with no protected header has nowhere to put it.
-                // ADR 0011 and ADR 0013.
-                return Err(JoseError::InvalidToken(
-                    "JWE JSON member \"protected\" is required by this crate: the content \
-                     encryption algorithm (\"enc\") must be integrity protected"
-                        .into(),
-                ));
-            }
-            Some(value) if value.is_empty() => {
-                return Err(JoseError::InvalidToken(
-                    "JWE JSON member \"protected\" must be absent rather than empty \
-                     (RFC 7516 §7.2.1)"
-                        .into(),
-                ))
-            }
-            Some(value) => value,
-        };
+        let protected = require_protected(&mut map)?;
         let unprotected = object_member(&mut map, "unprotected")?;
         // `header` is the *per-recipient* unprotected header in the flattened
         // syntax (RFC 7516 §7.2.2), not a JWS signature.
@@ -462,12 +442,33 @@ impl FlattenedJwe {
     }
 }
 
+/// Read the mandatory `protected` member (shared by both JSON syntaxes).
+///
+/// RFC 7516 §7.2.1 permits an absent protected header, but this crate always
+/// requires one: `enc` must be integrity protected (it decides how the
+/// ciphertext and tag octets are split), and a message with no protected header
+/// has nowhere to put it. ADR 0011 and ADR 0013.
+pub(crate) fn require_protected(map: &mut MemberMap) -> Result<String> {
+    match map.take_string("protected")? {
+        None => Err(JoseError::InvalidToken(
+            "JWE JSON member \"protected\" is required by this crate: the content encryption \
+             algorithm (\"enc\") must be integrity protected"
+                .into(),
+        )),
+        Some(value) if value.is_empty() => Err(JoseError::InvalidToken(
+            "JWE JSON member \"protected\" must be absent rather than empty (RFC 7516 §7.2.1)"
+                .into(),
+        )),
+        Some(value) => Ok(value),
+    }
+}
+
 /// Require a string member, with the RFC 7516 presence rules applied.
 ///
 /// An empty string is rejected: RFC 7516 §7.2.1 says a member whose value is
 /// empty MUST be absent, so accepting `""` would accept a message the sender
 /// could not have produced.
-fn require_member(map: &mut MemberMap, name: &str) -> Result<String> {
+pub(crate) fn require_member(map: &mut MemberMap, name: &str) -> Result<String> {
     match map.take_string(name)? {
         None => Err(JoseError::InvalidToken(format!(
             "JWE JSON member {name} is required"
@@ -506,7 +507,7 @@ const UNPROTECTED_FORBIDDEN: &[&str] = &[
 /// is refused: RFC 7516 §7.2.1 says the member MUST be absent when the
 /// corresponding header value is empty, and an empty object would otherwise be
 /// an ambiguous "present but says nothing" header location.
-fn object_member(
+pub(crate) fn object_member(
     map: &mut MemberMap,
     name: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
@@ -554,7 +555,7 @@ fn object_member(
 /// A name in two locations has no defined meaning — implementations disagree on
 /// which wins, which is exactly the ambiguity that header-injection attacks
 /// exploit. Enforced at parse time, so no code downstream has to decide.
-fn ensure_header_locations_disjoint(
+pub(crate) fn ensure_header_locations_disjoint(
     protected_b64: &str,
     unprotected: Option<&serde_json::Map<String, serde_json::Value>>,
     per_recipient: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -590,7 +591,7 @@ fn ensure_header_locations_disjoint(
 /// An explicit empty value is accepted here (and treated as absent) because
 /// several producers emit `"encrypted_key":""` for `dir`; it is never
 /// re-emitted by [`FlattenedJwe::to_json`].
-fn optional_member(map: &mut MemberMap, name: &str) -> Result<Option<String>> {
+pub(crate) fn optional_member(map: &mut MemberMap, name: &str) -> Result<Option<String>> {
     Ok(match map.take_string(name)? {
         None => None,
         Some(value) if value.is_empty() => None,
@@ -730,7 +731,7 @@ pub fn encrypt_flattened_with_jwk_header_options(
 /// data, which is what makes the `alg` binding check on the decrypt side
 /// meaningful. The error text is specific to these APIs so a caller can tell
 /// which entry point rejected the key.
-fn pinned_alg(jwk: &crate::jwk::Jwk) -> Result<JweAlgorithm> {
+pub(crate) fn pinned_alg(jwk: &crate::jwk::Jwk) -> Result<JweAlgorithm> {
     let alg = jwk
         .alg
         .as_deref()
@@ -930,7 +931,7 @@ pub fn decrypt_flattened_with_jwk_and_aad(
     decrypt_flattened_with_jwk_impl(jwk, jwe, Some(external_aad))
 }
 
-fn decrypt_flattened_with_jwk_impl(
+pub(crate) fn decrypt_flattened_with_jwk_impl(
     jwk: &crate::jwk::Jwk,
     jwe: &FlattenedJwe,
     external_aad: Option<&[u8]>,

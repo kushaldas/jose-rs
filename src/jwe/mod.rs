@@ -25,10 +25,17 @@
 //! and ADR 0013; this crate emits neither unprotected parameters nor anything
 //! it cannot itself decrypt.
 //!
-//! Not implemented, and refused by name rather than ignored: the General JSON
-//! Serialization (`recipients`, ADR 0014) and content compression (`zip`).
+//! The General JSON Serialization (`recipients`, multiple recipients sharing one
+//! ciphertext) is read and produced through [`general`]; decryption there is
+//! always scoped to one recipient the caller names, because the header the
+//! content tag is validated under is per-recipient (ADR 0014).
+//!
+//! Not implemented, and refused by name rather than ignored: content
+//! compression (`zip`), which this crate cannot decrypt and therefore will not
+//! emit.
 
 pub mod compact;
+pub mod general;
 pub mod json;
 
 /// Shared content-encryption implementation (crate-private).

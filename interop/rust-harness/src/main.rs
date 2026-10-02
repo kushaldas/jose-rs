@@ -23,6 +23,13 @@
 //!       `jwe` is the flattened JSON Serialization text. Both flattened
 //!       commands accept an optional `aad_b64u` (external additional
 //!       authenticated data, RFC 7516 §7.2.1).
+//!   encrypt-general  --alg <ALG> --enc <ENC> (stdin: {jwks, plaintext_b64u, header?, aad_b64u?}) -> {jwe}
+//!       RFC 7516 §7.2.1 general JSON Serialization, one recipient per entry of
+//!       `jwks`; `jwe` is again a JSON string.
+//!   decrypt-general  --alg <ALG> --enc <ENC> (stdin: {jwk, jwe, recipient?, aad_b64u?}) -> {ok, plaintext_b64u, recipient, protected_header, unprotected_header, recipient_count}
+//!       `recipient` names the array element to open; without it the harness
+//!       resolves the element from the key's own `kid`, which is what
+//!       `decrypt_general_with_jwk_by_kid` does.
 //!   sign-jwt       --alg <ALG>            (stdin: {jwk, claims}) -> JWT
 //!   verify-jwt     --alg <ALG>            (stdin: {jwk, jwt}) -> {ok, claims}
 //!
@@ -85,6 +92,8 @@ fn run() -> Result<()> {
         "decrypt-compact" => decrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
         "encrypt-flattened" => encrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-flattened" => decrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
+        "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
+        "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -484,5 +493,151 @@ fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
         plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
         protected_header: header,
         unprotected_header: None,
+    })
+}
+
+
+// ---------------------------------------------------------------------------
+// General JWE JSON Serialization (RFC 7516 §7.2.1)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct EncryptGeneralInput {
+    jwks: Vec<Jwk>,
+    plaintext_b64u: String,
+    #[serde(default)]
+    aad_b64u: Option<String>,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct DecryptGeneralInput {
+    jwk: Jwk,
+    jwe: String,
+    /// Which `recipients` element to open. Absent means "resolve from the key's
+    /// own `kid`", exercising the library's kid selection.
+    #[serde(default)]
+    recipient: Option<usize>,
+    #[serde(default)]
+    aad_b64u: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DecryptGeneralOutput {
+    ok: bool,
+    plaintext_b64u: String,
+    /// The element that was opened, so the driver can assert which recipient it
+    /// reached rather than trusting that the right one was chosen.
+    recipient: usize,
+    recipient_count: usize,
+    protected_header: JoseHeader,
+    /// The union of shared and per-recipient unprotected members that this
+    /// recipient computes its header from — reported as data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unprotected_header: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Encrypt to every key in `jwks`, each getting its own `recipients` element.
+fn encrypt_general(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptGeneralInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    for jwk in &input.jwks {
+        if jwk.alg.as_deref() != Some(alg) {
+            bail!("JWK alg {:?} does not match expected {alg}", jwk.alg);
+        }
+    }
+    let enc_v = JweEncryption::from_str(enc)?;
+    let header = build_header(
+        JoseHeader::for_jwe(JweAlgorithm::from_str(alg)?, enc_v),
+        input.header,
+    )?;
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(aad_b64u) = &input.aad_b64u {
+        let aad = URL_SAFE_NO_PAD
+            .decode(aad_b64u.as_bytes())
+            .context("decoding aad_b64u")?;
+        opts = opts.with_external_aad(aad);
+    }
+    let refs: Vec<&Jwk> = input.jwks.iter().collect();
+    let jwe = jose_rs::jwe::general::encrypt_general_with_jwks_options(
+        &header, &refs, &plaintext, enc_v, &opts,
+    )?;
+    emit(&EncryptCompactOutput {
+        jwe: jwe.to_json()?,
+    })
+}
+
+/// Open one recipient of a general JSON Serialization.
+fn decrypt_general(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptGeneralInput = serde_json::from_str(&raw)?;
+    let jwe = jose_rs::jwe::general::GeneralJwe::from_json(&input.jwe)?;
+
+    // Which element to open: the driver's choice, or the key's own `kid`.
+    let index = match input.recipient {
+        Some(index) => index,
+        None => jwe
+            .recipient_kids()
+            .iter()
+            .position(|kid| *kid == input.jwk.kid.as_deref())
+            .ok_or_else(|| anyhow!("no recipient carries this key's kid"))?,
+    };
+
+    // Wiring sanity for the driver only: jose-rs itself enforces the key's
+    // pinned `alg` against whatever the recipient's header claims.
+    let header = jwe
+        .peek_jose_header_for(index)?
+        .get("alg")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if header != alg {
+        bail!("recipient {index} alg {header} does not match expected {alg}");
+    }
+    let reported_enc = jwe
+        .peek_jose_header_for(index)?
+        .get("enc")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if reported_enc != enc {
+        bail!("recipient {index} enc {reported_enc} does not match expected {enc}");
+    }
+
+    let plaintext = match &input.aad_b64u {
+        Some(aad_b64u) => jose_rs::jwe::general::decrypt_general_with_jwk_and_aad(
+            &input.jwk,
+            &jwe,
+            index,
+            &URL_SAFE_NO_PAD
+                .decode(aad_b64u.as_bytes())
+                .context("decoding aad_b64u")?,
+        )?,
+        None => jose_rs::jwe::general::decrypt_general_with_jwk(&input.jwk, &jwe, index)?,
+    };
+
+    let protected = jose_rs::jwe::general::decode_header(&jwe)?
+        .ok_or_else(|| anyhow!("general JWE carries no protected header"))?;
+    // Only the genuinely unauthenticated members, merged the way the recipient
+    // sees them: shared `unprotected` first, then this element's `header`.
+    let flat = jwe.flatten_for(index)?;
+    let mut merged = serde_json::Map::new();
+    if let Some(unprotected) = &flat.unprotected {
+        merged.extend(unprotected.clone());
+    }
+    if let Some(per_recipient) = &flat.header {
+        merged.extend(per_recipient.clone());
+    }
+    emit(&DecryptGeneralOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        recipient: index,
+        recipient_count: jwe.recipient_count(),
+        protected_header: protected,
+        unprotected_header: (!merged.is_empty()).then_some(merged),
     })
 }

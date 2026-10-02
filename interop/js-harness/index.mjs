@@ -20,6 +20,8 @@ import {
   compactDecrypt,
   FlattenedEncrypt,
   flattenedDecrypt,
+  GeneralEncrypt,
+  generalDecrypt,
 } from 'jose'
 
 // Node's "ExperimentalWarning: ML-DSA-* Web Crypto API algorithm…" is
@@ -220,6 +222,67 @@ async function decryptFlattened(alg, enc) {
   emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
 }
 
+/// General JWE JSON Serialization (RFC 7516 §7.2.1), emit side.
+///
+/// jose-rs refuses to emit a *shared* unprotected header, so this is the only
+/// side of the pair that can produce one — which is exactly why the cell is
+/// worth running. Note that panva applies the same two structural rules we do:
+/// header names must be disjoint across the three locations, and `dir` /
+/// `ECDH-ES` may not address more than one recipient.
+async function encryptGeneral(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwks, plaintext_b64u, header, aad_b64u, unprotected, recipient_headers } =
+    JSON.parse(readStdin())
+  if (!Array.isArray(jwks) || jwks.length === 0) throw new Error('jwks must be a non-empty array')
+  for (const [name, value] of Object.entries({ header, unprotected })) {
+    if (value && ('alg' in value || 'enc' in value)) {
+      throw new Error(`${name} input must not override \`alg\` / \`enc\``)
+    }
+  }
+  for (const jwk of jwks) {
+    if (jwk.alg !== alg) throw new Error(`JWK alg ${jwk.alg} does not match expected ${alg}`)
+  }
+  const ge = new GeneralEncrypt(b64uDecode(plaintext_b64u))
+  ge.setProtectedHeader({ ...(header ?? {}), alg, enc })
+  if (unprotected) ge.setSharedUnprotectedHeader(unprotected)
+  for (const [i, jwk] of jwks.entries()) {
+    const recipient = ge.addRecipient(await importJWK(jwk, alg))
+    // One element per recipient, in order, each carrying the kid of its key.
+    if (recipient_headers?.[i]) recipient.setUnprotectedHeader(recipient_headers[i])
+  }
+  if (aad_b64u) ge.setAdditionalAuthenticatedData(b64uDecode(aad_b64u))
+  emit({ jwe: JSON.stringify(await ge.encrypt()) })
+}
+
+/// General JWE JSON Serialization, consume side.
+///
+/// panva resolves the recipient itself, trying the key against each element;
+/// jose-rs makes the caller name the recipient instead (ADR 0014). The reported
+/// headers are what panva authenticated, split the way it splits them.
+async function decryptGeneral(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { jwk, jwe, aad_b64u } = JSON.parse(readStdin())
+  const parsed = typeof jwe === 'string' ? JSON.parse(jwe) : jwe
+  const hdr = decodeProtectedHeader(parsed)
+  if (hdr.alg !== alg) throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
+  if (hdr.enc !== enc) throw new Error(`token enc ${hdr.enc} does not match expected ${enc}`)
+  const key = await importJWK(jwk, alg)
+  const out = await generalDecrypt(parsed, key, {
+    keyManagementAlgorithms: [alg],
+    contentEncryptionAlgorithms: [enc],
+    ...(aad_b64u ? { additionalAuthenticatedData: b64uDecode(aad_b64u) } : {}),
+  })
+  emit({
+    ok: true,
+    plaintext_b64u: b64uEncode(out.plaintext),
+    protected_header: out.protectedHeader,
+    recipient_count: (parsed.recipients ?? []).length,
+    unprotected_header: { ...(out.sharedUnprotectedHeader ?? {}), ...(out.unprotectedHeader ?? {}) },
+  })
+}
+
 async function main() {
   const { cmd, alg, enc } = parseArgs(process.argv.slice(2))
   switch (cmd) {
@@ -233,6 +296,8 @@ async function main() {
     case 'decrypt-compact': return decryptCompact(alg, enc)
     case 'encrypt-flattened': return encryptFlattened(alg, enc)
     case 'decrypt-flattened': return decryptFlattened(alg, enc)
+    case 'encrypt-general': return encryptGeneral(alg, enc)
+    case 'decrypt-general': return decryptGeneral(alg, enc)
     default: throw new Error(`unknown subcommand: ${cmd}`)
   }
 }

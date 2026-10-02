@@ -65,7 +65,9 @@ pins the unprotected-header boundary from ADR 0013: the RFC §A.5 shape (enc
 protected, `alg` unprotected) decrypts against a pinned key, a tampered
 unprotected `alg` is refused by the pin, and jwcrypto's default output (no
 protected member at all, `enc` unprotected) is refused because an
-unauthenticated `enc` is a substitution attack rather than a trust question. It also **pins the documented divergence**
+unauthenticated `enc` is a substitution attack rather than a trust question.
+It also runs the **general** serialization with two recipients in both
+directions, and asserts that a recipient element carrying `enc` is refused. It also **pins the documented divergence**
 from ADR 0011: jwcrypto's default flattened output puts `alg`/`enc` in the
 per-recipient *unprotected* `header` member (the shape RFC 7516 §A.5 uses),
 which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
@@ -77,7 +79,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **67 cells**:
+Full matrix is **71 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -87,6 +89,7 @@ Full matrix is **67 cells**:
 | JWE compact | `jwe` | 4 alg:enc × 2 directions = 8 | `dir:A256GCM`, `dir:A128CBC-HS256`, `A256KW:A256GCM`, `A256KW:A128CBC-HS256`; same custom header; plaintext + header compared |
 | JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | JWE flattened JSON + external AAD | `jwe-json-aad` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.1 `aad` member: emitted with the right encoding, decryptable by the peer **with** the out-of-band bytes, and **refused without them** |
+| JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
 

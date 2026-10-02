@@ -7,7 +7,7 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 | Standard | RFC | Coverage |
 |---|---|---|
 | JWS | [7515](https://www.rfc-editor.org/rfc/rfc7515) | Compact + Flattened JSON + General JSON serialization |
-| JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact serialization + Flattened JSON serialization (single recipient, protected header; see *Security notes*) |
+| JWE | [7516](https://www.rfc-editor.org/rfc/rfc7516) | Compact + Flattened JSON + General JSON serialization (protected header required; decryption of a general JWE is scoped to a caller-named recipient — see *Security notes*) |
 | JWK | [7517](https://www.rfc-editor.org/rfc/rfc7517) | RSA / EC / oct / OKP / AKP key types (see *Supported algorithms* for curve coverage), JWK Sets, Thumbprints ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638)), key generation |
 | JWT | [7519](https://www.rfc-editor.org/rfc/rfc7519) | Claims, validation (exp/nbf/iss/aud/sub), nested JWT |
 | JWA | [7518](https://www.rfc-editor.org/rfc/rfc7518) | Implemented signature, encryption, and key management algorithms |
@@ -232,15 +232,24 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   supported via `sign_with_options` / `verify_with_options`, and `b64`,
   when present, must be listed in `crit` (RFC 7797 §6).
 - **JWE JSON Serialization is protected-header-only.**
-  `jwe::json::FlattenedJwe` (RFC 7516 §7.2.2) requires a `protected` member,
-  because `enc` must be integrity protected, and refuses `recipients` by name
-  rather than ignoring it. The unprotected header members (`unprotected`,
-  `header`) **are** read, with the disjointness RFC 7516 §7.2.1 requires, under
-  one rule: an unauthenticated `alg` is accepted only for a key that pins it
-  (the JWK APIs), so the header value is checked against the key instead of
-  believed; the raw-key APIs refuse it. `enc`, `zip`, `crit` and the
-  key-agreement parameters can never sit unprotected. jose-rs never *emits*
-  unprotected parameters (ADR 0013).
+  `jwe::json::FlattenedJwe` (RFC 7516 §7.2.2) and `jwe::general::GeneralJwe`
+  (RFC 7516 §7.2.1) both require a `protected` member, because `enc` must be
+  integrity protected. The unprotected header members (`unprotected`, `header`)
+  **are** read, with the disjointness RFC 7516 §7.2.1 requires, under one rule:
+  an unauthenticated `alg` is accepted only for a key that pins it (the JWK
+  APIs), so the header value is checked against the key instead of believed; the
+  raw-key APIs refuse it. `enc`, `zip`, `crit` and the key-agreement parameters
+  can never sit unprotected. jose-rs never *emits* unprotected parameters
+  (ADR 0013).
+- **A general JWE is decrypted for a recipient you name.** In the general
+  serialization the header the content tag is validated under is
+  `protected ∪ unprotected ∪ recipients[i].header` — per recipient — so
+  "decrypt this" is not a complete instruction. `jwe::general` therefore takes
+  either the element index or the *key's own* `kid` (zero matches and several
+  matches are both errors) and never searches the array the way panva's
+  `generalDecrypt` does. Recipient arrays are bounded at 32 elements, because
+  their length is attacker-chosen and each element costs a key-management
+  operation (ADR 0014).
   External additional authenticated data (`aad`) **is** supported:
   `JweEncryptOptions::with_external_aad` /
   `JweDecryptOptions::with_external_aad` bind out-of-band bytes to the
