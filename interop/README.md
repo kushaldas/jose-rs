@@ -53,6 +53,8 @@ interop/.venv/bin/python interop/tests/jwe_ecdh_es_jwcrypto.py interop/rust-harn
 interop/.venv/bin/python interop/tests/pem_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/pkcs8_encrypted_cryptography.py
 interop/.venv/bin/python interop/tests/cert_cryptography.py
+interop/.venv/bin/python interop/tests/jwt_claims_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+node interop/js-harness/thumbprint-uri.mjs
 ```
 
 The last check needs `cryptography` (already a `jwcrypto` dependency) and takes
@@ -81,6 +83,26 @@ per-recipient *unprotected* `header` member (the shape RFC 7516 §A.5 uses),
 which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
+
+### JWT claim ambiguity against jwcrypto (`jwt_claims_jwcrypto.py`)
+
+The point of this suite is a payload shape no honest serializer produces:
+`{"exp":4102444800,"exp":1}`. jwcrypto's JWS layer signs and verifies it happily
+(the signature is valid), and Python's `json` — which is what most verifiers
+ultimately use — resolves it last-value-wins. So the token genuinely means two
+things, and jose-rs refuses it naming the duplicated member. The suite asserts
+both halves: the peer *accepts* (otherwise the test proves nothing) and we
+*refuse*. It also pins what both sides must agree on: fractional NumericDate
+text, integers above 2^53 arriving unrounded, and `null` registered claims
+reading as absent on our side while jwcrypto keeps the `null` it was given.
+
+### Thumbprint URIs against panva/jose (`thumbprint-uri.mjs`)
+
+RFC 9278 is a format specification with an worked example in §4, which makes a
+second implementation the right oracle: `ComputeJWKThumbprintURI` from jose 6.2.2
+must produce byte-identical URIs to `thumbprint_uri_sha256`, in both directions,
+across RSA/EC/OKP keys — plus the parser refusing a padded or wrong-length
+`#...` fragment. Requires `npm ci` in `interop/js-harness`.
 
 ### PBES2 against jwcrypto (`jwe_pbes2_jwcrypto.py`)
 

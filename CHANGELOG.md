@@ -4,6 +4,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+### Changed
+
+- JWT claim parsing and serialization are now unambiguous by construction (L1):
+  `Claims::from_json_bytes` rejects payloads with duplicate top-level members
+  (naming the member) and enforces `MAX_TOKEN_BYTES` before parsing, and
+  `Claims::to_json_vec` refuses to serialize a claim set whose unregistered map
+  repeats a registered name — which would have emitted the member twice. All JWT
+  entry points, including nested and inspection paths, go through these.
+  `Claims::from_json_value` documents that a `Value` has already resolved any
+  duplicate. Documented semantics: `null` registered claims read as absent,
+  unregistered claims keep their `null`, NumericDate and large integers keep
+  exact precision. See ADR 0029.
+
 ### Added
 
 - Executable capability reporting (L0): `jose_rs::capability` reports, for this build,

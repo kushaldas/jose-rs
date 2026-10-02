@@ -36,7 +36,8 @@ pub fn encode_with_options(
     claims: &Claims,
     opts: &crate::jws::SignOptions,
 ) -> Result<String> {
-    let payload = serde_json::to_vec(claims)?;
+    // The claims' own path: it refuses to emit a duplicate member (ADR 0029).
+    let payload = claims.to_json_vec()?;
     crate::jws::compact::sign_with_options(signer, &payload, header, opts)
 }
 
@@ -53,7 +54,8 @@ pub fn decode(
 ) -> Result<Claims> {
     let payload = crate::jws::compact::verify(verifier, token)?;
     let header = crate::jws::compact::decode_header(token)?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     validation.validate_with_header(&claims, &header)?;
     Ok(claims)
 }
@@ -186,7 +188,8 @@ pub fn encode_with_jwk_options(
     claims: &Claims,
     opts: &crate::jws::SignOptions,
 ) -> Result<String> {
-    let payload = serde_json::to_vec(claims)?;
+    // The claims' own path: it refuses to emit a duplicate member (ADR 0029).
+    let payload = claims.to_json_vec()?;
     crate::jws::compact::sign_with_jwk_options(jwk, &payload, header, opts)
 }
 
@@ -276,7 +279,8 @@ pub fn decode_with_jwk(
 ) -> Result<Claims> {
     let payload = crate::jws::compact::verify_with_jwk(jwk, token)?;
     let header = crate::jws::compact::decode_header(token)?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     validation.validate_with_header(&claims, &header)?;
     Ok(claims)
 }
@@ -362,7 +366,8 @@ pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
         return Err(JoseError::InvalidToken("expected 3 parts".into()));
     }
     let payload = crate::base64url::decode(parts[1])?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     Ok((header, claims))
 }
 
