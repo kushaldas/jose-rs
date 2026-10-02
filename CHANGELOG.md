@@ -19,6 +19,18 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- Explicit bounded JWK Set selection (L3): `jwk::selection` with
+  `SelectionPolicy` (attempt budget, `Fallback::{Refuse,
+  TryWhenUnaddressable, TryAll}`, `require_kid`), `select`/`JwkSet::select`
+  returning a deterministic candidate list, `SetLimits` +
+  `JwkSet::from_json_with_limits`, and three-state `EntryStatus` diagnostics
+  (`Usable` / `Unsupported` / `Invalid`) that describe every entry and keep its
+  identifiers instead of filtering it out. `jwt::decode_with_jwkset_policy` is
+  the policy-aware decode. Existing entry points (`from_json`,
+  `decode_with_jwkset`) keep their current unbounded behaviour. See ADR 0031.
+
+### Added
+
 - JWK-aware JSON JWS APIs (L2): `jws::json::{sign_flattened_with_jwk,
   sign_flattened_with_jwk_opts, sign_flattened_detached_with_jwk,
   sign_flattened_detached_with_jwk_opts, verify_flattened_with_jwk,

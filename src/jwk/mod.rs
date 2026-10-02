@@ -7,6 +7,7 @@ pub mod encrypted_pkcs8;
 pub mod generate;
 pub mod import;
 pub mod pem;
+pub mod selection;
 pub mod thumbprint;
 
 pub use cert::{
@@ -398,6 +399,60 @@ impl JwkSet {
     /// checks happen when a key is used. Malformed typed fields still fail.
     pub fn from_json(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(JoseError::from)
+    }
+
+    /// Parse a JWK Set under explicit import budgets.
+    ///
+    /// Identical to [`from_json`](Self::from_json) except that the document size and entry count
+    /// are checked first, so a published set cannot cost more to parse than the caller decided.
+    /// Both checks run *before* the entries are turned into keys, which is the only order in
+    /// which a budget does anything: after parsing, the memory is already spent.
+    ///
+    /// [`from_json`](Self::from_json) deliberately keeps its unbounded behaviour — a limit
+    /// that appears silently
+    /// is a breaking change wearing a compatibility mask. New code that ingests sets from
+    /// elsewhere should prefer this entry point.
+    ///
+    /// ```
+    /// use jose_rs::jwk::JwkSet;
+    /// use jose_rs::jwk::selection::SetLimits;
+    ///
+    /// let text = r#"{"keys":[{"kty":"oct","k":"AAAA"}]}"#;
+    /// let set = JwkSet::from_json_with_limits(text, &SetLimits::default())?;
+    /// assert_eq!(set.keys.len(), 1);
+    ///
+    /// let tiny = SetLimits { max_bytes: 8, ..Default::default() };
+    /// assert!(JwkSet::from_json_with_limits(text, &tiny).is_err());
+    /// # Ok::<(), jose_rs::JoseError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JoseError::Key`] when a budget is exceeded; otherwise as [`from_json`](Self::from_json).
+    pub fn from_json_with_limits(s: &str, limits: &selection::SetLimits) -> Result<Self> {
+        limits.check_bytes(s.len())?;
+        let set: Self = serde_json::from_str(s).map_err(JoseError::from)?;
+        limits.check_entries(set.keys.len())?;
+        Ok(set)
+    }
+
+    /// Describe every entry of this set, keeping identifiers and unusable entries.
+    ///
+    /// See [`selection::diagnostics`]; this is the same call as a method, because it is
+    /// something you ask *of* a set.
+    pub fn diagnostics(&self) -> Vec<selection::EntryDiagnostic> {
+        selection::diagnostics(self)
+    }
+
+    /// Resolve a token's `kid` into a bounded candidate list under a policy.
+    ///
+    /// See [`selection::select`].
+    pub fn select(
+        &self,
+        token_kid: Option<&str>,
+        policy: &selection::SelectionPolicy,
+    ) -> Result<selection::Selection<'_>> {
+        selection::select(self, token_kid, policy)
     }
 
     /// Serialize this JWK Set to a compact JSON string.

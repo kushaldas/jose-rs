@@ -84,6 +84,18 @@ which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
 
+### JWK Set selection against jwcrypto-published sets (`jwks_selection_jwcrypto.py`)
+
+Selection is policy rather than wire format, so the peer's job here is to supply
+realistic sets and tokens: three published kids, a token whose `kid` names a key
+nobody published, a kid-less ten-key set, and a JWKS that jose-rs emitted being
+consumed on the peer side. The suite pins that an unknown `kid` never falls
+through (under both safe fallback policies), that `Fallback::TryAll` really does
+sweep — so its documentation cannot rot — that exceeding the candidate budget is a
+budget error rather than a silent truncation, and that `secp256k1`/unknown-`kty`
+entries are reported `unsupported` while supported-kind-but-broken material is
+reported `invalid`.
+
 ### JSON JWS against jwcrypto (`jws_json_jwcrypto.py`)
 
 Flattened and General JWS through the JWK-aware APIs, in both directions, including

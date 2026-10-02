@@ -151,6 +151,8 @@ fn run() -> Result<()> {
         "verify-flattened-jwk" => verify_flattened_jwk(),
         "sign-general-jwk" => sign_general_jwk(),
         "verify-general-jwk" => verify_general_jwk(),
+        "decode-jwkset-policy" => decode_jwkset_policy(),
+        "diagnose-jwks" => diagnose_jwks(),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -650,6 +652,128 @@ fn verify_general_jwk() -> Result<()> {
             })
             .collect(),
     })
+}
+
+
+// ---------------------------------------------------------------------------
+// JWK Set selection (bounded, explicit policy)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PolicyInput {
+    #[serde(default = "default_max_candidates")]
+    max_candidates: usize,
+    /// "refuse" | "try-when-unaddressable" | "try-all"
+    #[serde(default = "default_fallback")]
+    fallback: String,
+    #[serde(default)]
+    require_kid: bool,
+}
+
+fn default_max_candidates() -> usize {
+    64
+}
+
+fn default_fallback() -> String {
+    "try-when-unaddressable".into()
+}
+
+#[derive(Deserialize)]
+struct DecodeJwkSetPolicyInput {
+    jwks: jose_rs::jwk::JwkSet,
+    jwt: String,
+    #[serde(default)]
+    policy: Option<PolicyInput>,
+    #[serde(default)]
+    require_kid: bool,
+}
+
+#[derive(Serialize)]
+struct DecodeJwkSetOutput {
+    claims: jose_rs::jwt::Claims,
+}
+
+fn decode_jwkset_policy() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecodeJwkSetPolicyInput = serde_json::from_str(&raw)?;
+    let policy_input = input.policy.unwrap_or(PolicyInput {
+        max_candidates: default_max_candidates(),
+        fallback: default_fallback(),
+        require_kid: false,
+    });
+    let fallback = match policy_input.fallback.as_str() {
+        "refuse" => jose_rs::jwk::selection::Fallback::Refuse,
+        "try-when-unaddressable" => jose_rs::jwk::selection::Fallback::TryWhenUnaddressable,
+        "try-all" => jose_rs::jwk::selection::Fallback::TryAll,
+        other => bail!("unknown fallback policy {other:?}"),
+    };
+    let mut policy = jose_rs::jwk::selection::SelectionPolicy {
+        max_candidates: policy_input.max_candidates,
+        fallback,
+        require_kid: policy_input.require_kid,
+    };
+    if input.require_kid {
+        policy.require_kid = true;
+    }
+    let validation = jose_rs::jwt::Validation::default();
+    let claims = jose_rs::jwt::decode_with_jwkset_policy(
+        &input.jwks,
+        &input.jwt,
+        &validation,
+        &policy,
+    )?;
+    emit(&DecodeJwkSetOutput { claims })
+}
+
+#[derive(Deserialize)]
+struct DiagnoseJwksInput {
+    keys: Vec<Jwk>,
+}
+
+#[derive(Serialize)]
+struct EntryReport {
+    index: usize,
+    kid: Option<String>,
+    kty: Option<String>,
+    crv: Option<String>,
+    /// "usable" | "unsupported" | "invalid" — the three states, kept distinct.
+    status: String,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiagnoseJwksOutput {
+    entries: Vec<EntryReport>,
+}
+
+fn diagnose_jwks() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DiagnoseJwksInput = serde_json::from_str(&raw)?;
+    let set = jose_rs::jwk::JwkSet { keys: input.keys };
+    let entries = set
+        .diagnostics()
+        .into_iter()
+        .map(|entry| {
+            let (status, reason) = match &entry.status {
+                jose_rs::jwk::selection::EntryStatus::Usable => ("usable", None),
+                jose_rs::jwk::selection::EntryStatus::Unsupported { reason } => {
+                    ("unsupported", Some(reason.clone()))
+                }
+                jose_rs::jwk::selection::EntryStatus::Invalid { reason } => {
+                    ("invalid", Some(reason.clone()))
+                }
+            };
+            EntryReport {
+                index: entry.index,
+                kid: entry.kid,
+                kty: entry.kty,
+                crv: entry.crv,
+                status: status.to_string(),
+                reason,
+            }
+        })
+        .collect();
+    emit(&DiagnoseJwksOutput { entries })
 }
 
 
