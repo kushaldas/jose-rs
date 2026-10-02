@@ -37,8 +37,8 @@ new behaviour/policy.
 
 | # | Commit | Plan item | New artefacts |
 |---|---|---|---|
-| 1 | `refactor(jwe): split envelope internals from compact API` | J0 | `src/jwe/internal.rs`, `src/jwe/content.rs` (behaviour-preserving) |
-| 2 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, ADR 0011, `tests/jwe_json.rs`, jwcrypto + node interop |
+| 1 | `refactor(jwe): split envelope internals from compact API` | J0 | **done** (`4124c01`) — `src/jwe/internal.rs`, `src/jwe/content.rs` (behaviour-preserving) |
+| 2 | `feat(jwe): flattened JSON serialization` | J1 | **done** (`22a02fc`) — `src/jwe/json.rs`, ADR 0011, `tests/jwe_json.rs`, jwcrypto + node interop |
 
 > **ADR numbering.** The numbers in this table were assigned before the
 > repository's ADR sequence was checked. Accepted ADRs ran 0001–0010 when the
@@ -48,18 +48,18 @@ new behaviour/policy.
 > a header the caller never agreed to, so recipient selection is caller-named
 > only), D1 = 0015, K0 = 0016. Later rows still carry their pre-flight numbers and
 > must be renumbered when written.
-| 3 | `feat(jwe): external AAD for JSON serializations` | J2 | options + ADR 0013, `tests/jwe_aad.rs`, interop |
-| 4 | `feat(jwe): shared and per-recipient unprotected headers` | J3 | header-union types, ADR 0014, `tests/jwe_unprotected.rs` |
-| 5 | `feat(jwe): general JSON serialization` | J4a | general envelope, ADR 0015, tests |
-| 6 | `feat(jwe): multiple recipients with bounded selection` | J4b | folded into J4a: a search authenticates against a header the caller never named, so selection is caller-scoped only (ADR 0014) |
-| 7 | `feat(jwe): caller-understood crit extensions` | D1 | JWS-parity opt-in, ADR 0015, `tests/jwe_crit.rs`, `jwe-crit` matrix family |
+| 3 | `feat(jwe): external AAD for JSON serializations` | J2 | **done** (`5b9d652`) — options + ADR 0012, `tests/jwe_aad.rs`, `jwe-json-aad` matrix family |
+| 4 | `feat(jwe): shared and per-recipient unprotected headers` | J3 | **done** (`bcb4ae3`) — header-union types, ADR 0013, `tests/jwe_unprotected.rs` |
+| 5 | `feat(jwe): general JSON serialization` | J4a | **done** (`b08ac03`) — `jwe::general`, ADR 0014, `tests/jwe_general.rs` |
+| 6 | `feat(jwe): multiple recipients with bounded selection` | J4b | **done as J4a** (`b08ac03`) — folded into J4a: a search authenticates against a header the caller never named, so selection is caller-scoped only (ADR 0014) |
+| 7 | `feat(jwe): caller-understood crit extensions` | D1 | **done** (`14e5de4`) — JWS-parity opt-in, ADR 0015, `tests/jwe_crit.rs`, `jwe-crit` matrix family |
 | 8 | `feat(jwk): operation-aware key-agreement boundary` | K0 | **done** — `jwk::agreement` (`agreement_key`/`peer_key`/`AgreementKey::derive_key`), ADR 0016, RFC 7518 Appendix C vectors in `tests/jwk_agreement.rs` + `interop/tests/ecdh_kdf_vectors.py` |
 | 10 | `feat(jwe): ECDH key agreement with key wrapping` | K2 | **done** — see progress log |
 | 9 | `feat(jwe): direct ECDH key agreement` | K1a + K1b | **done** — all three P-curves and every `enc` landed together (one policy, one set of decisions; splitting by curve would have duplicated ADR 0017 for no safety gain). ADR 0017, `tests/jwe_ecdh_es.rs`, `jwe-ecdh` matrix family, jwcrypto checks |
 | 11 | `feat(jwe): ECDH-ES + AES key wrapping` | K2 | **done** — landed as `feat(jwe): ECDH key agreement with key wrapping` (see progress log) |
 | 12 | `feat(jwe): X25519 agreement keys for ECDH-ES` | K3a | **done** — see progress log (ADR 0019, not 0020) |
 | 13 | `feat(jwe): AES-GCM key management` | K4 | **done** — see row 12 |
-| 13a | `feat(jwe): PBES2 password-based key management (PBES2-HS256+A128KW / +HS384+A192KW / +HS512+A256KW)` | K5 | `jwe::password` (`Password` held in `Zeroizing`, UTF-8 and octet constructors, no equality, redacted `Debug`) plus three benchmark-backed constants; `KeyMaterial::Password` with `password_key` refusing non-PBES2 and `jwk_to_jwe_key_bytes` refusing a JWK for PBES2; `p2s`/`p2c` generated here, published before serialization, read only from the protected header, typed as base64url string / positive JSON integer; `JweEncryptOptions::with_pbes2_iterations` + `JweDecryptOptions::with_pbes2_max_iterations`, checked **before** deriving; general refused naming `p2s and p2c` (one password accepted); ADR 0021; `tests/jwe_pbes2.rs` (13 tests, RFC 7520 §5.3 end to end) + 7 internal unit tests (RFC 7520 Figure 100 reproduced, salt construction, budget timing); `jwe-pbes2` matrix family (6 cells); `interop/tests/jwe_pbes2_jwcrypto.py` (166 checks, re-deriving in Python, panva/jwcrypto `p2c` ceilings asserted). Emitted default moved 100 000 → 8 192 because panva caps `p2c` at 10 000 and jwcrypto at 16 384. Matrix now 109 cells |
+| 13a | `feat(jwe): PBES2 password-based key management (PBES2-HS256+A128KW / +HS384+A192KW / +HS512+A256KW)` | K5 | **done** (`f5fca68`) — `jwe::password` (`Password` held in `Zeroizing`, UTF-8 and octet constructors, no equality, redacted `Debug`) plus three benchmark-backed constants; `KeyMaterial::Password` with `password_key` refusing non-PBES2 and `jwk_to_jwe_key_bytes` refusing a JWK for PBES2; `p2s`/`p2c` generated here, published before serialization, read only from the protected header, typed as base64url string / positive JSON integer; `JweEncryptOptions::with_pbes2_iterations` + `JweDecryptOptions::with_pbes2_max_iterations`, checked **before** deriving; general refused naming `p2s and p2c` (one password accepted); ADR 0021; `tests/jwe_pbes2.rs` (13 tests, RFC 7520 §5.3 end to end) + 7 internal unit tests (RFC 7520 Figure 100 reproduced, salt construction, budget timing); `jwe-pbes2` matrix family (6 cells); `interop/tests/jwe_pbes2_jwcrypto.py` (166 checks, re-deriving in Python, panva/jwcrypto `p2c` ceilings asserted). Emitted default moved 100 000 → 8 192 because panva caps `p2c` at 10 000 and jwcrypto at 16 384. Matrix now 109 cells |
 | 14 | `feat(jwe): PBES2 password-based key management` | K5 | **done** — see row 13a |
 | 15 | `feat(jwk): PEM (RFC 7468) import and export` | I0 | **done** — `jwk::pem` (`jwk_from_pem` label dispatch, format-explicit `jwk_from_pkcs8_pem`/`jwk_from_spki_pem`, separate `private_pem_from_jwk`/`public_pem_from_jwk`); one block only (refused with a count), no preamble and no trailing text (whitespace around the block is free, re-indented armor is not), canonical base64, CRLF accepted; PKCS#1/SEC1/certificate/`ENCRYPTED PRIVATE KEY` refused **by name** with the entry point that will serve them, legacy `Proc-Type`/`DEK-Info` refused as an encrypted key; DER-level refusals (RSA-PSS, modulus floor) still apply through the armor; X25519 public export refused rather than hand-wrapping raw bytes; Ed25519 private export normalized OneAsymmetricKey(v1) → PrivateKeyInfo(v0) because `cryptography` refuses v1 (measured) while the importer still reads it; `pem-rfc7468` + `pkcs8` were already resolved in the lock (one lock line, no new package). ADR 0022, `tests/jwk_pem.rs` (18 tests, OpenSSL fixtures), `interop/tests/pem_jwcrypto.py` (60 checks, byte-equal against `openssl` re-encoding), harness `import-pem`/`export-pem`/`sign-pem` + RSA generation |
 | 16 | `feat(jwk): PKCS#1 RSA import` | I1 | **done** — `jwk_from_pkcs1_der` / `jwk_from_pkcs1_public_der` + PEM labels `RSA PRIVATE KEY`/`RSA PUBLIC KEY`; key is **rebuilt** from n,e,d,p,q (primes must multiply to n, `de ≡ 1 mod p−1`) then normalized to PKCS#8 and run through the existing PKCS#8 import so the modulus floor and backend checks are shared; the file's `dp`/`dq`/`qi` are compared and a mismatch refused naming the member (neither trusted nor silently repaired); multi-prime refused by name (no JWK member for a third factor); thumbprints equal across PKCS#1/PKCS#8/SPKI for one key; PEM armor names RFC 7468 §3's 64-column rule when exceeded. ADR 0023, `tests/jwk_pkcs1.rs` (9 tests, OpenSSL fixtures + single-octet variants), `interop/tests/pem_jwcrypto.py` extended to 62 checks |
@@ -67,15 +67,22 @@ new behaviour/policy.
 | 18 | `feat(jwk): password-encrypted PKCS#8 support` | I3 | **done** — RFC 5958 `ENCRYPTED PRIVATE KEY` import/export with an explicit scheme type (`Pkcs8Encryption`) and work budget (`Pkcs8ReadOptions`); the `pkcs5` feature set *is* the allow-list (SHA-1/DES/3DES unreachable, not merely refused), scheme + iteration budget checked **before** deriving, PBES1/scrypt/SHA-1/SHA-224 refused by name, no encrypted↔plain fallback either way, empty password refused on emit (ADR 0021 reused), and the encrypted payload normalized to portable PKCS#8 **before** encryption (the interop suite caught the version-1 Ed25519 case). Floor 2 048 = measured OpenSSL/`cryptography` default; emit 600 000 (175 ms); ceiling 10 000 000 (1.7 s). ADR 0025, `src/jwk/encrypted_pkcs8.rs` (11 lib tests incl. scrypt + OneAsymmetricKey regressions + ignored benchmark), `tests/jwk_encrypted_pkcs8.rs` (9 tests, OpenSSL fixtures + generator README), `interop/tests/pkcs8_encrypted_cryptography.py` (65 checks) |
 | 19 | `feat(jwk): certificate public-key extraction` | I4 | **done** — `public_jwk_from_certificate_der`/`_pem` walk `Certificate`/`TBSCertificate` **positionally** (version-presence decided by tag, so the v1/v3 index shift is handled, not guessed) and hand the located SPKI to the existing importer, so there is one SPKI parser and no second key-type policy; DER-only per RFC 5280 A.1 (definite lengths, low tags, minimal lengths, no trailing bytes) — measured stricter than OpenSSL and matching `cryptography`; chains refused with a block count; no invented `kid`/`use`/`alg`; **no validation of any kind**, pinned by a tampered-signature test. No new dependency (ADR 0026 explains why `x509-cert` was not used). `src/jwk/cert.rs` (3 lib tests), `tests/jwk_cert.rs` (11 tests over 25 fixtures incl. decoy-SPKI-in-extension and signature-verification proof), `interop/tests/cert_cryptography.py` (42 checks incl. a Python-side RFC 7638 thumbprint) |
 | 20 | `feat: executable capability reporting` | L0 | **done** — `src/capability.rs`: read-only rows (identifier / availability / operations / note) over JWS algs, JWE alg+enc, key formats and key types, with **four** distinct statuses (`Supported`, `RequiresFeature`, `RecognizedNotSupported`, `RefusedByPolicy(reason)`) and `features()` reporting this build's flags; `docs/capabilities.md` generated by `examples/capabilities.rs`; `tests/capability_report.rs` **performs** every advertised operation and **attempts** every advertised refusal across all five feature configs, enumerates the enums with exhaustive matches so a new variant without a row is a compile error, and fails if the committed docs go stale. Two hand-written rows were falsified while building it (an invented `HS1`; `ML-DSA-87-Ed448` wrongly called unsupported — it signs) — see ADR 0028 |
-| 21 | `fix(jwt): unambiguous claim parsing` | L1 | duplicate-member rejection, raw-number tests |
+| 21 | `fix(jwt): unambiguous claim parsing` | L1 | **done** (`8fba296`) — duplicate-member rejection over the raw document, raw-number precision tests, `interop/tests/jwt_claims_jwcrypto.py` (33 checks, asserting jwcrypto *accepts* the ambiguity first). ADR 0029; `tests/jwt_claims.rs` (11) |
 | 22 | `feat(jws): JWK-aware JSON serialization APIs` | L2 | **done** — `jws::json` gains 12 JWK-aware entry points + `SignaturePolicy`/`GeneralJwkSigner`/`JwkSignatureResult`/`GeneralVerifyReport`/`MAX_CANDIDATE_KEYS`. The key rule set is shared **by function** (`compact::signer_from_jwk`/`verifier_from_jwk`, now called by both serializations), so `use`/`key_ops`, pinned-`alg` spelling and per-algorithm strength cannot drift — `tests/jws_jwk_json.rs` asserts the parity *observable* (same key+token ⇒ identical refusal text). Multi-signature success is an explicit `Any`/`All` choice; the report separates *rejected* from *not attempted* (reasons tiered: matching-verifier failure > key-rule refusal > alg-mismatch note) and bounds attempts at 64 candidate keys; all signers are built before the first signature is spent. `interop/tests/jws_json_jwcrypto.py` (**30 checks**) pins that **jwcrypto's verify is any-of**, that its JWKSet cannot drive multi-`kid` General JWS, and that it cannot emit detached JSON JWS at all. See ADR 0030 |
 | 24a | `feat: authenticated result objects` | L4 | **done** — `src/authenticated.rs`: `Authenticated<T>` { value, protected (verified), unprotected (cleartext, never merged) }, `pub(crate)` constructor so the type's claim cannot be forged, `kid()`/`algorithm()` reading only the authenticated header, `map()`; wired into 7 verify/decrypt entry points across JWS compact/JSON, JWT and JWE compact/flattened/general. **No existing signature changed.** `examples/trust_boundary.rs` demonstrates the on-path rewrite of unprotected `kid`/`alg` leaving the authenticated view untouched |
 | 24b | `feat: stable error categories` | L4 | **done** — `ErrorCategory` (`#[non_exhaustive]`, additive, wildcard arm required) via `JoseError::category()`: unsupported capability / invalid structure / policy rejection / authentication failure / key material / cryptographic / encoding. **Refused on purpose:** separating "the tag did not match" from "the backend refused the input on the way there" — a probeable oracle; `JoseError::is_authentication_failure()` answers the merged question, and `SIGNATURE_VERIFICATION_FAILED` is a public const so the precise bucket is assigned by equality rather than substring sniffing. See ADR 0032 (`tests/authenticated_results.rs`, 8 tests) |
 | 23 | `feat(jwk): bounded JWKS selection policy` | L3 | **done** — `src/jwk/selection.rs`: `SelectionPolicy` (`max_candidates` as an *error* not a truncation, `Fallback::{Refuse, TryWhenUnaddressable, TryAll}`, `require_kid`), deterministic `select` that refuses an unknown kid in an addressable set (and a kid-less token against one), `SetLimits`/`from_json_with_limits` checked **before** parsing, and three-state diagnostics (`Usable` via the real converter / `Unsupported` / `Invalid`) that keep every entry and its kid. `jwt::decode_with_jwkset_policy` added; **`from_json` and `decode_with_jwkset` left untouched** (pinned by a 70-key legacy test, because a quiet budget in a working path is a breaking change). `tests/jwk_selection.rs` 10 tests + `interop/tests/jwks_selection_jwcrypto.py` **21 checks**. See ADR 0031 |
 | 24 | `feat: authenticated results and stable error categories` | L4 | **done** — see rows 24a/24b above |
 | 25 | `feat(jwk): thumbprint URI and typed generation options` | L5 | **done** — `thumbprint_uri`/`thumbprint_uri_sha256` build RFC 9278 URIs and `JwkThumbprintUri::parse` validates one (prefix, IANA *Hash Name String* — `sha-256` hyphenated, others refused per §4 — unpadded base64url, and decoded length **must** equal the named digest); `matches()` compares under the algorithm the URI named. Reproduced the RFC §6 example byte for byte, and 68 interop checks against `jose`'s `calculateJwkThumbprintUri` across RSA/EC×4/Ed25519/oct × SHA-256/384/512. Typed `KeyGeneration`/`EcCurve`/`generate_key` reuse the existing generators (one statement of the RSA floor and curve set), refuse unsupported options by name, and deliberately have **no** feature-gated post-quantum variant. ADR 0027; 3 lib + 8 integration tests |
-| 26 | `docs(adr): curve/algorithm coverage decisions` | A0-A3 | blocked-on-backend ADR |
+| 26 | `docs(adr): curve/algorithm coverage decisions` | A0-A3 | **blocked on kryptering** — Ed448 (A0), secp256k1/ES256K (A1), Brainpool (A2), post-quantum maintenance (A3) all need backend primitives that `kryptering 0.6.0` does not expose; nothing in this crate can supply them. Documented in `docs/capabilities.md` as `RecognizedNotSupported`, naming what is missing. |
 | 27 | `docs: roadmap, changelog and capability tables` | Q3 closeout | **done** — see row 28 for the gate; CHANGELOG/README/ADR index/plan kept current per feature commit |
+| 28 | `docs: definition of done as a command` | Q3 | **done** — `scripts/gate.sh` (+ `just gate`/`gate-quick`/`gate-interop` aliases; CI still calls cargo directly): fmt, tests ×5 configs, clippy ×5 with `RUSTFLAGS='-D warnings'`, strict rustdoc, capability-table drift diff, and `--with-interop` for the matrix + every peer suite; prints per-configuration totals so "ran the gate" is a checkable claim. `docs/definition-of-done.md` splits the checklist into what the script checks and what a human must, and the script prints the human half instead of implying green means done. ADR 0033 |
+
+> **Status (last updated after `docs: make the definition of done a command`).**
+> Every backend-independent item in `future_plan.md` is implemented and committed:
+> Q0–Q3, J0–J4a, D1, K0–K5, I0–I4, L0–L5. The only remaining plan items are A0–A3
+> (row 26), which require primitives `kryptering 0.6.0` does not expose and are
+> therefore out of scope for this crate, not deferred work in it.
 
 ## 2. Fixed design rules honoured everywhere
 
@@ -87,25 +94,31 @@ new behaviour/policy.
 - strict defaults: every relaxation is an explicit opt-in with its own ADR;
 - `#![forbid(unsafe_code)]` retained; no async, no network, no global registry.
 
-| 28 | `docs: definition of done as a command` | Q3 | **done** — `scripts/gate.sh` (+ `just gate`/`gate-quick`/`gate-interop` aliases; CI still calls cargo directly): fmt, tests ×5 configs, clippy ×5 with `RUSTFLAGS='-D warnings'`, strict rustdoc, capability-table drift diff, and `--with-interop` for the matrix + every peer suite; prints per-configuration totals so "ran the gate" is a checkable claim. `docs/definition-of-done.md` splits the checklist into what the script checks and what a human must, and the script prints the human half instead of implying green means done. ADR 0033 |
 
 ## 3. Evidence per commit (Q0/Q3)
 
+This was written before the gate existed; the list below is kept as the plan's
+original intent and is **superseded** by `./scripts/gate.sh` (ADR 0033), which
+adds the missing `post-quantum` configuration, drops `--lib` (it skips `tests/`
+and the doctests — see `AGENTS.md` §2), passes `-D warnings` through `RUSTFLAGS`
+rather than as a cargo-clippy argument, and checks the generated capability
+tables for drift.
+
 ```sh
-cargo fmt --all -- --check
-cargo test --locked --lib
-cargo test --locked
-cargo test --locked --no-default-features
-cargo test --locked --no-default-features --features deprecated
-cargo test --locked --all-features
-cargo clippy --locked --all-features --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' cargo doc --locked --all-features --no-deps
+./scripts/gate.sh                # the whole set, per configuration, with totals
+./scripts/gate.sh --with-interop # plus the matrix and every peer suite
 ```
 
-Interop: `interop/tests/*_jwcrypto.py` (uv-managed venv with jwcrypto) and the
-Node/panva matrix (`interop/tests/matrix.sh`), extended per feature.
+Interop: `interop/tests/*_jwcrypto.py` plus the `cryptography`-backed key-file
+suites (jwcrypto venv in `interop/.venv`) and the Node/panva matrix
+(`interop/tests/matrix.sh`), each extended per feature.
 
 ## 4. Progress log
+
+Rows 0–12 were written as the work landed. From K5 onward the evidence moved
+into §1, whose rows are keyed by the same plan items and carry the commit hashes,
+test counts and interop counts — keeping two copies of every entry is how one of
+them ends up describing a build that no longer exists. Read §1 as the log.
 
 | # | Commit | Item | Notes |
 |---|--------|------|-------|
