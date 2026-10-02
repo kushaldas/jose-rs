@@ -30,7 +30,7 @@ ML-DSA-87 (FIPS 204), plus the six composite algorithms from
 ML-DSA-65-ES256, ML-DSA-87-ES384, ML-DSA-44-Ed25519,
 ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
-**JWE key management**: dir, A128KW/A192KW/A256KW, ECDH-ES and ECDH-ES+A128KW/+A192KW/+A256KW (P-256/P-384/P-521), RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
+**JWE key management**: dir, A128KW/A192KW/A256KW, ECDH-ES and ECDH-ES+A128KW/+A192KW/+A256KW (P-256/P-384/P-521, X25519), RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 

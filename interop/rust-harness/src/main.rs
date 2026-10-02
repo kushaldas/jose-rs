@@ -167,14 +167,19 @@ fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
         "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
-        // An agreement recipient key: an EC key pair pinned for one of the
-        // ECDH-ES algorithms, with `use: enc` because RFC 7517 §4.2 says a key
-        // used for encryption must not claim `sig`. The curve is the caller's
-        // choice so one family covers several curves without new cell
-        // scaffolding, and the pin is what fixes the key-management mode.
+        // An agreement recipient key: a key pair pinned for one of the ECDH-ES
+        // algorithms, with `use: enc` because RFC 7517 §4.2 says a key used for
+        // encryption must not claim `sig`. The curve is the caller's choice so one
+        // family covers several curves without new cell scaffolding, and the pin is
+        // what fixes the key-management mode. X25519 is the one curve whose key type
+        // differs (OKP rather than EC), so it needs its own generator.
         "ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW" => {
             let crv = crv.ok_or_else(|| anyhow!("gen-key --alg {alg} requires --crv"))?;
-            let mut jwk = jose_rs::jwk::generate_ec(crv)?;
+            let mut jwk = if crv == "X25519" {
+                jose_rs::jwk::generate_x25519()?
+            } else {
+                jose_rs::jwk::generate_ec(crv)?
+            };
             jwk.alg = Some(alg.to_string());
             jwk.use_ = Some("enc".to_string());
             jwk

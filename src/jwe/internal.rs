@@ -1104,7 +1104,7 @@ fn agreement_sender(header: &JoseHeader, recipient: &crate::jwk::Jwk) -> Result<
     // examples do), so `d` is dropped rather than refused — but only the public
     // half is ever used, and only the public half is ever published.
     let peer = peer_key(&recipient.to_public_jwk())?;
-    let ephemeral = crate::jwk::generate_ec(peer.curve().as_crv_str())?;
+    let ephemeral = crate::jwk::agreement::generate_ephemeral(peer.curve())?;
     let own = agreement_key(&ephemeral)?;
     Ok(AgreementSender {
         own,

@@ -61,10 +61,10 @@ DIRECTIONS_HDR=("rust-sign-js-verify" "js-sign-rust-verify")
 ALGS_JWE=("dir:A256GCM" "dir:A128CBC-HS256" "A256KW:A256GCM" "A256KW:A128CBC-HS256")
 DIRECTIONS_JWE=("rust-encrypt-js-decrypt" "js-encrypt-rust-decrypt")
 # ECDH-ES cells: "<curve>:<content enc>", key management is always ECDH-ES.
-ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A256GCM")
+ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A256GCM" "X25519:A256GCM")
 # ECDH with key wrapping: `alg:curve:enc`. One wrapping algorithm per curve, so
 # the three KDF AlgorithmID/keydatalen pairings are each covered once.
-ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM")
+ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM" "ECDH-ES+A128KW:X25519:A128CBC-HS256")
 # Duplicate-member negative cells (signature alg is ES256 throughout).
 DIRECTIONS_DUP=("dup-kid" "dup-alg" "dup-ext")
 
@@ -679,11 +679,16 @@ run_jwe_ecdh_cell() {
   assert_header "$out_path"
 
   # The ephemeral key the content was agreed under must be reported back, on the
-  # curve the recipient's key is on, and without a private component.
-  "$JQ" -e --arg crv "$crv" '
+  # curve the recipient's key is on, and without a private component. The key type
+  # and the coordinate set follow the curve: an X25519 public value is a bare
+  # u-coordinate under kty OKP, with no `y` to check (RFC 8037 §2).
+  local kty="EC" has_y=true
+  [ "$crv" = "X25519" ] && { kty="OKP"; has_y=false; }
+  "$JQ" -e --arg crv "$crv" --arg kty "$kty" --argjson has_y "$has_y" '
     .protected_header.epk as $epk
-    | ($epk != null) and ($epk.crv == $crv) and ($epk.kty == "EC")
-      and ($epk.d == null) and ($epk.x != null) and ($epk.y != null)
+    | ($epk != null) and ($epk.crv == $crv) and ($epk.kty == $kty)
+      and ($epk.d == null) and ($epk.x != null)
+      and (if $has_y then ($epk.y != null) else ($epk | has "y" | not) end)
   ' "$out_path" > /dev/null \
     || { echo "epk shape wrong: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
 

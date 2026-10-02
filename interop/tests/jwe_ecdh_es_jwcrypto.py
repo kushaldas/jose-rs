@@ -47,6 +47,10 @@ COMBOS = [
     ("P-384", "A192CBC-HS384"),
     ("P-521", "A256GCM"),
     ("P-521", "A256CBC-HS512"),
+    # The OKP agreement curve (RFC 8037 §2): a different key type and a bare
+    # u-coordinate, which is what makes these cells worth running rather than
+    # redundant with the P-curves.
+    ("X25519", "A256GCM"),
 ]
 
 PLAINTEXT = b"direct ECDH key agreement interoperability"
@@ -73,6 +77,7 @@ def _run(binary, argv, payload):
 
 KW_COMBOS = [
     ("ECDH-ES+A128KW", "P-256", "A256GCM"),
+    ("ECDH-ES+A256KW", "X25519", "A256GCM"),
     ("ECDH-ES+A192KW", "P-384", "A128CBC-HS256"),
     ("ECDH-ES+A256KW", "P-521", "A128GCM"),
 ]

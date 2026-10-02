@@ -6,12 +6,15 @@ pub mod generate;
 pub mod import;
 pub mod thumbprint;
 
+/// The X25519 base point, shared by key generation and by the `d`-derives-`x`
+/// import check so the two cannot drift apart.
+pub(crate) use convert::X25519_BASEPOINT;
 pub use convert::{jwk_to_signature_key, jwk_to_software_key, software_key_to_jwk};
 #[cfg(feature = "post-quantum")]
 pub use generate::{generate_composite_mldsa, generate_mldsa};
 pub use generate::{
     generate_direct_symmetric, generate_ec, generate_ed25519, generate_rsa, generate_symmetric,
-    generate_symmetric_for_alg,
+    generate_symmetric_for_alg, generate_x25519,
 };
 pub use import::{jwk_from_pkcs8_der, jwk_from_spki_der};
 

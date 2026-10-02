@@ -302,8 +302,8 @@ fn unsupported_key_types_are_named_at_the_boundary() {
             "not a key-agreement curve",
         ),
         (
-            serde_json::json!({"kty": "OKP", "crv": "X25519", "x": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"}),
-            "X25519 agreement keys are not supported",
+            serde_json::json!({"kty": "OKP", "crv": "X448", "x": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gYgICAgICAgICAgICAgAgICAg"}),
+            "cannot perform key agreement with this backend",
         ),
         (
             serde_json::json!({"kty": "EC", "crv": "P-600", "x": "AA", "y": "AA"}),
@@ -355,4 +355,127 @@ fn an_agreement_key_publishes_its_own_public_value() {
     let expected_x =
         jose_rs::base64url::decode("gI0GAILBdu7T53akrFmMyGcsF3n5dO7MmwNBHKW5SV0").unwrap();
     assert_eq!(&public[1..33], &expected_x[..]);
+}
+
+// ---------------------------------------------------------------------------
+// X25519 (RFC 8037 §2, Appendix A.6)
+// ---------------------------------------------------------------------------
+
+/// RFC 8037 A.6: the recipient's public key. Only the public half is published,
+/// which is exactly the shape an `epk` or a recipient entry has.
+const X25519_BOB: &str = r#"{
+  "kty": "OKP", "crv": "X25519", "kid": "Bob",
+  "x": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08"
+}"#;
+
+/// RFC 8037 A.6: the ephemeral key pair — the secret is printed in hex by the
+/// RFC, and so is the public value derived from it.
+const X25519_EPHEMERAL: &str = r#"{
+  "kty": "OKP", "crv": "X25519",
+  "x": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo",
+  "d": "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo"
+}"#;
+
+/// RFC 8037 A.6: the shared secret both sides compute, printed explicitly.
+const X25519_Z: [u8; 32] = [
+    0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
+    0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
+];
+
+#[test]
+fn x25519_rfc_8037_a6_shared_secret() {
+    // The RFC prints both the ephemeral secret and the Z it produces against
+    // Bob's public key, so this is agreement checked against the standard rather
+    // than against symmetry with ourselves.
+    let own = agreement_key(&jwk(X25519_EPHEMERAL)).unwrap();
+    let peer = peer_key(&jwk(X25519_BOB)).unwrap();
+    assert_eq!(own.curve(), AgreementCurve::X25519);
+    assert_eq!(peer.curve(), AgreementCurve::X25519);
+    assert_eq!(own.agree(&peer).unwrap().as_slice(), &X25519_Z[..]);
+}
+
+#[test]
+fn an_x25519_public_value_is_the_bare_u_coordinate() {
+    // No SEC1 prefix, no second coordinate: 32 octets, matching the JWK.
+    let own = agreement_key(&jwk(X25519_EPHEMERAL)).unwrap();
+    let public = own.public_bytes();
+    assert_eq!(public.len(), 32);
+    let expected =
+        jose_rs::base64url::decode("hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo").unwrap();
+    assert_eq!(public, &expected[..]);
+}
+
+#[test]
+fn an_x25519_jwk_whose_d_does_not_derive_x_is_refused() {
+    // The reason X25519 import is not simply "two base64url strings handed to the
+    // backend": agreement multiplies with `d` while the message publishes `x`, so
+    // an inconsistent pair publishes one identity and agrees with another key.
+    let mut mismatched = jwk(X25519_EPHEMERAL);
+    let other = jose_rs::jwk::generate_x25519().unwrap();
+    mismatched.x = other.x.clone();
+    let err = agreement_key(&mismatched).unwrap_err().to_string();
+    assert!(err.contains("does not match the public key x"), "{err}");
+
+    // Same refusal on the peer side, where the check is on the value alone:
+    // there is no `d` to disagree with, so the refusal there is about shape.
+    let mut peer = jwk(X25519_BOB);
+    peer.x = Some("AAA".into());
+    assert!(peer_key(&peer).is_err());
+}
+
+#[test]
+fn x25519_round_trips_in_both_directions() {
+    // RFC 8037 A.6 publishes only one side's private value, so the reverse
+    // direction is checked with a generated pair instead.
+    let recipient = jose_rs::jwk::generate_x25519().unwrap();
+    let sender = jose_rs::jwk::generate_x25519().unwrap();
+
+    let forward = agreement_key(&sender)
+        .unwrap()
+        .derive_key(
+            &peer_key(&recipient.to_public_jwk()).unwrap(),
+            "ECDH-ES",
+            None,
+            None,
+            32,
+        )
+        .unwrap();
+    let backward = agreement_key(&recipient)
+        .unwrap()
+        .derive_key(
+            &peer_key(&sender.to_public_jwk()).unwrap(),
+            "ECDH-ES",
+            None,
+            None,
+            32,
+        )
+        .unwrap();
+    assert_eq!(forward.as_slice(), backward.as_slice());
+    assert_eq!(forward.len(), 32);
+}
+
+#[test]
+fn a_low_order_x25519_peer_value_is_refused() {
+    // The X25519 equivalent of an off-curve point: an all-zero u-coordinate is a
+    // small-order group element, and multiplying it out yields the identity
+    // element — a shared secret of all zeros, which an attacker knows. Refused by
+    // the primitive, and the boundary must surface that rather than deriving from
+    // it.
+    let mut small_order = jwk(X25519_BOB);
+    small_order.x = Some(jose_rs::base64url::encode(&[0u8; 32]));
+    let peer = peer_key(&small_order).expect("shape is well-formed; the refusal is algebraic");
+    let own = agreement_key(&jwk(X25519_EPHEMERAL)).unwrap();
+    let err = own.agree(&peer).unwrap_err().to_string();
+    assert!(
+        err.to_lowercase().contains("low-order") || err.to_lowercase().contains("identity"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_public_only_x25519_key_is_a_peer_not_an_agreement_key() {
+    let public = jwk(X25519_BOB);
+    assert!(peer_key(&public).is_ok());
+    let err = agreement_key(&public).unwrap_err().to_string();
+    assert!(err.contains("private scalar"), "{err}");
 }

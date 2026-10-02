@@ -99,6 +99,42 @@ pub fn generate_ed25519() -> Result<Jwk> {
     software_key_to_jwk(&sw)
 }
 
+/// Generate an X25519 key pair as an OKP JWK (RFC 8037 §2).
+///
+/// The public value is computed from the generated scalar rather than carried
+/// alongside it as an independent choice, so the pair this returns always passes
+/// the `d`-derives-`x` check that [`crate::jwk::jwk_to_software_key`] enforces on
+/// import. That asymmetry is deliberate: the check exists because agreement multiplies
+/// with `d` while a JWE publishes `x`, so a JWK with an inconsistent pair would
+/// publish one identity and agree with another.
+///
+/// # Errors
+///
+/// [`JoseError::Crypto`] if the scalar multiplication fails, which for a random
+/// scalar means the degenerate all-zero scalar (probability 2^-255) or a backend
+/// refusal of the operation.
+///
+/// ```
+/// # fn main() -> Result<(), jose_rs::JoseError> {
+/// let key = jose_rs::jwk::generate_x25519()?;
+/// assert_eq!(key.kty, "OKP");
+/// assert_eq!(key.crv.as_deref(), Some("X25519"));
+/// # Ok(())
+/// # }
+/// ```
+pub fn generate_x25519() -> Result<Jwk> {
+    use rand::RngCore;
+
+    // X25519 clamps the scalar internally, so no masking is applied here; the
+    // value must simply be uniformly random and 32 octets long.
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let public =
+        kryptering::software::keyagreement::ecdh_x25519(&crate::jwk::X25519_BASEPOINT, &secret)?;
+    let sw = kryptering::SoftwareKey::from_x25519(Some(&secret), &public)?;
+    software_key_to_jwk(&sw)
+}
+
 /// Generate a symmetric (oct) key as a JWK.
 ///
 /// `len` is the key length in bytes (e.g. 16 for AES-128, 32 for AES-256 / HS256).

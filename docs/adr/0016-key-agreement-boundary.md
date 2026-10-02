@@ -5,6 +5,11 @@ Status: Accepted
 Implements: RFC 7518 §4.6 (ECDH key agreement), §4.6.1 (`epk`/`apu`/`apv`),
 §4.6.2 (Concat KDF); RFC 7517 §4.2/§4.3 (`use`, `key_ops`); RFC 8037 §2 (`crv`)
 
+> **Amended by [ADR 0019](0019-x25519-agreement-keys.md):** X25519, which this
+> record excluded because the JWK import path could not yet check that `d` derives
+> `x`, is now supported — with exactly the check this record said was the
+> precondition. Every other decision here stands.
+
 ## Context
 
 Every key-management mode this crate lacks and most of the ones it plans to add

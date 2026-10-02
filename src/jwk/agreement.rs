@@ -17,6 +17,13 @@
 //! (public material only, point validated), and [`AgreementKey::agree`] refuses
 //! a peer on a different curve.
 //!
+//! [`AgreementCurve`] is the list of curves that can be agreed on at all:
+//! P-256, P-384, P-521 and X25519. Everything else an attacker or a config file
+//! can name — Ed25519 and Ed448 (signing curves that share the `OKP` key type
+//! with X25519), X448 (a genuine agreement curve this backend cannot do),
+//! secp256k1, Brainpool — is refused here, by name, rather than reaching a
+//! crypto layer that would report it as a generic failure.
+//!
 //! ```
 //! use jose_rs::jwk::agreement::{agreement_key, peer_key};
 //! use jose_rs::jwk::Jwk;
@@ -66,6 +73,11 @@ pub enum AgreementCurve {
     P384,
     /// NIST P-521 (`crv`: `P-521`).
     P521,
+    /// Curve25519 in X25519 form (`kty`: `OKP`, `crv`: `X25519`, RFC 8037 §2).
+    ///
+    /// The only OKP curve here. Ed25519 and Ed448 are signing curves and are
+    /// refused; X448 is an agreement curve this backend cannot do.
+    X25519,
 }
 
 impl AgreementCurve {
@@ -79,6 +91,7 @@ impl AgreementCurve {
             Self::P256 => "P-256",
             Self::P384 => "P-384",
             Self::P521 => "P-521",
+            Self::X25519 => "X25519",
         }
     }
 
@@ -89,15 +102,23 @@ impl AgreementCurve {
             Self::P256 => 32,
             Self::P384 => 48,
             Self::P521 => 66,
+            // A single 32-octet field element: an X25519 public value *is* its
+            // u-coordinate, with no second coordinate and no encoding byte.
+            Self::X25519 => 32,
         }
     }
 
-    /// The backend curve.
-    fn kryptering_curve(self) -> kryptering::EcCurve {
+    /// The backend curve, or `None` for X25519.
+    ///
+    /// X25519 is a different primitive in the backend (`agree_x25519`, not the
+    /// `EcCurve`-dispatched ECDH), so `None` here means "take the X25519 path"
+    /// rather than "unsupported".
+    fn kryptering_curve(self) -> Option<kryptering::EcCurve> {
         match self {
-            Self::P256 => kryptering::EcCurve::P256,
-            Self::P384 => kryptering::EcCurve::P384,
-            Self::P521 => kryptering::EcCurve::P521,
+            Self::P256 => Some(kryptering::EcCurve::P256),
+            Self::P384 => Some(kryptering::EcCurve::P384),
+            Self::P521 => Some(kryptering::EcCurve::P521),
+            Self::X25519 => None,
         }
     }
 
@@ -111,13 +132,15 @@ impl AgreementCurve {
             ("EC", Some("P-256")) => Ok(Self::P256),
             ("EC", Some("P-384")) => Ok(Self::P384),
             ("EC", Some("P-521")) => Ok(Self::P521),
-            // Named separately from the signing curves, because it *is* an
-            // agreement curve — the backend can do X25519 — but a JWK whose
-            // `d` is an X25519 scalar cannot be imported yet, and importing it
-            // without checking that `d` really derives `x` would let a JWK
-            // publish one identity and agree with another.
-            ("OKP", Some("X25519")) => Err(JoseError::Key(
-                "X25519 agreement keys are not supported by this crate version".into(),
+            ("OKP", Some("X25519")) => Ok(Self::X25519),
+            // X448 is an agreement curve, so saying "signing curve" about it
+            // would be false; Ed25519 and Ed448 genuinely are signing curves, and
+            // both messages are specific because the remedies differ (a different
+            // backend for one, a different key for the other).
+            ("OKP", Some("X448")) => Err(JoseError::Key(
+                "X448 is a key-agreement curve but cannot perform key agreement with this \
+                 backend; X25519 and the P-curves can"
+                    .into(),
             )),
             ("OKP", Some(other)) => Err(JoseError::Key(format!(
                 "OKP curve {other} is a signing curve, not a key-agreement curve"
@@ -215,11 +238,17 @@ impl AgreementKey {
                 peer.curve()
             )));
         }
-        let z = kryptering::software::keyagreement::agree(
-            self.curve.kryptering_curve(),
-            &peer.encoded,
-            &self.key,
-        )
+        // One dispatch, two primitives: the backend does X25519 through its own
+        // function rather than an `EcCurve`, and the peer encoding differs
+        // accordingly (raw u-coordinate vs SEC1 point). Both refuse a
+        // low-order/identity peer value; both return `coord_len()` octets, which
+        // is checked below rather than trusted.
+        let z = match self.curve.kryptering_curve() {
+            Some(ec_curve) => {
+                kryptering::software::keyagreement::agree(ec_curve, &peer.encoded, &self.key)
+            }
+            None => kryptering::software::keyagreement::agree_x25519(&peer.encoded, &self.key),
+        }
         .map_err(JoseError::Crypto)?;
         if z.len() != self.curve.coord_len() {
             return Err(JoseError::Key(format!(
@@ -253,6 +282,19 @@ impl PeerKey {
     #[must_use]
     pub fn public_bytes(&self) -> &[u8] {
         &self.encoded
+    }
+}
+
+/// Generate a fresh agreement key pair on `curve`.
+///
+/// One function because the choice is a property of the curve, not of the caller:
+/// X25519 keys are OKP and the P-curves are EC, and a sender that got that wrong
+/// would publish an `epk` its own recipient cannot parse. Used for the per-message
+/// ephemeral key (RFC 7518 §4.6), which is why no caller ever supplies one.
+pub(crate) fn generate_ephemeral(curve: AgreementCurve) -> Result<Jwk> {
+    match curve {
+        AgreementCurve::X25519 => crate::jwk::generate_x25519(),
+        other => crate::jwk::generate_ec(other.as_crv_str()),
     }
 }
 
@@ -344,6 +386,13 @@ pub fn peer_key(jwk: &Jwk) -> Result<PeerKey> {
 /// octets); [`crate::jwk::jwk_to_software_key`] has already rejected anything
 /// longer than the field.
 fn encode_public(curve: AgreementCurve, jwk: &Jwk) -> Result<Vec<u8>> {
+    if curve == AgreementCurve::X25519 {
+        // No 0x04 prefix and no `y`: the public value *is* the 32-octet
+        // u-coordinate (RFC 7748 §5 / RFC 8037 §2). Prefixing it would be
+        // rejected by the primitive as a wrong-length value, but the failure
+        // would look like a malformed key rather than a wrong encoding.
+        return coordinate(jwk, "x", curve.coord_len());
+    }
     let coord_len = curve.coord_len();
     let x = coordinate(jwk, "x", coord_len)?;
     let y = coordinate(jwk, "y", coord_len)?;

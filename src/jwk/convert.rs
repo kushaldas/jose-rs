@@ -252,6 +252,17 @@ pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
             };
             ed25519_to_jwk(private.as_ref(), &public)
         }
+        KeyAlgorithm::X25519 => {
+            // Raw 32-byte u-coordinate and scalar, not DER: `public_component`
+            // and `export_private` are the raw paths for this algorithm.
+            let public = key.public_component()?;
+            let private = if key.has_private_key() {
+                Some(key.export_private()?)
+            } else {
+                None
+            };
+            x25519_to_jwk(private.as_ref().map(|p| &p[..]), &public)
+        }
         KeyAlgorithm::Hmac | KeyAlgorithm::Aes => {
             let bytes = key.export_private()?;
             oct_to_jwk(&bytes)
@@ -707,6 +718,15 @@ fn jwk_to_okp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         .as_deref()
         .ok_or_else(|| JoseError::Key("missing crv for OKP key".into()))?;
 
+    // X25519 is the OKP curve used for key agreement (RFC 8037 §2), and it is
+    // handled before the Ed25519 path below because the backend import is
+    // different in kind, not just in bytes: `from_x25519` stores whatever `d` and
+    // `x` it is given without checking that they belong to the same key, and
+    // agreement then uses `d` while the message publishes `x`.
+    if crv == "X25519" {
+        return jwk_to_x25519(jwk);
+    }
+
     if crv != "Ed25519" {
         return Err(JoseError::Key(format!("unsupported OKP curve: {crv}")));
     }
@@ -775,6 +795,73 @@ fn ed25519_to_jwk(
     jwk.crv = Some("Ed25519".into());
     jwk.x = Some(base64url::encode(public.as_bytes()));
     jwk.d = private.map(|sk| base64url::encode(&sk.to_bytes()));
+    Ok(jwk)
+}
+
+// ── OKP (X25519) ───────────────────────────────────────────────────────
+
+/// The X25519 base point: 9 in the little-endian field encoding, RFC 7748 §5.
+pub(crate) const X25519_BASEPOINT: [u8; 32] = {
+    let mut point = [0u8; 32];
+    point[0] = 9;
+    point
+};
+
+/// Import an OKP/X25519 JWK, checking that `d` and `x` describe the same key.
+///
+/// The check is this crate's to make. `SoftwareKey::from_x25519` accepts a
+/// private scalar and a public value independently, and the agreement primitive
+/// multiplies with `d` while a JWE publishes `x` as `epk` — so an unchecked pair
+/// would let one JWK publish an identity in the message and agree with a
+/// different key behind it. That is not a hypothetical mismatch: a JWK is two
+/// base64url strings, and any peer, cache or config file could have paired them
+/// wrongly. Ed25519 import has always refused this (`d` must derive `x`); X25519
+/// gets the same rule, computed with the agreement primitive itself rather than
+/// with a second implementation of the curve.
+fn jwk_to_x25519(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
+    let x_bytes = require(jwk, "x")?;
+    if x_bytes.len() != 32 {
+        return Err(JoseError::Key(format!(
+            "X25519 public key must be 32 bytes, got {}",
+            x_bytes.len()
+        )));
+    }
+
+    let private = if jwk.d.is_some() {
+        let d_bytes = require(jwk, "d")?;
+        if d_bytes.len() != 32 {
+            return Err(JoseError::Key(format!(
+                "X25519 private key must be 32 bytes, got {}",
+                d_bytes.len()
+            )));
+        }
+        // X25519(d, G) is exactly the public key the JWK claims, so this is the
+        // consistency check with no new curve code: the backend's own scalar
+        // multiplication against the base point.
+        let derived = kryptering::software::keyagreement::ecdh_x25519(&X25519_BASEPOINT, &d_bytes)
+            .map_err(|e| JoseError::Key(format!("X25519 private key rejected: {e}")))?;
+        if derived != x_bytes {
+            return Err(JoseError::Key(
+                "X25519 private key d does not match the public key x".into(),
+            ));
+        }
+        Some(d_bytes)
+    } else {
+        None
+    };
+
+    kryptering::SoftwareKey::from_x25519(private.as_deref(), &x_bytes).map_err(Into::into)
+}
+
+/// Export a backend X25519 key as an OKP JWK.
+///
+/// Both components are raw 32-byte values — the "public component" of an X25519
+/// key is the u-coordinate alone, with no SEC1 framing.
+fn x25519_to_jwk(private: Option<&[u8]>, public: &[u8]) -> Result<Jwk> {
+    let mut jwk = new_jwk("OKP");
+    jwk.crv = Some("X25519".into());
+    jwk.x = Some(base64url::encode(public));
+    jwk.d = private.map(base64url::encode);
     Ok(jwk)
 }
 

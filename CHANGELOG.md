@@ -49,6 +49,18 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- **X25519 agreement keys** (`kty: OKP`, `crv: X25519`, RFC 8037 §2) for all four
+  ECDH key-management modes, plus a public `generate_x25519()` key generator. An
+  X25519 public value is a bare 32-octet u-coordinate rather than a SEC1 point, so
+  both the `epk` a sender publishes and the peer value a recipient validates use
+  the OKP shape; because the backend imports `d` and `x` independently and agrees
+  with `d` while the message publishes `x`, this crate now refuses a JWK whose
+  private scalar does not derive its own public value (Ed25519 import has always
+  done this). Ed25519/Ed448 are refused as signing curves and X448 as an
+  agreement curve this backend cannot perform, each by name. Decrypts nothing
+  pre-computed — RFC 8037 Appendix A.6 stops at the shared secret — but
+  interoperates with panva and jwcrypto in both directions and both serializations.
+  See ADR 0019.
 - **ECDH key agreement with key wrapping (`ECDH-ES+A128KW`, `+A192KW`,
   `+A256KW`, RFC 7518 §4.6)** in the compact and flattened serializations: the
   agreement output is a key-encryption key of the length the algorithm names, the
