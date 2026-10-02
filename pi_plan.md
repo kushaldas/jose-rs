@@ -58,14 +58,15 @@ new behaviour/policy.
 | 9 | `feat(jwe): direct ECDH key agreement` | K1a + K1b | **done** — all three P-curves and every `enc` landed together (one policy, one set of decisions; splitting by curve would have duplicated ADR 0017 for no safety gain). ADR 0017, `tests/jwe_ecdh_es.rs`, `jwe-ecdh` matrix family, jwcrypto checks |
 | 11 | `feat(jwe): ECDH-ES + AES key wrapping` | K2 | **done** — landed as `feat(jwe): ECDH key agreement with key wrapping` (see progress log) |
 | 12 | `feat(jwe): X25519 agreement keys for ECDH-ES` | K3a | **done** — see progress log (ADR 0019, not 0020) |
-| 13 | `feat(jwe): AES-GCM key management` | K4 | `A128/192/256GCMKW`, ADR 0021, vectors, interop |
-| 14 | `feat(jwe): PBES2 password-based key derivation` | K5 | dedicated password API, ADR 0022, budget tests, interop |
-| 15 | `feat(jwk): PEM import and export` | I0 | `jwk::{pem}`, ADR 0023, tests |
+| 13 | `feat(jwe): AES-GCM key management` | K4 | **done** — see row 12 |
+| 13a | `feat(jwe): PBES2 password-based key management (PBES2-HS256+A128KW / +HS384+A192KW / +HS512+A256KW)` | K5 | `jwe::password` (`Password` held in `Zeroizing`, UTF-8 and octet constructors, no equality, redacted `Debug`) plus three benchmark-backed constants; `KeyMaterial::Password` with `password_key` refusing non-PBES2 and `jwk_to_jwe_key_bytes` refusing a JWK for PBES2; `p2s`/`p2c` generated here, published before serialization, read only from the protected header, typed as base64url string / positive JSON integer; `JweEncryptOptions::with_pbes2_iterations` + `JweDecryptOptions::with_pbes2_max_iterations`, checked **before** deriving; general refused naming `p2s and p2c` (one password accepted); ADR 0021; `tests/jwe_pbes2.rs` (13 tests, RFC 7520 §5.3 end to end) + 7 internal unit tests (RFC 7520 Figure 100 reproduced, salt construction, budget timing); `jwe-pbes2` matrix family (6 cells); `interop/tests/jwe_pbes2_jwcrypto.py` (166 checks, re-deriving in Python, panva/jwcrypto `p2c` ceilings asserted). Emitted default moved 100 000 → 8 192 because panva caps `p2c` at 10 000 and jwcrypto at 16 384. Matrix now 109 cells |
+| 14 | `feat(jwe): PBES2 password-based key management` | K5 | **done** — see row 13a |
+| 15 | `feat(jwk): PEM import and export` | I0 | `jwk::{pem}`, ADR 0022, tests |
 | 16 | `feat(jwk): PKCS#1 RSA import` | I1 | `jwk_from_pkcs1_*`, tests |
 | 17 | `feat(jwk): SEC1 EC private key import` | I2 | `jwk_from_sec1_der`, tests |
-| 18 | `feat(jwk): password-protected PKCS#8` | I3 | `pkcs8/encryption` feature, ADR 0024, tests |
-| 19 | `feat(jwk): certificate public-key extraction` | I4 | SPKI extraction, ADR 0025, tests |
-| 20 | `feat: executable capability reporting` | L0 | `src/capability.rs`, ADR 0026, tests |
+| 18 | `feat(jwk): password-protected PKCS#8` | I3 | `pkcs8/encryption` feature, ADR 0023, tests |
+| 19 | `feat(jwk): certificate public-key extraction` | I4 | SPKI extraction, ADR 0024, tests |
+| 20 | `feat: executable capability reporting` | L0 | `src/capability.rs`, ADR 0025, tests |
 | 21 | `fix(jwt): unambiguous claim parsing` | L1 | duplicate-member rejection, raw-number tests |
 | 22 | `feat(jws): JWK-aware JSON serialization APIs` | L2 | wrappers, tests, interop |
 | 23 | `feat(jwk): bounded JWKS selection policy` | L3 | limits + diagnostics, tests |

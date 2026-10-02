@@ -49,6 +49,23 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- **PBES2 password-based key management (`PBES2-HS256+A128KW`, `+HS384+A192KW`,
+  `+HS512+A256KW`, RFC 7518 §4.8)** in the compact and flattened serializations, which
+  completes the RFC 7518 key-management registry. A password is a new input type
+  (`jose_rs::jwe::Password`), not a string and not an `oct` JWK: a password is
+  low-entropy and only ever an input to a key derivation, so the same value accepted by
+  `A128KW` as a key would be a confusion rather than a convenience — and the refusal runs
+  both ways, with the password entry points accepting only the PBES2 family and the key
+  entry points refusing to build PBES2 material from a JWK. The salt input (`p2s`) and
+  iteration count (`p2c`) are generated here and published in the integrity-protected
+  header, read from nowhere else, since they are the derivation's inputs. The work budget
+  is enforced on both ends from measurements: 1 000 is the floor (RFC 7518's own
+  recommendation), 8 192 the emitted default, 1 000 000 the received ceiling — and the
+  emitted default is 8 192 rather than a cost-optimal 100 000 because panva refuses a
+  `p2c` above 10 000 and jwcrypto above 16 384, so a more careful default would simply
+  produce messages neither peer can open. Several recipients stay refused, naming
+  `p2s and p2c`. Decrypts RFC 7520 §5.3's message; interoperates with panva and jwcrypto
+  in both directions. See ADR 0021.
 - **AES-GCM key management (`A128GCMKW`, `A192GCMKW`, `A256GCMKW`, RFC 7518
   §4.7)** in the compact and flattened serializations: the content key is carried,
   encrypted with the algorithm's own key, and the wrap's IV and authentication tag

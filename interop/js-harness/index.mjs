@@ -195,6 +195,49 @@ async function decryptCompact(alg, enc) {
 }
 
 /**
+ * Password-based key management (RFC 7518 §4.8), compact serialization.
+ *
+ * There is no `gen-key` counterpart for a password — it is supplied, not generated —
+ * so the matrix fixes one for both peers, as the RFCs do for their examples.
+ */
+async function encryptCompactPassword(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { password, plaintext_b64u, header, p2c } = JSON.parse(readStdin())
+  if (header && ('alg' in header || 'enc' in header)) {
+    throw new Error('header input must not override `alg` / `enc`')
+  }
+  // panva takes the passphrase as a Uint8Array; the UTF-8 encoding RFC 7518 §4.8
+  // mandates is what TextEncoder produces.
+  const key = new TextEncoder().encode(password)
+  const protectedHeader = { ...(header ?? {}), alg, enc }
+  let encrypted = new CompactEncrypt(b64uDecode(plaintext_b64u)).setProtectedHeader(protectedHeader)
+  // `saltLength`/`iterations` are panva's PBES2 knobs; only the iteration count is
+  // exposed here, and only because the matrix wants a quick cell — jose-rs's own
+  // default is far above panva's 2048 and slow in a debug build.
+  if (p2c !== undefined) {
+    protectedHeader.p2c = p2c
+    encrypted = new CompactEncrypt(b64uDecode(plaintext_b64u)).setProtectedHeader(protectedHeader)
+  }
+  const jwe = await encrypted.encrypt(key)
+  emit({ jwe })
+}
+
+async function decryptCompactPassword(alg, enc) {
+  if (!alg) throw new Error('--alg is required')
+  if (!enc) throw new Error('--enc is required')
+  const { password, jwe } = JSON.parse(readStdin())
+  const hdr = decodeProtectedHeader(jwe)
+  if (hdr.alg !== alg) throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
+  if (hdr.enc !== enc) throw new Error(`token enc ${hdr.enc} does not match expected ${enc}`)
+  const { plaintext, protectedHeader } = await compactDecrypt(jwe, new TextEncoder().encode(password), {
+    keyManagementAlgorithms: [alg],
+    contentEncryptionAlgorithms: [enc],
+  })
+  emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
+}
+
+/**
  * Flattened JWE JSON Serialization (RFC 7516 §7.2.2), emitted as a JSON
  * *string* in `jwe` so the matrix plumbing is identical to the compact cells.
  */
@@ -316,6 +359,8 @@ async function main() {
     case 'decrypt-compact': return decryptCompact(alg, enc)
     case 'encrypt-flattened': return encryptFlattened(alg, enc)
     case 'decrypt-flattened': return decryptFlattened(alg, enc)
+    case 'encrypt-compact-password': return encryptCompactPassword(alg, enc)
+    case 'decrypt-compact-password': return decryptCompactPassword(alg, enc)
     case 'encrypt-general': return encryptGeneral(alg, enc)
     case 'decrypt-general': return decryptGeneral(alg, enc)
     default: throw new Error(`unknown subcommand: ${cmd}`)

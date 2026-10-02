@@ -65,6 +65,9 @@ ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A2
 # ECDH with key wrapping: `alg:curve:enc`. One wrapping algorithm per curve, so
 # the three KDF AlgorithmID/keydatalen pairings are each covered once.
 ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM" "ECDH-ES+A128KW:X25519:A128CBC-HS256")
+# PBES2 (RFC 7518 §4.8): `alg:enc`. The password is fixed by the cell (it is supplied,
+# not generated), and `p2c` is passed explicitly so the cells stay quick.
+ALGS_PBES2=("PBES2-HS256+A128KW:A256GCM" "PBES2-HS384+A192KW:A128CBC-HS256" "PBES2-HS512+A256KW:A128GCM")
 # AES-GCM key management (RFC 7518 §4.7): `alg:enc`. The key size follows `alg`,
 # so one content algorithm per key size covers the pairings.
 ALGS_GCMKW=("A128GCMKW:A256GCM" "A192GCMKW:A128CBC-HS256" "A256GCMKW:A128GCM")
@@ -531,6 +534,7 @@ run_cell() {
         # `alg:curve:enc` — the same cell, with the wrapping algorithm named.
         run_jwe_ecdh_cell "$direction" "${alg#*:}" "${alg%%:*}"; exit 0 ;;
       jwe-gcmkw) run_jwe_gcmkw_cell "$direction" "$alg"; exit 0 ;;
+      jwe-pbes2) run_jwe_pbes2_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
         [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
@@ -773,6 +777,58 @@ run_jwe_gcmkw_cell() {
   local _unused; _unused="$header_b64"
 }
 
+# PBES2 (RFC 7518 §4.8): the CEK is wrapped under a key derived from a *password*, and
+# the derivation's inputs — `p2s` (salt input) and `p2c` (iteration count) — are header
+# members. Their position is the point of this cell: both peers put them in the
+# integrity-protected header, and a recipient that read them from an unprotected member
+# would be deriving under a salt the sender (or an attacker) chose.
+PBES2_PASSWORD='entrap_o–peter_long–credit_tun'
+
+run_jwe_pbes2_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$JQ" -n --arg p "$PAYLOAD_B64U" --arg pw "$PBES2_PASSWORD" \
+    '{jwk:null, plaintext_b64u:$p, header:{}, password:$pw, p2c:2048}' \
+    | "$producer" encrypt-compact-password --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --arg jwe "$jwe" --arg pw "$PBES2_PASSWORD" '{jwk:null, jwe:$jwe, password:$pw}' \
+    | "$consumer" decrypt-compact-password --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+
+  # Both members present, in the authenticated header, at the types the RFC names —
+  # `p2s` a base64url string of 8 or more octets, `p2c` a JSON integer.
+  "$JQ" -e '
+    .protected_header.p2s as $s | .protected_header.p2c as $c
+    | ($s | type) == "string" and ($c | type) == "number" and ($c | floor) == $c and $c >= 1000
+  ' "$out_path" > /dev/null \
+    || { echo "p2s/p2c missing or mistyped: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  local salt_len
+  salt_len="$("$JQ" -r .protected_header.p2s "$out_path" | tr -d '\n' | wc -c)"
+  # base64url without padding: 16 octets is 22 characters, 8 octets is 11.
+  [ "$salt_len" -ge 11 ] \
+    || { echo "p2s encodes fewer than the 8 octets RFC 7518 §4.8.1.1 requires ($salt_len chars)" >&2; return 1; }
+
+  # And a wrong password must not read the message — asserted here rather than only in
+  # unit tests, because "wrong password" is a cross-implementation claim: it depends on
+  # the *other* side's wrap authenticating.
+  local out2="$VECTORS/${CELL}.wrongpassword.json"
+  if "$JQ" -n --arg jwe "$jwe" '{jwk:null, jwe:$jwe, password:"entrap_o-peter_long-credit_tun"}' \
+      | "$consumer" decrypt-compact-password --alg "$alg" --enc "$enc" > "$out2" 2>/dev/null; then
+    echo "a wrong password read a PBES2 message" >&2
+    return 1
+  fi
+  rm -f "$out2"
+}
+
 if [ "${1:-}" = "--cell" ]; then
   shift
   dir="${1:?direction required}"; alg="${2:?alg required}"; fmt="${3:?format required}"
@@ -859,6 +915,14 @@ done
 for alg in "${ALGS_ECDH_KW[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-ecdh-kw" || true
+  done
+done
+
+# PBES2 (RFC 7518 §4.8), both directions: asserts the derivation's header members and
+# that a wrong password fails on the *peer's* message.
+for alg in "${ALGS_PBES2[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-pbes2" || true
   done
 done
 

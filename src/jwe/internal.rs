@@ -104,6 +104,9 @@ pub struct JweEncryptOptions {
     /// therefore be listed in `crit`. See
     /// [`JweEncryptOptions::with_understood_crit`].
     understood_crit: Vec<String>,
+    /// PBKDF2 iteration count to publish as `p2c` for a PBES2 algorithm.
+    /// `None` means [`PBES2_DEFAULT_ITERATIONS`](super::password::PBES2_DEFAULT_ITERATIONS).
+    pbes2_iterations: Option<u32>,
 }
 
 impl JweEncryptOptions {
@@ -149,6 +152,35 @@ impl JweEncryptOptions {
         self.external_aad.as_deref()
     }
 
+    /// Choose the PBES2 iteration count (`p2c`, RFC 7518 §4.8.1.2) to publish.
+    ///
+    /// The default is
+    /// [`PBES2_DEFAULT_ITERATIONS`](super::password::PBES2_DEFAULT_ITERATIONS), and
+    /// this is not a knob to turn casually: **the count you choose is CPU the recipient
+    /// spends before it learns whether the password was right**, so raising it spends
+    /// someone else's time, and lowering it weakens the only thing separating two
+    /// messages under one password. Anything below
+    /// [`PBES2_MIN_ITERATIONS`](super::password::PBES2_MIN_ITERATIONS) is refused when
+    /// the message is produced, not here, so the check also covers a header built by
+    /// hand.
+    ///
+    /// ```
+    /// use jose_rs::jwe::JweEncryptOptions;
+    /// let opts = JweEncryptOptions::new().with_pbes2_iterations(250_000);
+    /// assert_eq!(opts.pbes2_iterations(), Some(250_000));
+    /// ```
+    #[must_use]
+    pub fn with_pbes2_iterations(mut self, iterations: u32) -> Self {
+        self.pbes2_iterations = Some(iterations);
+        self
+    }
+
+    /// The PBES2 iteration count the caller chose, or `None` for the default.
+    #[must_use]
+    pub fn pbes2_iterations(&self) -> Option<u32> {
+        self.pbes2_iterations
+    }
+
     /// Declare that the caller implements the private header parameters in
     /// `names`, so they may be listed in the protected header's `crit` member.
     ///
@@ -185,20 +217,25 @@ impl JweEncryptOptions {
 /// - `zip`: content compression (RFC 7516 §4.1.3); not implemented, and
 ///   RFC 8725 §3.6 advises against compressing before encryption;
 /// - `b64`: RFC 7797 unencoded payload, a JWS-only member;
-/// - `epk`, `apu`, `apv`: ECDH-ES key agreement (RFC 7518 §4.6.1), parsed
-///   but not wired for encryption;
-/// - `p2s`, `p2c`: PBES2 (RFC 7518 §4.8.1), not wired;
-/// - `iv`, `tag`: AES-GCM key wrapping (RFC 7518 §4.7.1), not implemented.
+/// - `epk`: ECDH key agreement's ephemeral key (RFC 7518 §4.6.1);
+/// - `p2s`, `p2c`: PBES2's salt input and iteration count (RFC 7518 §4.8.1);
+/// - `iv`, `tag`: the AES-GCM key wrap's IV and authentication tag (RFC 7518
+///   §4.7.1).
 ///
 /// Emitting any of these would describe processing that did not happen, so a
 /// peer that implements them would read the token differently. Which members
 /// those are depends on the key-management algorithm: `apu`/`apv` feed the
 /// Concat KDF, so they are emittable exactly when the algorithm runs it.
 ///
-/// `epk` stays on the list for every algorithm, including the agreement ones:
-/// the library generates the ephemeral key itself (RFC 7518 §4.6 — "A new
-/// ephemeral public key value MUST be generated for each key agreement
-/// operation"), so a caller-supplied one is refused rather than reused.
+/// `epk`, `p2s`, `p2c`, `iv` and `tag` stay on the list for **every** algorithm,
+/// including the ones that use them, and that is deliberate rather than
+/// unfinished. They are the members this crate generates itself — an ephemeral
+/// key, a nonce, a work budget, an AEAD nonce and its tag — and a caller that
+/// could supply them would be choosing values whose reuse or fabrication breaks
+/// the key operation (RFC 7518 §4.6: "A new ephemeral public key value MUST be
+/// generated for each key agreement operation"). Each is inserted after this
+/// check, by the code that generates it, in the key-management paths that
+/// actually run (ADRs 0018, 0020, 0021).
 pub(crate) const UNIMPLEMENTED_JWE_MEMBERS: &[&str] =
     &["zip", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag"];
 
@@ -417,6 +454,9 @@ pub struct JweDecryptOptions {
     /// when a message lists them in `crit`. See
     /// [`JweDecryptOptions::with_understood_crit`].
     understood_crit: Vec<String>,
+    /// Ceiling on the PBKDF2 work a message may ask for. `None` means
+    /// [`PBES2_DEFAULT_MAX_ITERATIONS`](super::password::PBES2_DEFAULT_MAX_ITERATIONS).
+    pbes2_max_iterations: Option<u32>,
 }
 
 impl JweDecryptOptions {
@@ -429,6 +469,7 @@ impl JweDecryptOptions {
             max_plaintext: None,
             external_aad: None,
             understood_crit: Vec::new(),
+            pbes2_max_iterations: None,
         }
     }
 
@@ -468,6 +509,7 @@ impl JweDecryptOptions {
             max_plaintext: None,
             external_aad: None,
             understood_crit: Vec::new(),
+            pbes2_max_iterations: None,
         }
     }
 
@@ -525,6 +567,43 @@ impl JweDecryptOptions {
     #[must_use]
     pub fn external_aad(&self) -> Option<&[u8]> {
         self.external_aad.as_deref()
+    }
+
+    /// Cap the PBKDF2 work a message may require of this recipient.
+    ///
+    /// `p2c` is chosen by the sender and paid by the recipient, so an accepted
+    /// message can otherwise name any iteration count up to the backend's 100 million
+    /// and make this process compute for minutes before the wrapped key's integrity
+    /// check says the password was wrong. The default is
+    /// [`PBES2_DEFAULT_MAX_ITERATIONS`](super::password::PBES2_DEFAULT_MAX_ITERATIONS)
+    /// (about a second on the measured machine); a message naming more is refused
+    /// **before** any derivation, so refusal is free.
+    ///
+    /// Raising it is a decision about how much CPU a stranger may bill to this
+    /// process. Lowering it is usually what a latency-sensitive verifier wants. A
+    /// caller that tries several passwords in a loop pays the budget per attempt —
+    /// one PBES2 recipient element per message is all this crate reads, so the loop is
+    /// the caller's to bound.
+    ///
+    /// ```
+    /// use jose_rs::algorithm::{JweAlgorithm, JweEncryption};
+    /// use jose_rs::jwe::JweDecryptOptions;
+    ///
+    /// let opts = JweDecryptOptions::new(vec![JweAlgorithm::Pbes2Hs256A128kw], vec![JweEncryption::A128GCM])
+    ///     .with_pbes2_max_iterations(20_000);
+    /// assert_eq!(opts.pbes2_max_iterations(), 20_000);
+    /// ```
+    #[must_use]
+    pub fn with_pbes2_max_iterations(mut self, iterations: u32) -> Self {
+        self.pbes2_max_iterations = Some(iterations);
+        self
+    }
+
+    /// The effective PBKDF2 iteration ceiling for this recipient.
+    #[must_use]
+    pub fn pbes2_max_iterations(&self) -> u32 {
+        self.pbes2_max_iterations
+            .unwrap_or(super::password::PBES2_DEFAULT_MAX_ITERATIONS)
     }
 
     /// Accept a `crit` member listing the private header parameters in `names`.
@@ -1063,6 +1142,247 @@ pub(crate) fn aes_gcm_kw_key_len(alg: JweAlgorithm) -> Option<usize> {
     }
 }
 
+/// What a PBES2 algorithm fixes: the derived key length and the HMAC PRF.
+///
+/// RFC 7518 §4.8 pairs each `alg` with one hash and one AES-KW key size —
+/// `PBES2-HS256+A128KW` is HMAC-SHA-256 producing a 128-bit key for `A128KW`, and so
+/// on. The name says all of it, which is why nothing here reads a length from
+/// anywhere else: the derived key is the key-encryption key, so its length is the
+/// wrapping algorithm's key length, and `enc` has no claim on it (the CEK it protects
+/// is a different length entirely, and the two get compared only by accident).
+pub(crate) fn pbes2_params(alg: JweAlgorithm) -> Option<(usize, kryptering::HashAlgorithm)> {
+    use kryptering::HashAlgorithm;
+    match alg {
+        JweAlgorithm::Pbes2Hs256A128kw => Some((16, HashAlgorithm::Sha256)),
+        JweAlgorithm::Pbes2Hs384A192kw => Some((24, HashAlgorithm::Sha384)),
+        JweAlgorithm::Pbes2Hs512A256kw => Some((32, HashAlgorithm::Sha512)),
+        _ => None,
+    }
+}
+
+/// Whether `alg` derives its key-encryption key from a password.
+///
+/// Separate from [`pbes2_params`] because the receive path needs to refuse a
+/// password-shaped input for a non-PBES2 algorithm *by name*, before it can say
+/// anything about parameters.
+pub(crate) fn alg_is_pbes2(alg: JweAlgorithm) -> bool {
+    pbes2_params(alg).is_some()
+}
+
+/// The PBKDF2 salt for a PBES2 operation: `UTF8(Alg) || 0x00 || Salt Input`.
+///
+/// The algorithm identifier is inside the salt (RFC 7518 §4.8.1.1), so the same
+/// password and the same salt input derive *different* keys under the three PBES2
+/// algorithms. That is what makes the `alg` pin load-bearing here rather than
+/// cosmetic: a message that claims `PBES2-HS256+A128KW` while intending
+/// `PBES2-HS512+A256KW` derives a different KEK and fails the wrap's integrity check,
+/// instead of happening to work.
+pub(crate) fn pbes2_salt(alg: JweAlgorithm, salt_input: &[u8]) -> Vec<u8> {
+    let mut salt = Vec::with_capacity(alg.as_str().len() + 1 + salt_input.len());
+    salt.extend_from_slice(alg.as_str().as_bytes());
+    salt.push(0x00);
+    salt.extend_from_slice(salt_input);
+    salt
+}
+
+/// Derive a PBES2 key-encryption key, within the caller's work budget.
+///
+/// The budget is the point of routing PBKDF2 through here rather than calling the
+/// backend directly: `p2c` arrives in the message, chosen by whoever sent it, and it
+/// names how much CPU the *recipient* spends. `max_iterations` is that recipient's
+/// limit, applied before any work happens — a rejected count costs nothing, whereas
+/// deriving and then discovering the count was absurd is exactly the bill this
+/// prevents. The floors and ceilings are documented on the constants in
+/// [`crate::jwe::password`].
+///
+/// The result is `Zeroizing`: of everything in this flow, the derived key is what an
+/// attacker with memory access wants, and it is derived in milliseconds from
+/// something a human typed.
+pub(crate) fn pbes2_derive(
+    alg: JweAlgorithm,
+    password: &super::password::Password,
+    salt_input: &[u8],
+    iterations: u32,
+    max_iterations: u32,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let (key_len, hash) = pbes2_params(alg).ok_or_else(|| {
+        JoseError::UnsupportedAlgorithm(format!("{} is not a PBES2 algorithm", alg.as_str()))
+    })?;
+    if iterations < super::password::PBES2_MIN_ITERATIONS {
+        return Err(JoseError::InvalidHeader(format!(
+            "p2c of {iterations} is below the {min} iteration floor this crate accepts \
+             (RFC 7518 §4.8.1.2 recommends a minimum of 1000)",
+            min = super::password::PBES2_MIN_ITERATIONS
+        )));
+    }
+    if iterations > max_iterations {
+        return Err(JoseError::InvalidHeader(format!(
+            "p2c of {iterations} exceeds this recipient's PBES2 work budget of \
+             {max_iterations} iterations; the sender chooses that count and the recipient \
+             pays it, so it is refused rather than computed"
+        )));
+    }
+    let params = kryptering::kdf::Pbkdf2Params {
+        hash,
+        salt: pbes2_salt(alg, salt_input),
+        iteration_count: iterations,
+        key_length: key_len,
+    };
+    Ok(Zeroizing::new(kryptering::kdf::pbkdf2_derive(
+        password.as_bytes(),
+        &params,
+    )?))
+}
+
+/// Generate a PBES2 salt input: fresh, random, and longer than the RFC's minimum.
+///
+/// RFC 7518 §4.8.1.1 requires "8 or more octets" and a new value for *every*
+/// encryption operation. Sixteen is used because the salt is the only thing
+/// separating two messages protected by the same password — with a repeated salt,
+/// two messages under one password are two AES-KW ciphertexts of the same CEK under
+/// the same derived key, which is the shape an offline attack wants — and because
+/// that is the length both interop peers emit.
+pub(crate) fn pbes2_salt_input() -> Vec<u8> {
+    content::random_bytes(16)
+}
+
+/// Publish PBES2's `p2s` and `p2c` in the protected header.
+///
+/// Both are mandatory (RFC 7518 §4.8.1) and both are **this crate's to generate**:
+/// `p2s` is a nonce whose reuse collapses the salt's purpose, and `p2c` is a work
+/// budget the recipient pays. They join `epk` and the AES-GCM wrap's `iv`/`tag` as
+/// members the library produces, refused from a caller for every algorithm — and, as
+/// there, the check lives here too, because this is the function that would otherwise
+/// overwrite a supplied value in silence.
+///
+/// `p2c` is written as a JSON integer, as §4.8.1.2 requires; a quoted number would be
+/// read as a string by a conformant peer and refused.
+fn with_pbes2_members(
+    header: &JoseHeader,
+    salt_input: &[u8],
+    iterations: u32,
+    alg: JweAlgorithm,
+) -> Result<JoseHeader> {
+    let mut header = header.clone();
+    for member in ["p2s", "p2c"] {
+        if header.extra.contains_key(member) {
+            return Err(JoseError::InvalidHeader(format!(
+                "{}: `{member}` is generated by this crate for PBES2 (RFC 7518 \u{a7}4.8.1) and \
+                 cannot be supplied by the caller",
+                alg.as_str()
+            )));
+        }
+    }
+    header.extra.insert(
+        "p2s".into(),
+        serde_json::json!(crate::base64url::encode(salt_input)),
+    );
+    header
+        .extra
+        .insert("p2c".into(), serde_json::json!(iterations));
+    Ok(header)
+}
+
+/// Read a PBES2 message's salt input and iteration count from the protected header.
+///
+/// Both members are mandatory, and both are read **only** from the integrity-protected
+/// header: an unprotected `p2s`/`p2c` was refused at parse time (ADR 0013). That is
+/// load-bearing in a way it is not for most members. These two values are the KDF's
+/// inputs, and a peer that can edit them without detection can pick a salt of its
+/// choosing — which turns "derive a key from the password" into "derive a key from the
+/// password and a value I control", the primitive behind every offline dictionary
+/// attack that beats a precomputed table.
+///
+/// The salt must be at least 8 octets (§4.8.1.1's own minimum) and the count must be a
+/// JSON integer, positive, and within the caller's budget.
+fn pbes2_message_params(header: &JoseHeader, alg: JweAlgorithm) -> Result<(Vec<u8>, u32)> {
+    let salt_member = header.extra.get("p2s").ok_or_else(|| {
+        JoseError::InvalidHeader(format!(
+            "{} requires a p2s header member (RFC 7518 \u{a7}4.8.1.1), which is absent",
+            alg.as_str()
+        ))
+    })?;
+    let text = salt_member.as_str().ok_or_else(|| {
+        JoseError::InvalidHeader("p2s must be a base64url string (RFC 7518 \u{a7}4.8.1.1)".into())
+    })?;
+    let salt_input = crate::base64url::decode(text)?;
+    if salt_input.len() < 8 {
+        return Err(JoseError::InvalidHeader(format!(
+            "p2s must encode 8 or more octets (RFC 7518 \u{a7}4.8.1.1), got {}",
+            salt_input.len()
+        )));
+    }
+
+    let count_member = header.extra.get("p2c").ok_or_else(|| {
+        JoseError::InvalidHeader(format!(
+            "{} requires a p2c header member (RFC 7518 \u{a7}4.8.1.2), which is absent",
+            alg.as_str()
+        ))
+    })?;
+    // `as_u64` accepts only a JSON integer: a float, a quoted number, a bool and a
+    // negative all fail here, which is the §4.8.1.2 definition of "positive JSON
+    // integer" rather than a best-effort coercion.
+    let iterations = count_member.as_u64().ok_or_else(|| {
+        JoseError::InvalidHeader(
+            "p2c must be a positive JSON integer (RFC 7518 \u{a7}4.8.1.2)".into(),
+        )
+    })?;
+    let iterations = u32::try_from(iterations).map_err(|_| {
+        JoseError::InvalidHeader(format!(
+            "p2c of {iterations} is larger than this implementation can run"
+        ))
+    })?;
+    Ok((salt_input, iterations))
+}
+
+/// Recover the CEK from a PBES2 message.
+///
+/// A wrong password fails here, at the AES-KW integrity check on the wrapped key, and
+/// says so — unlike RSA-OAEP there is no implicit rejection to preserve, because RFC
+/// 3394's wrap authenticates and a wrong derived key cannot produce a CEK at all. That
+/// also means this path is a password oracle for anyone who can send a message and
+/// observe the failure: which is inherent to password-based crypto, and the reason the
+/// iteration count (rather than the failure mode) is what limits an offline attack.
+fn pbes2_recover_cek(
+    header: &JoseHeader,
+    password: &super::password::Password,
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    encrypted_key: &[u8],
+    max_iterations: u32,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if encrypted_key.is_empty() {
+        return Err(JoseError::InvalidToken(format!(
+            "{} must convey the wrapped content key",
+            alg.as_str()
+        )));
+    }
+    let (salt_input, iterations) = pbes2_message_params(header, alg)?;
+    let kek = pbes2_derive(alg, password, &salt_input, iterations, max_iterations)?;
+    let cek = Zeroizing::new(
+        kryptering::keywrap::unwrap(jwe_alg_to_keywrap(alg)?, &kek, encrypted_key)
+            .map_err(|e| {
+                // Named as a password failure rather than a generic crypto error: this
+                // is the one key-management path where "unwrap failed" almost always
+                // means "wrong password", and that distinction is the whole diagnostic.
+                JoseError::Key(format!(
+                    "{}: the wrapped key did not authenticate; wrong password, or the                      p2s/p2c parameters do not match the sender's ({e})",
+                    alg.as_str()
+                ))
+            })?,
+    );
+    if cek.len() != enc.cek_size() {
+        return Err(JoseError::Key(format!(
+            "{}: unwrapped CEK length {} does not match the {} bytes {} requires",
+            alg.as_str(),
+            cek.len(),
+            enc.cek_size(),
+            enc.as_str()
+        )));
+    }
+    Ok(cek)
+}
+
 /// The refusal when a key-management algorithm's per-message values would have to
 /// be published once per recipient.
 ///
@@ -1576,6 +1896,7 @@ pub(crate) fn recover_cek(
     enc: JweEncryption,
     encrypted_key: &[u8],
     header: &JoseHeader,
+    pbes2_max_iterations: u32,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let cek_len = enc.cek_size();
 
@@ -1600,14 +1921,45 @@ pub(crate) fn recover_cek(
                 "{} requires a JWK: key agreement needs the curve and coordinates of a key, and the peer key is read from the message's epk header member, so the raw-key API cannot express it",
                 other.as_str()
             ))),
+            // A password cannot do agreement either, and saying so keeps it out of the
+            // "pass bytes" advice below, which would be nonsense for a password.
+            (KeyMaterial::Password(_), other) => Err(JoseError::Key(format!(
+                "{} requires a key pair, not a password",
+                other.as_str()
+            ))),
+        };
+    }
+
+    // PBES2 next, and separately for the same reason agreement is: its key material is
+    // a password rather than bytes, and the derivation's inputs (`p2s`, `p2c`) come out
+    // of the authenticated header. Handing a key here is refused by name rather than
+    // quietly treated as a password — a key handed to a password algorithm would be
+    // *usable* (its bytes are bytes), which is precisely why it must not be.
+    if alg_is_pbes2(alg) {
+        return match key {
+            KeyMaterial::Password(password) => {
+                pbes2_recover_cek(header, password, alg, enc, encrypted_key, pbes2_max_iterations)
+            }
+            KeyMaterial::Bytes(_) | KeyMaterial::Jwk(_) => Err(JoseError::Key(format!(
+                "{} derives its key from a password with the message's p2s and p2c, so it needs                  one: use the password API. Key bytes are not accepted here because a key and a                  password have different security arguments and one secret must not serve both                  (RFC 7518 {}4.8)",
+                alg.as_str(),
+                "\u{a7}"
+            ))),
         };
     }
     let key = match key {
         KeyMaterial::Bytes(bytes) => bytes.as_slice(),
-        // Unreachable: every agreement algorithm returned above.
+        // Unreachable: agreement and PBES2 both returned above, so only the algorithms
+        // that consume key bytes get here.
         KeyMaterial::Jwk(_) => {
             return Err(JoseError::Key(
                 "internal error: JWK key material reached a byte-oriented recovery path".into(),
+            ))
+        }
+        KeyMaterial::Password(_) => {
+            return Err(JoseError::Key(
+                "internal error: password key material reached a byte-oriented recovery path"
+                    .into(),
             ))
         }
     };
@@ -1756,13 +2108,15 @@ pub(crate) fn check_kek_size(alg: JweAlgorithm, key: &[u8]) -> Result<()> {
 pub(crate) fn jwe_alg_to_keywrap(alg: JweAlgorithm) -> Result<kryptering::KeyWrapAlgorithm> {
     use kryptering::{AesKeySize, KeyWrapAlgorithm};
     match alg {
-        JweAlgorithm::A128KW | JweAlgorithm::EcdhEsA128kw => {
+        // PBES2's derived key *is* the AES-KW key, at the length the algorithm's own
+        // name states, so it shares this mapping rather than owning a copy.
+        JweAlgorithm::A128KW | JweAlgorithm::EcdhEsA128kw | JweAlgorithm::Pbes2Hs256A128kw => {
             Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128))
         }
-        JweAlgorithm::A192KW | JweAlgorithm::EcdhEsA192kw => {
+        JweAlgorithm::A192KW | JweAlgorithm::EcdhEsA192kw | JweAlgorithm::Pbes2Hs384A192kw => {
             Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192))
         }
-        JweAlgorithm::A256KW | JweAlgorithm::EcdhEsA256kw => {
+        JweAlgorithm::A256KW | JweAlgorithm::EcdhEsA256kw | JweAlgorithm::Pbes2Hs512A256kw => {
             Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes256))
         }
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
@@ -1876,10 +2230,24 @@ pub(crate) enum KeyMaterial {
     /// Boxed so the byte variant stays small: a `Jwk` is well over half a
     /// kilobyte, and this enum is passed around by value on every encrypt.
     Jwk(Box<crate::jwk::Jwk>),
+    /// A password, accepted only by the PBES2 algorithms.
+    ///
+    /// A third variant rather than `Bytes` with a flag, because the distinction is the
+    /// point: `Bytes` means "use these octets as the key", and `Password` means "these
+    /// octets are the *input* to a key derivation with parameters from the message". A
+    /// password that reached a `Bytes` path would be used as a KEK directly — one secret
+    /// serving two incompatible security arguments, which is a confusion waiting to be
+    /// exploited rather than a bug to be found.
+    Password(super::password::Password),
 }
 
 impl KeyMaterial {
     /// Key bytes, for the transport and wrapping algorithms.
+    ///
+    /// A password is refused here by name, and not with the "internal error" wording
+    /// used for the JWK case: reaching this function with a password is reachable from
+    /// the public API (a password handed to a non-PBES2 algorithm), and the caller
+    /// deserves to be told that a password is not a key.
     fn bytes(&self) -> Result<&[u8]> {
         match self {
             Self::Bytes(bytes) => Ok(bytes),
@@ -1887,7 +2255,36 @@ impl KeyMaterial {
                 "internal error: JWK key material reached a byte-oriented key-management path"
                     .into(),
             )),
+            Self::Password(_) => Err(JoseError::Key(
+                "a password is not a key: PBES2 derives a key-encryption key from it using \
+                 the message's p2s and p2c, so its bytes are never key material directly \
+                 (RFC 7518 \u{a7}4.8). Use the password API with a PBES2 algorithm, and a \
+                 key with any other"
+                    .into(),
+            )),
         }
+    }
+}
+
+/// Route a password into key material, for the PBES2 family only.
+///
+/// The refusal matters as much as the acceptance. Accepting a password for `A128KW` or
+/// `dir` — which is what an untyped `&[u8]` entry point would do — uses its bytes
+/// straight as a key, and a password has none of the entropy those algorithms assume.
+/// Refusing by name is what keeps the two families from sharing an entry point.
+pub(crate) fn password_key(
+    password: &super::password::Password,
+    alg: JweAlgorithm,
+) -> Result<KeyMaterial> {
+    if alg_is_pbes2(alg) {
+        Ok(KeyMaterial::Password(password.clone()))
+    } else {
+        Err(JoseError::Key(format!(
+            "{} does not use a password; PBES2-HS256+A128KW, PBES2-HS384+A192KW and \
+             PBES2-HS512+A256KW are the password-based key management algorithms, and this \
+             one would use the password's bytes directly as a key (RFC 7518 \u{a7}4.8)",
+            alg.as_str()
+        )))
     }
 }
 
@@ -1943,6 +2340,14 @@ pub(crate) fn jwk_to_jwe_key_bytes(
         JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
         #[cfg(feature = "deprecated")]
         JweAlgorithm::RsaOaep => rsa_jwk_to_der(jwk, for_decrypt),
+        // Named rather than left to the catch-all below, because this is the exact
+        // confusion the password type exists to prevent: an `oct` JWK whose `k` holds a
+        // passphrase looks usable here, and the same JWK would be accepted by `A128KW` —
+        // one secret, two incompatible security arguments.
+        other if alg_is_pbes2(other) => Err(JoseError::Key(format!(
+            "{} derives its key from a password, not from a JWK: an `oct` key's bytes are              high-entropy key material and a passphrase is not, so the same JWK would be              acceptable to A128KW as well. Use the password API (RFC 7518 \u{a7}4.8)",
+            other.as_str()
+        ))),
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
             "JWE alg {} not supported via JWK one-shot API",
             alg.as_str()
@@ -2008,6 +2413,13 @@ enum Prepared {
     /// AES-GCM key management: already wrapped, because the IV and tag it produced
     /// are in the header.
     GcmWrapped {
+        cek: Zeroizing<Vec<u8>>,
+        encrypted_key: Vec<u8>,
+    },
+    /// PBES2: already wrapped, because the salt input and iteration count it consumed
+    /// are in the header — and because the key-encryption key those parameters produce
+    /// exists only for this one operation.
+    Pbes2Wrapped {
         cek: Zeroizing<Vec<u8>>,
         encrypted_key: Vec<u8>,
     },
@@ -2203,6 +2615,63 @@ pub(crate) fn encrypt_core_multi(
                 },
             )
         }
+        // PBES2 (RFC 7518 §4.8): the salt input and iteration count are header
+        // members, so — as with agreement's `epk` and the AES-GCM wrap's `iv`/`tag` —
+        // the key work has to happen before the header is serialized, because that
+        // serialized header is what authenticates them.
+        (KeyMaterial::Password(password), other) if alg_is_pbes2(other) => {
+            if !rest.is_empty() {
+                // Each recipient's password derives a different KEK, so each needs its
+                // own `p2s`/`p2c` — and a recipient element has no protected header to
+                // carry them in. The same structural refusal as `epk` and `iv`/`tag`.
+                return Err(per_recipient_member_unsupported(other, "p2s and p2c"));
+            }
+            // Refused on the emit side only: an unset secret and an empty one look
+            // identical here. A peer's message is never refused for the shape of its
+            // secret when reading — the wrap's integrity check decides that.
+            if password.is_empty() {
+                return Err(JoseError::Key(
+                    "PBES2 with an empty password is refused: an unset secret and an empty \
+                     one are indistinguishable here, and no salt fixes a zero-length \
+                     password (RFC 7518 \u{a7}4.8)"
+                        .into(),
+                ));
+            }
+            let iterations = opts
+                .pbes2_iterations()
+                .unwrap_or(super::password::PBES2_DEFAULT_ITERATIONS);
+            if iterations < super::password::PBES2_MIN_ITERATIONS {
+                return Err(JoseError::InvalidHeader(format!(
+                    "a p2c of {iterations} would be refused by every conformant reader: RFC \
+                     7518 \u{a7}4.8.1.2 recommends a minimum of 1000, and this crate does not \
+                     emit what it refuses to read"
+                )));
+            }
+            let salt_input = pbes2_salt_input();
+            let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
+            // The sender's only ceiling is the backend's: the count was chosen
+            // knowingly, and it is the *recipient's* budget that limits a received one.
+            let kek = pbes2_derive(
+                other,
+                password,
+                &salt_input,
+                iterations,
+                kryptering::kdf::PBKDF2_MAX_ITERATIONS,
+            )?;
+            let encrypted_key = kryptering::keywrap::wrap(jwe_alg_to_keywrap(other)?, &kek, &cek)
+                .map_err(JoseError::Crypto)?;
+            let header = with_pbes2_members(header, &salt_input, iterations, other)?;
+            (
+                std::borrow::Cow::Owned(header),
+                Prepared::Pbes2Wrapped { cek, encrypted_key },
+            )
+        }
+        (KeyMaterial::Password(_), other) => {
+            return Err(JoseError::Key(format!(
+                "{} does not use a password; see PBES2-HS256+A128KW / +HS384+A192KW /                  +HS512+A256KW",
+                other.as_str()
+            )))
+        }
         (KeyMaterial::Jwk(_), other) => {
             return Err(JoseError::UnsupportedAlgorithm(format!(
                 "{} is not implemented by this crate",
@@ -2236,7 +2705,8 @@ pub(crate) fn encrypt_core_multi(
     // latter already having wrapped it so its header members could be published.
     let (cek, first_wrapped) = match prepared {
         Prepared::Agreed { cek } => (cek, Vec::new()),
-        Prepared::GcmWrapped { cek, encrypted_key } => (cek, encrypted_key),
+        Prepared::GcmWrapped { cek, encrypted_key }
+        | Prepared::Pbes2Wrapped { cek, encrypted_key } => (cek, encrypted_key),
         Prepared::AgreementWrap { sender } => {
             let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
             let wrapped = sender.wrap(alg, &cek)?;
@@ -2271,9 +2741,10 @@ pub(crate) fn encrypt_core_multi(
 #[cfg(test)]
 mod tests {
     use super::{
-        aes_gcm_kw_key_len, agreement_kek_len, gcm_kw_unwrap, gcm_kw_wrap, jwe_alg_to_keywrap,
-        other_info, per_recipient_member_unsupported, required_header_bytes, with_gcm_members,
-        GcmKeyWrap,
+        aes_gcm_kw_key_len, agreement_kek_len, alg_is_pbes2, gcm_kw_unwrap, gcm_kw_wrap,
+        jwe_alg_to_keywrap, other_info, password_key, pbes2_derive, pbes2_message_params,
+        pbes2_params, pbes2_salt, per_recipient_member_unsupported, required_header_bytes,
+        with_gcm_members, with_pbes2_members, GcmKeyWrap, KeyMaterial,
     };
     use crate::algorithm::{JweAlgorithm, JweEncryption};
     use crate::header::JoseHeader;
@@ -2447,6 +2918,312 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(member), "{member}: {err}");
+        }
+    }
+
+    /// Measure the cost of the PBES2 work budget, on the machine running the tests.
+    ///
+    /// Ignored by default because it is a measurement, not an assertion: the ADR's
+    /// numbers were chosen from timings like these, and anyone who wants to re-derive
+    /// them for their own hardware should get the same numbers the decision used
+    /// rather than a prose description. Run it in release mode — a debug build makes
+    /// the HMAC loop several hundred times slower and the numbers are meaningless:
+    /// ```text
+    /// cargo test --release --lib -- --ignored --nocapture pbes2
+    /// ```
+    #[test]
+    #[ignore]
+    fn pbes2_work_budget_benchmark() {
+        use kryptering::algorithm::HashAlgorithm;
+        use kryptering::kdf::{pbkdf2_derive, Pbkdf2Params};
+        use std::time::Instant;
+
+        for (hash, name) in [
+            (HashAlgorithm::Sha256, "PBES2-HS256+A128KW"),
+            (HashAlgorithm::Sha384, "PBES2-HS384+A192KW"),
+            (HashAlgorithm::Sha512, "PBES2-HS512+A256KW"),
+        ] {
+            for iterations in [
+                1_000u32, 2_048, 8_192, 100_000, 250_000, 1_000_000, 10_000_000,
+            ] {
+                let params = Pbkdf2Params {
+                    hash,
+                    salt: b"0123456789abcdef".to_vec(),
+                    iteration_count: iterations,
+                    key_length: 16,
+                };
+                let start = Instant::now();
+                let derived = pbkdf2_derive(b"a-.password-to-derive-from", &params).unwrap();
+                let elapsed = start.elapsed();
+                assert_eq!(derived.len(), 16);
+                println!(
+                    "{name}: {iterations:>10} iterations in {:>9.3} ms",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pbes2_names_its_hash_and_derived_key_length() {
+        // The `alg` name states all of it — PBES2-HS512+A256KW is HMAC-SHA-512
+        // producing 32 octets for A256KW — so nothing here may read a length from
+        // anywhere else, least of all `enc`.
+        use kryptering::HashAlgorithm;
+        assert_eq!(
+            pbes2_params(JweAlgorithm::Pbes2Hs256A128kw),
+            Some((16, HashAlgorithm::Sha256))
+        );
+        assert_eq!(
+            pbes2_params(JweAlgorithm::Pbes2Hs384A192kw),
+            Some((24, HashAlgorithm::Sha384))
+        );
+        assert_eq!(
+            pbes2_params(JweAlgorithm::Pbes2Hs512A256kw),
+            Some((32, HashAlgorithm::Sha512))
+        );
+        for alg in [
+            JweAlgorithm::A128KW,
+            JweAlgorithm::A128Gcmkw,
+            JweAlgorithm::EcdhEsA128kw,
+            JweAlgorithm::Dir,
+        ] {
+            assert_eq!(pbes2_params(alg), None, "{alg:?}");
+            assert!(!alg_is_pbes2(alg), "{alg:?}");
+        }
+
+        // And the derived key is the AES-KW key, at the length the name states, so
+        // PBES2 shares one wrap mapping with the RFC 3394 algorithms rather than
+        // owning a second spelling of "wrap with AES-KW".
+        for alg in [
+            JweAlgorithm::Pbes2Hs256A128kw,
+            JweAlgorithm::Pbes2Hs384A192kw,
+            JweAlgorithm::Pbes2Hs512A256kw,
+        ] {
+            assert!(jwe_alg_to_keywrap(alg).is_ok(), "{alg:?}");
+            assert!(alg_is_pbes2(alg), "{alg:?}");
+        }
+    }
+
+    #[test]
+    fn the_pbes2_salt_carries_the_algorithm_name() {
+        // RFC 7518 §4.8.1.1: the salt is UTF8(Alg) || 0x00 || Salt Input. The
+        // algorithm identifier inside the salt is what makes the `alg` pin bite —
+        // the same password and salt derive three different keys under the three
+        // algorithms, so a message cannot be read under a cheaper one.
+        let salt_input = [0xAAu8, 0xBB, 0xCC];
+        let salt = pbes2_salt(JweAlgorithm::Pbes2Hs256A128kw, &salt_input);
+        assert_eq!(
+            salt,
+            [b"PBES2-HS256+A128KW".as_slice(), &[0x00], &salt_input].concat()
+        );
+        assert_ne!(
+            pbes2_salt(JweAlgorithm::Pbes2Hs512A256kw, &salt_input),
+            salt,
+            "different algorithms must derive different keys"
+        );
+        // An empty salt input still produces the algorithm-prefixed salt; the ≥8
+        // octet rule is enforced on the member, not here.
+        assert_eq!(
+            pbes2_salt(JweAlgorithm::Pbes2Hs256A128kw, &[]).len(),
+            "PBES2-HS256+A128KW".len() + 1
+        );
+    }
+
+    #[test]
+    fn the_rfc_7520_pbes2_derivation_and_wrap_are_reproduced() {
+        // RFC 7520 §5.3: the CEK (Figure 97), salt input (Figure 99), 8192
+        // iterations and the Figure 96 password must produce the Figure 100
+        // encrypted key. Independent of this implementation end to end: the salt
+        // construction, the HMAC-SHA-512 PRF, the 32-octet derived key and the
+        // RFC 3394 wrap all have to agree, or the output differs.
+        let password = super::super::password::Password::from_utf8(
+            "entrap_o\u{2013}peter_long\u{2013}credit_tun",
+        );
+        let cek = crate::base64url::decode("uwsjJXaBK407Qaf0_zpcpmr1Cs0CC50hIUEyGNEt3m0").unwrap();
+        let salt_input = crate::base64url::decode("8Q1SzinasR3xchYz6ZZcHA").unwrap();
+        let kek = pbes2_derive(
+            JweAlgorithm::Pbes2Hs512A256kw,
+            &password,
+            &salt_input,
+            8192,
+            kryptering::kdf::PBKDF2_MAX_ITERATIONS,
+        )
+        .unwrap();
+        assert_eq!(kek.len(), 32, "A256KW's key length, from the alg");
+
+        let wrapped = kryptering::keywrap::wrap(
+            jwe_alg_to_keywrap(JweAlgorithm::Pbes2Hs512A256kw).unwrap(),
+            &kek,
+            &cek,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::base64url::encode(&wrapped),
+            "d3qNhUWfqheyPp4H8sjOWsDYajoej4c5Je6rlUtFPWdgtURtmeDV1g",
+            "RFC 7520 Figure 100"
+        );
+    }
+
+    #[test]
+    fn a_budget_violation_refuses_before_deriving() {
+        // The whole point of routing PBKDF2 through here: the sender names the count
+        // and the recipient pays, so an out-of-range count must cost nothing. A
+        // refusal measured in seconds would mean the check ran after the derivation.
+        use super::super::password::Password;
+        let password = Password::from_utf8("x");
+        let started = std::time::Instant::now();
+
+        let too_low = pbes2_derive(
+            JweAlgorithm::Pbes2Hs256A128kw,
+            &password,
+            &[1u8; 16],
+            999,
+            10_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(too_low.contains("iteration floor"), "{too_low}");
+
+        let too_high = pbes2_derive(
+            JweAlgorithm::Pbes2Hs256A128kw,
+            &password,
+            &[1u8; 16],
+            1_000_000,
+            10_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(too_high.contains("work budget"), "{too_high}");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "refusing must be free, not a derivation followed by a complaint"
+        );
+
+        // A non-PBES2 algorithm has no parameters to derive with.
+        assert!(pbes2_derive(JweAlgorithm::A128KW, &password, &[1u8; 16], 4096, 10_000).is_err());
+    }
+
+    #[test]
+    fn the_pbes2_members_are_read_or_refused_by_name() {
+        let alg = JweAlgorithm::Pbes2Hs256A128kw;
+        let mut header = gcm_header(alg);
+
+        // Both mandatory.
+        assert!(pbes2_message_params(&header, alg)
+            .unwrap_err()
+            .to_string()
+            .contains("p2s"));
+        header.extra.insert(
+            "p2s".into(),
+            serde_json::json!(crate::base64url::encode(&[7u8; 16])),
+        );
+        assert!(pbes2_message_params(&header, alg)
+            .unwrap_err()
+            .to_string()
+            .contains("p2c"));
+
+        // §4.8.1.2's "positive JSON integer", exactly: no strings, no floats, no
+        // negatives, no coercion.
+        for bad in [
+            serde_json::json!("8192"),
+            serde_json::json!(8192.0),
+            serde_json::json!(-1),
+            serde_json::json!(true),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            header.extra.insert("p2c".into(), bad.clone());
+            let err = pbes2_message_params(&header, alg).unwrap_err().to_string();
+            assert!(
+                err.contains("positive JSON integer") || err.contains("larger than"),
+                "{bad}: {err}"
+            );
+        }
+
+        // The salt has a minimum, and it is the RFC's own.
+        header.extra.insert(
+            "p2s".into(),
+            serde_json::json!(crate::base64url::encode(&[7u8; 7])),
+        );
+        header.extra.insert("p2c".into(), serde_json::json!(4096));
+        assert!(pbes2_message_params(&header, alg)
+            .unwrap_err()
+            .to_string()
+            .contains("8 or more octets"));
+
+        // A well-formed pair reads as what it says.
+        header.extra.insert(
+            "p2s".into(),
+            serde_json::json!(crate::base64url::encode(&[7u8; 16])),
+        );
+        let (salt, iterations) = pbes2_message_params(&header, alg).unwrap();
+        assert_eq!(salt, vec![7u8; 16]);
+        assert_eq!(iterations, 4096);
+    }
+
+    #[test]
+    fn pbes2_members_are_generated_here_and_cannot_be_supplied() {
+        let alg = JweAlgorithm::Pbes2Hs256A128kw;
+        let salt = [0x11u8; 16];
+        let header = with_pbes2_members(&gcm_header(alg), &salt, 4096, alg).unwrap();
+        assert_eq!(
+            header.extra.get("p2s").and_then(|v| v.as_str()),
+            Some(crate::base64url::encode(&salt).as_str())
+        );
+        // A JSON integer, not a quoted number: §4.8.1.2, and a peer reads the type.
+        assert!(header.extra.get("p2c").and_then(|v| v.as_u64()).is_some());
+
+        for member in ["p2s", "p2c"] {
+            let mut caller = gcm_header(alg);
+            caller.extra.insert(member.into(), serde_json::json!(1));
+            let err = with_pbes2_members(&caller, &salt, 4096, alg)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(member), "{member}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_password_is_routed_only_to_the_password_algorithms() {
+        use super::super::password::Password;
+        let password = Password::from_utf8("a passphrase");
+        for alg in [
+            JweAlgorithm::Pbes2Hs256A128kw,
+            JweAlgorithm::Pbes2Hs384A192kw,
+            JweAlgorithm::Pbes2Hs512A256kw,
+        ] {
+            assert!(matches!(
+                password_key(&password, alg).unwrap(),
+                KeyMaterial::Password(_)
+            ));
+        }
+        for alg in [
+            JweAlgorithm::A128KW,
+            JweAlgorithm::Dir,
+            JweAlgorithm::A128Gcmkw,
+            JweAlgorithm::EcdhEs,
+            JweAlgorithm::RsaOaep256,
+        ] {
+            // `KeyMaterial` has no `Debug` on purpose — it holds key bytes and a
+            // password — so the error is extracted rather than unwrapped.
+            let err = password_key(&password, alg)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert!(err.contains("does not use a password"), "{alg:?}: {err}");
+        }
+        // And if a password somehow reached a byte-oriented path, it is refused there
+        // too rather than used as key material.
+        let key = password_key(&password, JweAlgorithm::Pbes2Hs256A128kw).unwrap();
+        // Matched rather than unwrapped: `KeyMaterial` has no `Debug`, on purpose, so
+        // neither `unwrap_err` nor `expect_err` is available on it.
+        match key.bytes() {
+            Ok(bytes) => panic!(
+                "a password leaked out as {} bytes of key material",
+                bytes.len()
+            ),
+            Err(err) => assert!(err.to_string().contains("not a key"), "{err}"),
         }
     }
 

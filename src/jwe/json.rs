@@ -670,6 +670,119 @@ pub fn encrypt_flattened_with_header_options(
 }
 
 /// Shared flattened-JSON emit core for both key shapes.
+/// Encrypt a flattened JWE JSON Serialization with a password (RFC 7518 §4.8).
+///
+/// The compact and JSON forms carry the same PBES2 members (`p2s`, `p2c`) in the same
+/// place — the integrity-protected header — so this differs from
+/// [`crate::jwe::compact::encrypt_with_password`] only in serialization.
+///
+/// [`crate::jwe::general`] is deliberately absent: each recipient's password derives a
+/// different key-encryption key, so each needs its own `p2s`/`p2c`, and RFC 7516 gives a
+/// recipient element no protected header to carry them in (ADR 0021).
+pub fn encrypt_flattened_with_password(
+    password: &crate::jwe::password::Password,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<FlattenedJwe> {
+    encrypt_flattened_with_password_options(
+        password,
+        plaintext,
+        alg,
+        enc,
+        &JweEncryptOptions::new(),
+    )
+}
+
+/// [`encrypt_flattened_with_password`] with the caller's [`JweEncryptOptions`].
+pub fn encrypt_flattened_with_password_options(
+    password: &crate::jwe::password::Password,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<FlattenedJwe> {
+    let header = JoseHeader::for_jwe(alg, enc);
+    encrypt_flattened_with_password_header_options(password, header, plaintext, alg, enc, opts)
+}
+
+/// [`encrypt_flattened_with_password`] with a caller-supplied header. `p2s` and `p2c`
+/// are generated here and refused from the caller, as everywhere.
+pub fn encrypt_flattened_with_password_header(
+    password: &crate::jwe::password::Password,
+    header: JoseHeader,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<FlattenedJwe> {
+    encrypt_flattened_with_password_header_options(
+        password,
+        header,
+        plaintext,
+        alg,
+        enc,
+        &JweEncryptOptions::new(),
+    )
+}
+
+/// [`encrypt_flattened_with_password_header`] with the caller's [`JweEncryptOptions`].
+pub fn encrypt_flattened_with_password_header_options(
+    password: &crate::jwe::password::Password,
+    header: JoseHeader,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<FlattenedJwe> {
+    encrypt_flattened_material(
+        header,
+        internal::password_key(password, alg)?,
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
+
+/// Decrypt a flattened JWE JSON Serialization with a password.
+///
+/// As for [`crate::jwe::compact::decrypt_with_password`], the algorithm cannot be pinned
+/// to the secret, so the pin comes from the family check: `alg` must name a PBES2
+/// algorithm, and `p2s`/`p2c` are read from the integrity-protected header only.
+pub fn decrypt_flattened_with_password(
+    password: &crate::jwe::password::Password,
+    jwe: &FlattenedJwe,
+) -> Result<Vec<u8>> {
+    // Read the header to find out which key-management mode this claims to be — before
+    // the password is offered to anything. `decrypt_impl` re-checks `alg` against the
+    // options' allow-list below, so this is the family gate rather than the only one.
+    let header = jwe
+        .peek_protected_header()?
+        .ok_or_else(|| JoseError::InvalidHeader("unreadable protected header".into()))?;
+    let alg = JweAlgorithm::from_str(&header.alg)?;
+    if !crate::jwe::compact::pbes2_algorithms().contains(&alg) {
+        return Err(JoseError::Key(format!(
+            "{} is not a password-based algorithm, so no password is offered to it (RFC 7518 \
+             \u{a7}4.8)",
+            alg.as_str()
+        )));
+    }
+    let key = internal::password_key(password, alg)?;
+    // No `pinned_alg`: a password carries no `alg` to pin against. The allow-list is the
+    // password family, which is the strongest pin available when the secret cannot carry
+    // one — and it is the pin that matters, because it keeps a byte-key algorithm from
+    // ever being handed the password.
+    decrypt_impl(
+        &key,
+        jwe,
+        &JweDecryptOptions::new(
+            crate::jwe::compact::pbes2_algorithms(),
+            internal::all_enc_algorithms(),
+        ),
+        None,
+    )
+}
+
 fn encrypt_flattened_material(
     header: JoseHeader,
     key: KeyMaterial,
@@ -934,6 +1047,7 @@ fn decrypt_impl(
         envelope.enc,
         &envelope.encrypted_key,
         &protected_header,
+        options.pbes2_max_iterations(),
     )?;
     let external_aad = options.resolve_external_aad(jwe.aad.as_deref())?;
     let aad = internal::aad_input(protected, external_aad.as_deref());

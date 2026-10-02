@@ -102,6 +102,12 @@ fn run() -> Result<()> {
         "decrypt-compact" => decrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
         "encrypt-flattened" => encrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-flattened" => decrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
+        "encrypt-compact-password" => {
+            encrypt_compact_password(&require_alg(alg)?, &require_enc(enc)?)
+        }
+        "decrypt-compact-password" => {
+            decrypt_compact_password(&require_alg(alg)?, &require_enc(enc)?)
+        }
         "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
@@ -461,6 +467,81 @@ fn encrypt_compact(alg: &str, enc: &str) -> Result<()> {
     )?;
     let jwe = jose_rs::jwe::encrypt_with_jwk_header(&input.jwk, header, &plaintext, enc_v)?;
     emit(&EncryptCompactOutput { jwe })
+}
+
+#[derive(Deserialize)]
+struct EncryptCompactPasswordInput {
+    password: String,
+    plaintext_b64u: String,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, serde_json::Value>>,
+    /// PBKDF2 iteration count to publish as `p2c`. Omitted means jose-rs's
+    /// default, which is far above the peer defaults and slow in a debug build; the
+    /// matrix passes a small value so the cell stays quick.
+    #[serde(default)]
+    p2c: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct DecryptCompactPasswordInput {
+    password: String,
+    jwe: String,
+}
+
+/// Encrypt with a password (RFC 7518 §4.8), compact serialization.
+///
+/// There is no `gen-key` counterpart: a password is not generated, it is supplied.
+/// The matrix therefore fixes one for both sides, exactly as the RFCs fix one for
+/// their examples.
+fn encrypt_compact_password(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptCompactPasswordInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    let enc_v = JweEncryption::from_str(enc)?;
+    let alg_v = JweAlgorithm::from_str(alg)?;
+    let header = build_header(JoseHeader::for_jwe(alg_v, enc_v), input.header)?;
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(p2c) = input.p2c {
+        opts = opts.with_pbes2_iterations(p2c);
+    }
+    let jwe = jose_rs::jwe::encrypt_with_password_header_options(
+        &jose_rs::jwe::Password::from_utf8(&input.password),
+        header,
+        &plaintext,
+        alg_v,
+        enc_v,
+        &opts,
+    )?;
+    emit(&EncryptCompactOutput { jwe })
+}
+
+/// Decrypt a password-protected compact JWE, reporting the protected header.
+///
+/// The header is the interesting output for these cells: `p2s` and `p2c` have to be
+/// *there* (authenticated) rather than in an unprotected member, and the matrix
+/// asserts their presence and types on the consuming side.
+fn decrypt_compact_password(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptCompactPasswordInput = serde_json::from_str(&raw)?;
+    let header = jose_rs::jwe::compact::decode_header(&input.jwe)?;
+    if header.alg != alg {
+        bail!("token alg {} does not match expected {alg}", header.alg);
+    }
+    if header.enc.as_deref() != Some(enc) {
+        bail!("token enc {:?} does not match expected {enc}", header.enc);
+    }
+    let plaintext = jose_rs::jwe::decrypt_with_password(
+        &jose_rs::jwe::Password::from_utf8(&input.password),
+        &input.jwe,
+    )?;
+    emit(&DecryptCompactOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        protected_header: header,
+        unprotected_header: None,
+    })
 }
 
 /// Encrypt into the flattened JSON Serialization (RFC 7516 §7.2.2).

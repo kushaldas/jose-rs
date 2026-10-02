@@ -612,6 +612,108 @@ pub fn encrypt_general_with_jwks_options(
     encrypt_general_options(header, &specs, plaintext, alg, enc, opts)
 }
 
+/// Encrypt a general JWE whose single recipient is a password (RFC 7518 §4.8).
+///
+/// More than one recipient is refused, and the reason is structural rather than missing
+/// work: each recipient's password derives a *different* key-encryption key, so each
+/// needs its own `p2s` and `p2c` — and RFC 7516 §7.2.1 gives a recipient element only
+/// `header` (unprotected) and `encrypted_key`. Those two values are the derivation's
+/// inputs; a peer that can position them unauthenticated picks the salt the password is
+/// mixed with. The same argument refused a per-recipient `epk` (ADR 0018) and `iv`/`tag`
+/// (ADR 0020), and this family is where it is sharpest, since the KDF's inputs are what
+/// an offline dictionary attack wants to control. See ADR 0021.
+///
+/// Exactly one recipient works, because then both members live in the shared protected
+/// header, which is authenticated.
+///
+/// # Errors
+///
+/// [`crate::JoseError::UnsupportedAlgorithm`] naming `p2s and p2c` for more than one
+/// password, [`crate::JoseError::Key`] for a non-PBES2 `alg`, and the usual
+/// password-API refusals.
+pub fn encrypt_general_with_passwords(
+    header: &JoseHeader,
+    passwords: &[&crate::jwe::password::Password],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<GeneralJwe> {
+    encrypt_general_with_passwords_options(
+        header,
+        passwords,
+        plaintext,
+        alg,
+        enc,
+        &JweEncryptOptions::new(),
+    )
+}
+
+/// [`encrypt_general_with_passwords`] with explicit [`JweEncryptOptions`].
+pub fn encrypt_general_with_passwords_options(
+    header: &JoseHeader,
+    passwords: &[&crate::jwe::password::Password],
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<GeneralJwe> {
+    match passwords.len() {
+        0 => Err(JoseError::InvalidHeader(
+            "a general JWE needs at least one recipient".into(),
+        )),
+        // One password, one derivation, both members in the authenticated shared header:
+        // that is the flattened shape with a general envelope, and it is fine.
+        1 => {
+            let flat = json_mod::encrypt_flattened_with_password_header_options(
+                passwords[0],
+                header.clone(),
+                plaintext,
+                alg,
+                enc,
+                opts,
+            )?;
+            // The general envelope with one element. Everything the flattened form put
+            // at the top level stays there; only the encrypted key moves into the
+            // element, which is the whole difference between the two serializations
+            // (RFC 7516 §7.2.1/§7.2.2).
+            Ok(GeneralJwe {
+                protected: flat.protected,
+                unprotected: flat.unprotected,
+                aad: flat.aad,
+                iv: flat.iv,
+                ciphertext: flat.ciphertext,
+                tag: flat.tag,
+                recipients: vec![Recipient {
+                    header: flat.header,
+                    encrypted_key: flat.encrypted_key,
+                    other: Vec::new(),
+                }],
+                other: Vec::new(),
+            })
+        }
+        n => {
+            let _ = n;
+            Err(internal::per_recipient_member_unsupported(
+                alg,
+                "p2s and p2c",
+            ))
+        }
+    }
+}
+
+/// Decrypt the given recipient of a general JWE with a password.
+///
+/// Only meaningful for the single-recipient case
+/// [`encrypt_general_with_passwords`] accepts; the recipient index is still named by the
+/// caller, as everywhere in this module.
+pub fn decrypt_general_with_password(
+    password: &crate::jwe::password::Password,
+    jwe: &GeneralJwe,
+    recipient: usize,
+) -> Result<Vec<u8>> {
+    json_mod::decrypt_flattened_with_password(password, &jwe.flatten_for(recipient)?)
+}
+
 /// Decrypt the given recipient of a general JWE with a JWK.
 ///
 /// The recipient is named by the caller, not inferred: `recipient` selects the

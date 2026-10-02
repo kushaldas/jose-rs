@@ -79,6 +79,27 @@ which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
 
+### PBES2 against jwcrypto (`jwe_pbes2_jwcrypto.py`)
+
+166 checks over all three PBES2 algorithms and four content algorithms. Beyond the
+round-trips, the suite **re-derives the key in Python**: it reads `p2s`/`p2c` out of a
+jose-rs token's protected header, runs PBKDF2 over `UTF8(alg) || 0x00 || Salt Input`,
+unwraps the conveyed key with AES-KW, requires the result to be exactly the content
+algorithm's CEK length, and decrypts the content with it. The salt construction, the PRF,
+the derived key length and the RFC 3394 wrap are all pinned by that chain.
+
+It also pins the **work budget as an interop fact**. `p2c` is chosen by the sender and
+paid by the recipient, so verifiers cap what they will compute: panva's default
+`maxPBES2Count` is 10 000 and jwcrypto's `default_max_pbkdf2_iterations` is 16 384. A
+default above either makes every message this crate emits unreadable by that peer — the
+suite asserts the default sits inside both ceilings, that a count above them really is
+refused by the peer, and that jose-rs's own refusals (below 1 000, above the recipient's
+budget) name the parameter rather than failing cryptically.
+
+One divergence is pinned: RFC 7518 §4.8 allows the password to be an octet sequence, and
+jwcrypto's `JWK.from_password` takes text and UTF-8 encodes it itself, so it cannot
+express a password that is not valid text. jose-rs accepts both forms.
+
 ### AES-GCM key management against jwcrypto (`jwe_gcm_kw_jwcrypto.py`)
 
 135 checks over all three `*GCMKW` algorithms and four content algorithms. Beyond the
@@ -144,7 +165,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **103 cells**:
+Full matrix is **109 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -158,6 +179,7 @@ Full matrix is **103 cells**:
 | JWE ECDH agreement with key wrapping | `jwe-ecdh-kw` | 4 alg/curve/enc quadruples × 2 directions = 8 | `ECDH-ES+A128KW`/`+A192KW`/`+A256KW` (RFC 7518 §4.6): one wrapping algorithm per curve, and the cell asserts the compact form's encrypted-key segment is **non-empty** — the converse of the `jwe-ecdh` assertion — so a cell that quietly switched key-management mode fails instead of passing on a tag it no longer proves |
 | JWE direct ECDH agreement | `jwe-ecdh` | 4 curve/enc pairs × 2 directions = 8 | RFC 7518 §4.6 (`ECDH-ES`): the producer encrypts to the recipient's **public** half and the consumer reads it with the private half, so the cell proves the agreement needs no `d` on the send side. The consuming side must report an authenticated `epk` on the recipient's curve with no private part, and the compact form's encrypted-key segment must be empty |
 | JWE AES-GCM key management | `jwe-gcmkw` | 3 alg:enc × 2 directions = 6 | `A128GCMKW`/`A192GCMKW`/`A256GCMKW` (RFC 7518 §4.7), where the key wrap's `iv`/`tag` are **header members** and the envelope has its own members with those same names. The cell requires both pairs, at 12 and 16 octets, holding **different** values — a message that reused them would be readable by nobody — and a non-empty conveyed key |
+| JWE PBES2 (password) | `jwe-pbes2` | 3 alg:enc × 2 directions = 6 | `PBES2-HS256+A128KW`/`+HS384+A192KW`/`+HS512+A256KW` (RFC 7518 §4.8). The password is fixed by the cell rather than generated, and the cell requires `p2s` (≥8 octets) and an integer `p2c` **in the protected header** — they are the derivation's inputs — and that a wrong password cannot read the peer's message |
 | JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
@@ -258,6 +280,8 @@ Every JWE command accepts an optional `understood_crit` list: the private header
 | `verify-jwt --alg <ALG>`                    | `{jwk, jwt}`                            | `{ok, claims}`                                |
 | `encrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, plaintext_b64u, header?}`        | `{jwe}`                                       |
 | `decrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, jwe}`                            | `{ok, plaintext_b64u, protected_header}`      |
+| `encrypt-compact-password --alg <ALG> --enc <ENC>` | `{password, plaintext_b64u, header?, p2c?}` | `{jwe}` — RFC 7518 §4.8; there is no `gen-key` counterpart, a password is supplied not generated, so the cells fix one |
+| `decrypt-compact-password --alg <ALG> --enc <ENC>` | `{password, jwe}` | `{ok, plaintext_b64u, protected_header}` — the header is the interesting part: it must carry the authenticated `p2s`/`p2c` |
 | `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?, aad_b64u?, understood_crit?}` | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string |
 | `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?, understood_crit?}` | `{ok, plaintext_b64u, protected_header, unprotected_header?}` |
 | `sign-compact-raw --alg <ALG>` (Rust only)  | `{jwk, header_raw, payload_b64u}`       | `{jws}` signed over `header_raw` verbatim     |

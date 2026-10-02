@@ -23,3 +23,5 @@ history.
 | [0017](0017-direct-ecdh-key-agreement.md) | Direct key agreement agrees the CEK and publishes its own ephemeral key | Accepted, amended by 0018 |
 | [0018](0018-ecdh-key-agreement-with-key-wrapping.md) | Agreement with key wrapping agrees a KEK, and waits for a place to put a second `epk` | Accepted |
 | [0019](0019-x25519-agreement-keys.md) | X25519 is admitted to agreement only with a `d`-derives-`x` check | Accepted, amends 0016 |
+| [0020](0020-aes-gcm-key-management.md) | AES-GCM key management generates its own `iv`/`tag` and puts them in the protected header | Accepted |
+| [0021](0021-pbes2-password-based-key-management.md) | A password is its own input type, and the sender's work budget is bounded by what peers will compute | Accepted |

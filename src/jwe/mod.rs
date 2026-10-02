@@ -47,6 +47,7 @@
 pub mod compact;
 pub mod general;
 pub mod json;
+pub mod password;
 
 /// Shared content-encryption implementation (crate-private).
 mod content;
@@ -59,7 +60,19 @@ mod content;
 pub(crate) mod internal;
 
 pub use compact::{
-    decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_header,
-    encrypt_with_header_options, encrypt_with_jwk, encrypt_with_jwk_header,
-    encrypt_with_jwk_header_options, JweDecryptOptions, JweEncryptOptions,
+    decrypt, decrypt_with_jwk, decrypt_with_options, decrypt_with_password,
+    decrypt_with_password_options, encrypt, encrypt_with_header, encrypt_with_header_options,
+    encrypt_with_jwk, encrypt_with_jwk_header, encrypt_with_jwk_header_options,
+    encrypt_with_password, encrypt_with_password_header, encrypt_with_password_header_options,
+    encrypt_with_password_options, JweDecryptOptions, JweEncryptOptions,
+};
+
+pub use password::{
+    Password, PBES2_DEFAULT_ITERATIONS, PBES2_DEFAULT_MAX_ITERATIONS, PBES2_MIN_ITERATIONS,
+};
+
+pub use json::{
+    decrypt_flattened_with_password, encrypt_flattened_with_password,
+    encrypt_flattened_with_password_header, encrypt_flattened_with_password_header_options,
+    encrypt_flattened_with_password_options,
 };
