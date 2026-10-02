@@ -30,3 +30,4 @@ history.
 | [0024](0024-sec1-states-its-curve.md) | A SEC1 file states its curve, or it is not a key | Accepted |
 | [0025](0025-key-file-schemes-are-allow-listed.md) | A key file that arrives with a password arrives with a scheme | Accepted |
 | [0026](0026-certificate-extraction-validates-nothing.md) | A certificate is a claim about a key, and extracting it validates nothing | Accepted |
+| [0027](0027-thumbprint-uri-format-is-the-test.md) | A thumbprint URI is a format, so the RFC's example is the test | Accepted |

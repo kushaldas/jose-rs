@@ -6,6 +6,24 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- JWK Thumbprint URIs (RFC 9278, L5): `jwk::thumbprint::thumbprint_uri` /
+  `thumbprint_uri_sha256` build them, and `JwkThumbprintUri::parse` validates one —
+  prefix, the IANA *Hash Name String* identifier (`sha-256`/`sha-384`/`sha-512`,
+  hyphen included; others refused per RFC 9278 §4), unpadded base64url, and a
+  decoded length that must equal the named digest. `JwkThumbprintUri::matches`
+  compares under the algorithm the URI itself named. SHA-256 remains the default.
+  Output is byte-identical to `jose`'s `calculateJwkThumbprintUri` and reproduces
+  the RFC's §6 example exactly. See ADR 0027.
+- Typed key generation: `jwk::KeyGeneration` + `generate_key`, with `EcCurve` as an
+  enum (an unsupported curve is unrepresentable, and text conversions are refused
+  naming the input) and `Oct { size }` limited to the sizes JOSE algorithms use
+  (16/24/32/48/64). Existing per-type generators are unchanged and are what this
+  reuses, so the RSA bit floor and curve set are stated once. No post-quantum
+  variant: a feature-gated enum variant would make callers' matches
+  non-exhaustive (ADR 0027).
+
+### Added
+
 - X.509 subject public-key extraction (RFC 5280 §4.1, I4):
   `jwk::public_jwk_from_certificate_der` / `public_jwk_from_certificate_pem` locate
   `subjectPublicKeyInfo` positionally (handling the index shift when the optional

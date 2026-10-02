@@ -67,6 +67,7 @@ fn run() -> Result<()> {
     let mut pem_kind: Option<String> = None;
     let mut password: Option<String> = None;
     let mut iterations: Option<String> = None;
+    let mut hash: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -106,6 +107,12 @@ fn run() -> Result<()> {
         } else if a == "--iterations" {
             iterations = raw.get(i + 1).cloned();
             i += 2;
+        } else if let Some(rest) = a.strip_prefix("--hash=") {
+            hash = Some(rest.to_string());
+            i += 1;
+        } else if a == "--hash" {
+            hash = raw.get(i + 1).cloned();
+            i += 2;
         } else {
             i += 1;
         }
@@ -132,6 +139,7 @@ fn run() -> Result<()> {
         "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "import-pem" => import_pem(),
+        "thumbprint-uri" => thumbprint_uri(hash.as_deref()),
         "import-cert" => import_cert(),
         "import-pkcs8-encrypted" => import_pkcs8_encrypted(&require_password(password)?),
         "export-pkcs8-encrypted" => {
@@ -212,6 +220,7 @@ fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
         "ES256-RSA" => set_alg(jose_rs::jwk::generate_rsa(3072)?, "RS256"),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
+        "ES512" => set_alg(jose_rs::jwk::generate_ec("P-521")?, "ES512"),
         // An agreement recipient key: a key pair pinned for one of the ECDH-ES
         // algorithms, with `use: enc` because RFC 7517 §4.2 says a key used for
         // encryption must not claim `sig`. The curve is the caller's choice so one
@@ -916,6 +925,23 @@ fn export_pem(kind: &str) -> Result<()> {
     // Emitted verbatim: the library's PEM already ends in exactly one newline, and the
     // byte-exact checks compare against other implementations' files.
     print!("{text}");
+    Ok(())
+}
+
+/// Print the RFC 9278 thumbprint URI of a JWK read from stdin, verbatim.
+///
+/// Byte-for-byte comparison against `jose`'s `calculateJwkThumbprintUri` is the point, so this
+/// prints text rather than JSON: the URI *is* the artifact.
+fn thumbprint_uri(hash: Option<&str>) -> Result<()> {
+    use jose_rs::jwk::thumbprint::{ThumbprintHash, thumbprint_uri};
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let hash = match hash.unwrap_or("SHA-256") {
+        "SHA-256" | "sha-256" | "sha256" => ThumbprintHash::Sha256,
+        "SHA-384" | "sha-384" | "sha384" => ThumbprintHash::Sha384,
+        "SHA-512" | "sha-512" | "sha512" => ThumbprintHash::Sha512,
+        other => bail!("unknown --hash: {other}"),
+    };
+    print!("{}", thumbprint_uri(&jwk, hash)?);
     Ok(())
 }
 

@@ -71,7 +71,7 @@ new behaviour/policy.
 | 22 | `feat(jws): JWK-aware JSON serialization APIs` | L2 | wrappers, tests, interop |
 | 23 | `feat(jwk): bounded JWKS selection policy` | L3 | limits + diagnostics, tests |
 | 24 | `feat: authenticated results and stable error categories` | L4 | result types, `JoseError` kinds, ADR |
-| 25 | `feat(jwk): thumbprint URI and typed generation options` | L5 | RFC 9278, tests |
+| 25 | `feat(jwk): thumbprint URI and typed generation options` | L5 | **done** — `thumbprint_uri`/`thumbprint_uri_sha256` build RFC 9278 URIs and `JwkThumbprintUri::parse` validates one (prefix, IANA *Hash Name String* — `sha-256` hyphenated, others refused per §4 — unpadded base64url, and decoded length **must** equal the named digest); `matches()` compares under the algorithm the URI named. Reproduced the RFC §6 example byte for byte, and 68 interop checks against `jose`'s `calculateJwkThumbprintUri` across RSA/EC×4/Ed25519/oct × SHA-256/384/512. Typed `KeyGeneration`/`EcCurve`/`generate_key` reuse the existing generators (one statement of the RSA floor and curve set), refuse unsupported options by name, and deliberately have **no** feature-gated post-quantum variant. ADR 0027; 3 lib + 8 integration tests |
 | 26 | `docs(adr): curve/algorithm coverage decisions` | A0-A3 | blocked-on-backend ADR |
 | 27 | `docs: roadmap, changelog and capability tables` | Q3 closeout | README/CHANGELOG/plan status |
 
