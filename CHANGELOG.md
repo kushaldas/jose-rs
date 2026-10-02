@@ -19,6 +19,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- A performance baseline harness and its invariants (Q1): `examples/perf_baseline.rs`
+  measures the axes the roadmap names — recipient counts, repeated key conversion, KDF
+  cost, post-quantum encodings, the new parsers — printing markdown or `--json` with a
+  `per unit` column; `docs/performance-baseline.md` records the procedure and why
+  machine-specific numbers are not committed; and `tests/perf_baselines.rs` (5 tests)
+  enforces four self-calibrated shapes in CI: single-recipient decrypt does not scale
+  with recipient count, key conversion is not super-linear, password derivation follows
+  the caller's budget, and an oversized document is refused before it is parsed. See
+  ADR 0035, including the correction it documents: `SetLimits`'s byte budget can fire
+  pre-parse and its entry budget cannot, so their contracts are asserted separately.
+
+### Added
+
 - Fuzz coverage for the parsers added since the harnesses were written (Q0): eight new
   harnesses (`jwk_from_pem`, `jwk_from_der`, `certificate_extract`, `encrypted_pkcs8`,
   `jwkset_select`, `jwe_json_flattened`, `jwe_json_general`, `jwt_claims`), a

@@ -38,3 +38,4 @@ history.
 | [0032](0032-authenticated-results-and-coarse-errors.md) | Authenticated results, and errors coarse enough not to lie | Accepted |
 | [0033](0033-definition-of-done-is-a-command.md) | The definition of done is a command, and the rest is judgement | Accepted |
 | [0034](0034-fuzz-logic-runs-in-ci.md) | Fuzz logic runs in CI; the fuzzer only searches | Accepted |
+| [0035](0035-baselines-are-a-harness-plus-shapes.md) | Baselines are a harness plus shapes; committed numbers are not baselines | Accepted |

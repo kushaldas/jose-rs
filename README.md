@@ -525,6 +525,17 @@ staged-file review and human merge — lives in
 [`docs/definition-of-done.md`](docs/definition-of-done.md), where it is labelled
 as judgement instead of pretending to be automated (ADR 0033).
 
+### Performance baselines
+
+```sh
+cargo run --release --example perf_baseline        # markdown table of the measured axes
+cargo test --release --test perf_baselines         # shape invariants CI enforces
+```
+
+Numbers belong in the pull request that changes them, with the command line and machine
+class; the harness, the procedure and the machine-independent invariants live in
+[`docs/performance-baseline.md`](docs/performance-baseline.md) (ADR 0035).
+
 ### Fuzzing and regression replay
 
 Harnesses live in `fuzz/` and need nightly plus `cargo-fuzz` to *search*. What runs on
