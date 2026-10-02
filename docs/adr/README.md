@@ -26,3 +26,4 @@ history.
 | [0020](0020-aes-gcm-key-management.md) | AES-GCM key management generates its own `iv`/`tag` and puts them in the protected header | Accepted |
 | [0021](0021-pbes2-password-based-key-management.md) | A password is its own input type, and the sender's work budget is bounded by what peers will compute | Accepted |
 | [0022](0022-pem-label-dispatch.md) | PEM reads the label, and writes the form peers parse | Accepted |
+| [0023](0023-pkcs1-rebuilt-not-trusted.md) | PKCS#1 is decoded, then rebuilt and checked against itself | Accepted |

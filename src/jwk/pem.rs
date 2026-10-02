@@ -22,18 +22,21 @@
 //!   prose means a file that contains an unrelated paragraph and a key is a key file, and
 //!   a file where the key was deleted still parses as whatever the armor happens to
 //!   contain. Trailing whitespace after the END line is fine; trailing text is not.
-//! * **Canonical base64, both line endings accepted.** Padded, no trailing bits, no
-//!   embedded whitespace beyond line breaks. CRLF is accepted because Windows files
-//!   exist; `\r` anywhere else is not.
+//! * **Canonical base64, both line endings accepted, 64-character lines.** Padded, no
+//!   trailing bits, no embedded whitespace beyond line breaks, and lines wrapped no wider
+//!   than RFC 7468 §3's 64 characters (a generic base64 writer emits 76 and gets a refusal
+//!   that names the rule). CRLF is accepted because Windows files exist; `\r` anywhere else
+//!   is not.
 //! * **Legacy PEM headers are refused, not skipped.** `Proc-Type: 4,ENCRYPTED` /
 //!   `DEK-Info: …` (the RFC 1423 OpenSSL-style encryption) marks a file whose key is
 //!   encrypted under a password. Decrypting it is a separate, deliberate operation with
 //!   its own dependency and scheme allow-list, so the refusal says where it leads rather
 //!   than pretending the bytes are a key.
-//! * **Labels are dispatched, not guessed.** `PRIVATE KEY` is PKCS#8 and `PUBLIC KEY` is
-//!   SPKI. `RSA PRIVATE KEY` (PKCS#1), `EC PRIVATE KEY` (SEC1) and `CERTIFICATE` are
-//!   refused **by name** with a pointer to the format-specific entry point — they are
-//!   different structures, and the label is the only place the difference is written.
+//! * **Labels are dispatched, not guessed.** `PRIVATE KEY` is PKCS#8, `PUBLIC KEY` is SPKI,
+//!   and the two RSA-specific labels `RSA PRIVATE KEY` / `RSA PUBLIC KEY` are PKCS#1.
+//!   `EC PRIVATE KEY` (SEC1) and `CERTIFICATE` are still refused **by name** with a pointer
+//!   to the entry point that will serve them — they are different structures, and the label
+//!   is the only place the difference is written.
 //! * **Private export is its own function.** [`private_pem_from_jwk`] is the only way to
 //!   get a `PRIVATE KEY` block, and it requires private material;
 //!   [`public_pem_from_jwk`] exports the SPKI public half and will not emit a private
@@ -65,6 +68,13 @@ use crate::jwk::Jwk;
 const LABEL_PRIVATE: &str = "PRIVATE KEY";
 /// The RFC 7468 type label for a SubjectPublicKeyInfo public key.
 const LABEL_PUBLIC: &str = "PUBLIC KEY";
+/// The RFC 7468 type label for a PKCS#1 `RSAPrivateKey`.
+const LABEL_RSA_PRIVATE: &str = "RSA PRIVATE KEY";
+/// RFC 7468 §3's maximum length of a base64 line in a PEM body.
+const MAX_PEM_LINE_LEN: usize = 64;
+
+/// The RFC 7468 type label for a PKCS#1 `RSAPublicKey`.
+const LABEL_RSA_PUBLIC: &str = "RSA PUBLIC KEY";
 
 /// Labels this crate recognizes but does not yet parse, each with the reason a caller
 /// needs.
@@ -75,10 +85,6 @@ const LABEL_PUBLIC: &str = "PUBLIC KEY";
 /// would either fail cryptically or — worse, for lengths that happen to line up —
 /// succeed at the wrong thing.
 const KNOWN_BUT_UNSUPPORTED: &[(&str, &str)] = &[
-    (
-        "RSA PRIVATE KEY",
-        "PKCS#1 (RFC 8017), not PKCS#8; import through the PKCS#1 entry point",
-    ),
     (
         "EC PRIVATE KEY",
         "SEC1 (RFC 5915), not PKCS#8; import through the SEC1 entry point",
@@ -126,6 +132,8 @@ pub fn jwk_from_pem(text: &str) -> Result<Jwk> {
     match label {
         LABEL_PRIVATE => super::import::jwk_from_pkcs8_der(&der),
         LABEL_PUBLIC => super::import::jwk_from_spki_der(&der),
+        LABEL_RSA_PRIVATE => super::import::jwk_from_pkcs1_der(&der),
+        LABEL_RSA_PUBLIC => super::import::jwk_from_pkcs1_public_der(&der),
         other => Err(unsupported_label(other)),
     }
 }
@@ -355,6 +363,22 @@ fn armor_problem(text: &str) -> Option<String> {
         return Some(format!(
             "PEM input contains {blocks} blocks; exactly one key is expected, so say which \
              one by passing one block"
+        ));
+    }
+
+    // RFC 7468 §3 caps a base64 line at 64 characters, and the strict decoder refuses
+    // longer ones. Checked here because the decoder's own message is a base64 error, and
+    // "InvalidEncoding" does not tell a caller that the thing to fix is the wrapping —
+    // which is exactly the mistake a PEM produced by a generic base64 writer contains.
+    // Our exporter wraps at 64, as OpenSSL, `cryptography` and panva all do.
+    if let Some(long) = text
+        .lines()
+        .find(|line| line.len() > 64 && !line.starts_with("-----"))
+    {
+        return Some(format!(
+            "PEM base64 lines are limited to {} characters (RFC 7468 §3); this one is {}",
+            MAX_PEM_LINE_LEN,
+            long.len()
         ));
     }
 

@@ -167,6 +167,137 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
     software_key_to_jwk(&sw)
 }
 
+/// Import a PKCS#1 (`RSAPrivateKey`) DER-encoded RSA private key into a [`Jwk`].
+///
+/// PKCS#1 (RFC 8017 §A.1.2) is the older, RSA-only sibling of PKCS#8 — still what
+/// `openssl genrsa` writes by default and what `SSH`'s `id_rsa` carries. It states no
+/// algorithm, because there is only one to state.
+///
+/// The bytes are not trusted for what they say. The DER is decoded, and then the key is
+/// **rebuilt and validated**: the primes must multiply to the modulus, `d·e ≡ 1 (mod p−1)`
+/// must hold for each prime, and the file's own CRT members (`exponent1`, `exponent2`,
+/// `coefficient`) must match what the key implies. A file whose CRT values disagree with
+/// its key is refused rather than quietly repaired, because a corrupt key that works after
+/// we substitute our own arithmetic is a corrupt key nobody notices. The result is then
+/// normalized to PKCS#8 and run through [`jwk_from_pkcs8_der`], so the modulus floor and
+/// the backend's own checks apply exactly as they do for any other RSA import — a PKCS#1
+/// file is not an easier way in.
+///
+/// **Multi-prime keys are refused by name.** PKCS#1 allows more than two primes (its
+/// `multiPrimeVersion`), RFC 7518's RSA JWK has `p` and `q` and no place for a third, and a
+/// JWK that silently dropped a prime factor would be a different key that verifies nothing.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, a multi-prime key, an internally inconsistent key,
+/// a modulus below [`crate::MIN_RSA_BITS`], and for any non-RSA input.
+pub fn jwk_from_pkcs1_der(der: &[u8]) -> Result<Jwk> {
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PrivateKeyParts;
+
+    let asn1 = rsa::pkcs1::RsaPrivateKey::from_der(der)
+        .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSAPrivateKey DER: {e}")))?;
+    if asn1.other_prime_infos.is_some() {
+        return Err(JoseError::Key(
+            "multi-prime RSA keys are unsupported: RFC 7518 §6.3 gives an RSA JWK `p` and `q`              and no member for a third prime factor, so importing one would produce a different              key that verifies nothing"
+                .into(),
+        ));
+    }
+
+    let n = biguint(asn1.modulus.as_bytes());
+    let e = biguint(asn1.public_exponent.as_bytes());
+    let d = biguint(asn1.private_exponent.as_bytes());
+    let p = biguint(asn1.prime1.as_bytes());
+    let q = biguint(asn1.prime2.as_bytes());
+
+    // Rebuilding is the validation: `from_components` checks that the primes are prime
+    // factors of the modulus and that `d` is a valid inverse of `e` modulo each `p−1`,
+    // then recomputes the CRT members from the parts that survived.
+    let key = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| {
+        JoseError::Key(format!(
+            "PKCS#1 RSA key is not internally consistent ({err}); its members do not describe              one key"
+        ))
+    })?;
+    ensure_rsa_min_bits(&key.to_public_key())?;
+
+    // The file's own CRT members are checked against the rebuilt key instead of being
+    // trusted or discarded. Both alternatives lose information: trusting a wrong `dp`
+    // propagates it, and silently substituting a right one hides the corruption.
+    for (name, from_file, computed) in [
+        (
+            "exponent1 (dp)",
+            asn1.exponent1.as_bytes(),
+            key.dp().cloned(),
+        ),
+        (
+            "exponent2 (dq)",
+            asn1.exponent2.as_bytes(),
+            key.dq().cloned(),
+        ),
+        (
+            "coefficient (q^-1 mod p)",
+            asn1.coefficient.as_bytes(),
+            key.qinv().and_then(|qi| qi.to_biguint()),
+        ),
+    ] {
+        let matches = match computed {
+            Some(value) => biguint(from_file) == value,
+            // The key we rebuilt has no CRT member to compare against only if it was built
+            // without precomputation, which `from_components` does not do. Treat its absence
+            // as a mismatch rather than as agreement.
+            None => false,
+        };
+        if !matches {
+            return Err(JoseError::Key(format!(
+                "PKCS#1 RSA key's {name} does not match its own key material; refusing to                  import a corrupt key or to substitute a computed one"
+            )));
+        }
+    }
+
+    let normalized = key
+        .to_pkcs8_der()
+        .map_err(|e| JoseError::Key(format!("PKCS#1 to PKCS#8 normalization failed: {e}")))?;
+    jwk_from_pkcs8_der(normalized.as_bytes())
+}
+
+/// Import a PKCS#1 (`RSAPublicKey`) DER-encoded RSA public key into a [`Jwk`].
+///
+/// The SPKI form (RFC 5280) wraps these same two integers in an `AlgorithmIdentifier`;
+/// PKCS#1 states them bare, which is why the entry point is separate — a bare
+/// `RSAPublicKey` carries no algorithm to dispatch on, and a caller who hands one to the
+/// SPKI importer should be told the difference rather than given a parse error.
+///
+/// The key is rebuilt (`RsaPublicKey::new`, which rejects an even or tiny public exponent)
+/// and then run through [`jwk_from_spki_der`] once wrapped, so the modulus floor and the
+/// backend's checks are the same ones every other RSA public import faces.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, an unusable public exponent, or a modulus below
+/// [`crate::MIN_RSA_BITS`].
+pub fn jwk_from_pkcs1_public_der(der: &[u8]) -> Result<Jwk> {
+    use rsa::pkcs8::EncodePublicKey;
+
+    let asn1 = rsa::pkcs1::RsaPublicKey::from_der(der)
+        .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSAPublicKey DER: {e}")))?;
+    let key = rsa::RsaPublicKey::new(
+        biguint(asn1.modulus.as_bytes()),
+        biguint(asn1.public_exponent.as_bytes()),
+    )
+    .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSA public key: {e}")))?;
+    ensure_rsa_min_bits(&key)?;
+    let spki = key
+        .to_public_key_der()
+        .map_err(|e| JoseError::Key(format!("RSA SPKI wrapping failed: {e}")))?;
+    jwk_from_spki_der(spki.as_bytes())
+}
+
+/// A `BigUint` from big-endian octets, accepting the leading zero octet DER uses to keep
+/// a high bit from reading as a negative number.
+fn biguint(bytes: &[u8]) -> num_bigint_dig::BigUint {
+    num_bigint_dig::BigUint::from_bytes_be(bytes)
+}
+
 // ── EC dispatch by named-curve OID ──────────────────────────────────────
 
 fn ec_private_from_pkcs8(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering::SoftwareKey> {

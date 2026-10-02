@@ -17,7 +17,9 @@ pub use generate::{
     generate_direct_symmetric, generate_ec, generate_ed25519, generate_rsa, generate_symmetric,
     generate_symmetric_for_alg, generate_x25519,
 };
-pub use import::{jwk_from_pkcs8_der, jwk_from_spki_der};
+pub use import::{
+    jwk_from_pkcs1_der, jwk_from_pkcs1_public_der, jwk_from_pkcs8_der, jwk_from_spki_der,
+};
 pub use pem::{
     jwk_from_pem, jwk_from_pkcs8_pem, jwk_from_spki_pem, private_pem_from_jwk, public_pem_from_jwk,
 };

@@ -207,6 +207,16 @@ def encode_dss(r, s):
     return b"\x30" + der_len(len(body)) + body
 
 
+def _rewrap_body(pem_text, width):
+    """Re-wrap a PEM body at `width` columns, as a generic base64 writer would."""
+    lines = pem_text.splitlines()
+    head = [l for l in lines if l.startswith(b"-----BEGIN")]
+    tail = [l for l in lines if l.startswith(b"-----END")]
+    body = b"".join(l for l in lines if not l.startswith(b"-----"))
+    wrapped = b"\n".join(body[i : i + width] for i in range(0, len(body), width))
+    return b"\n".join(head + [wrapped] + tail) + b"\n"
+
+
 def openssl(args, data):
     proc = subprocess.run(
         ["openssl"] + args, input=data, capture_output=True
@@ -333,12 +343,37 @@ def main(harness_path):
 
     # PKCS#1 and SEC1 blocks, generated here so they are independent of the repo fixtures.
     rsa_key = keys["RSA-2048"]
+    # PKCS#1 imports (I1), so the assertion is that it imports *as the same key*, and that
+    # a PKCS#1 *public* file does too.
     pkcs1 = rsa_key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.TraditionalOpenSSL,
         NO_ENC,
     )
-    samples.append(("PKCS#1 block", pkcs1, ["RSA PRIVATE KEY", "PKCS#1"]))
+    ok, out, err = harness_raw(harness_path, refuser, pkcs1)
+    if not ok:
+        FAIL.append("PKCS#1 private block was refused: %s" % (err or out)[:200])
+    else:
+        imported = json.loads(out)
+        want = expected_jwk_from_python(rsa_key, include_private=True)
+        bad = subset_match(imported, want, sorted(want.keys()))
+        check("PKCS#1 private file imports as the same key", not bad, "differ: %s" % bad)
+    pkcs1_pub = rsa_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.PKCS1
+    )
+    ok, out, err = harness_raw(harness_path, refuser, pkcs1_pub)
+    if not ok:
+        FAIL.append("PKCS#1 public block was refused: %s" % (err or out)[:200])
+    else:
+        want = expected_jwk_from_python(rsa_key.public_key(), include_private=False)
+        bad = subset_match(json.loads(out), want, sorted(want.keys()))
+        check("PKCS#1 public file imports as the same key", not bad, "differ: %s" % bad)
+
+    # A line wrapped at 76 characters (what a generic base64 writer emits) is refused with
+    # the RFC 7468 §3 rule named, not as unexplained bad base64.
+    wide = _rewrap_body(pkcs1, 76)
+    refused, why = harness_fails(harness_path, refuser, wide, ["64 characters"])
+    check("a 76-column-wrapped PEM is refused with the rule named", refused, why)
 
     ec_key = keys["P-256"]
     sec1 = ec_key.private_bytes(

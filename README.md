@@ -163,6 +163,10 @@ let ed_jwk = jwk::generate_ed25519().unwrap();
 let software_key = jwk::jwk_to_software_key(&ec_jwk).unwrap();
 let roundtripped = jwk::software_key_to_jwk(&software_key).unwrap();
 
+// DER formats are chosen explicitly, and a PKCS#1 key is rebuilt and validated
+// rather than trusted for what its bytes claim (see ADR 0023).
+let rsa_from_pkcs1 = jwk::jwk_from_pkcs1_der(&std::fs::read("id_rsa.der")?).unwrap();
+
 // PEM (RFC 7468): the type label decides the format, and other formats are
 // refused by name rather than guessed from the bytes.
 let from_file = jwk::jwk_from_pem(&std::fs::read_to_string("key.pem")?).unwrap();

@@ -204,8 +204,11 @@ fn structurally_broken_armor_is_refused() {
 fn other_pem_labels_are_refused_by_name() {
     // Each of these is a different structure. The label is the only place the difference
     // is written, so guessing from the bytes is exactly what must not happen.
+    // `RSA PRIVATE KEY` is no longer on this list — PKCS#1 imports (ADR 0023) — which is
+    // the point of keeping the rest of it: each refusal below is a structure this crate
+    // still does not parse, and the day one of them does, this test has to change on
+    // purpose rather than by accident.
     for (pem_text, label, hint) in [
-        (RSA_PKCS1, "RSA PRIVATE KEY", "PKCS#1"),
         (EC_SEC1, "EC PRIVATE KEY", "SEC1"),
         (CERT, "CERTIFICATE", "certificate"),
     ] {
@@ -221,6 +224,18 @@ fn other_pem_labels_are_refused_by_name() {
     assert!(enc.contains("ENCRYPTED PRIVATE KEY"), "{enc}");
     let legacy = pem::jwk_from_pem(RSA_LEGACY).unwrap_err().to_string();
     assert!(legacy.contains("password-encrypted"), "{legacy}");
+}
+
+#[test]
+fn the_pkcs1_labels_route_to_their_own_importer() {
+    // The dispatch the refusal list existed to protect: the label picks the structure, and
+    // the RSA-specific labels land on the PKCS#1 importer rather than on PKCS#8.
+    let private = pem::jwk_from_pem(RSA_PKCS1).expect("RSA PRIVATE KEY routes to PKCS#1");
+    assert_eq!(private.kty, "RSA");
+    assert!(private.d.is_some());
+    let public = pem::jwk_from_pem(RSA_PUB_PKCS1).expect("RSA PUBLIC KEY routes to PKCS#1");
+    assert_eq!(public.kty, "RSA");
+    assert!(public.d.is_none());
 }
 
 #[test]
@@ -658,3 +673,14 @@ fn base64_decode(text: &str) -> Vec<u8> {
     }
     out
 }
+
+const RSA_PUB_PKCS1: &str = r#"
+-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEA1LJaNB27bcKlMjh0omip36nRGS39+6luu1Y7j9rRbNRTFrjJdPOE
+HTxtVMLib+pHFZzk57YZIeI1TkZlCWUK4urJx6VGmdT/ZWIS/Nba+xU5a9wd1OrG
+fHADjgfYSvEnmbLSKHC9BkLkxP3HsO/EuIzr/FMbKDXxZxZ4nYFMWKXayYNl/+4i
+zk8OwwCKHbfS4Yzb9zveqwcp/MPQ7XOZKE4dPDGMWCcpl5IkA/Jar72r5+e3vDk2
+H3UySayDAoOtwIAw4yQ9cdIaADgL6Q36fy+X92BzP5genb7u8x03iLbPf660oWd0
+Yqbste/zwEuqOs7KoNVcfgeC7TRo1e4bKwIDAQAB
+-----END RSA PUBLIC KEY-----
+"#;

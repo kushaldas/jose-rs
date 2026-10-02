@@ -143,6 +143,21 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   that claims an SPKI it does not have. Interoperates byte-for-byte with OpenSSL and with
   `cryptography`-generated files in both directions. See ADR 0022.
 
+- **PKCS#1 (RFC 8017 §A.1.2) RSA import**: `jwk_from_pkcs1_der` and
+  `jwk_from_pkcs1_public_der`, with the `RSA PRIVATE KEY` / `RSA PUBLIC KEY` PEM labels now
+  routed to them. Decoding is not validation here: the key is rebuilt from `n, e, d, p, q`
+  (which requires the primes to multiply to the modulus and `d·e ≡ 1 (mod p−1)` for each),
+  the file's own CRT members are then **compared** against what the key implies and a
+  mismatch is refused naming the member — neither trusted nor silently repaired — and the
+  result is normalized to PKCS#8 and run through the existing PKCS#8 import, so the modulus
+  floor and the backend's checks are the same code path every RSA import uses. Multi-prime
+  keys are refused by name: RFC 7518 gives an RSA JWK `p` and `q` and no member for a third
+  factor, so importing one would yield a different key that verifies nothing. PKCS#1, PKCS#8
+  and SPKI imports of one RSA key produce the same JWK and the same RFC 7638 thumbprint.
+  PEM armor also now names RFC 7468 §3's 64-column line limit when a file exceeds it (a
+  generic base64 writer emits 76-column lines, and "invalid base64" was not a useful answer).
+  See ADR 0023.
+
 ### Internal
 
 - `jose_rs::jwe` is split into `content` (AEAD / AES-CBC-HMAC), `internal`
