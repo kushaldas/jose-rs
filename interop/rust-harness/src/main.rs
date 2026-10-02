@@ -132,6 +132,7 @@ fn run() -> Result<()> {
         "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "import-pem" => import_pem(),
+        "import-cert" => import_cert(),
         "import-pkcs8-encrypted" => import_pkcs8_encrypted(&require_password(password)?),
         "export-pkcs8-encrypted" => {
             export_pkcs8_encrypted(&require_password(password)?, iterations.as_deref())
@@ -916,6 +917,17 @@ fn export_pem(kind: &str) -> Result<()> {
     // byte-exact checks compare against other implementations' files.
     print!("{text}");
     Ok(())
+}
+
+/// Extract a certificate's subject public key from a PEM on stdin and print it as a JWK.
+///
+/// The peer script computes an RFC 7518 thumbprint from the printed JSON *itself*, in Python,
+/// so the comparison is independent of this crate's thumbprint code as well as of its DER walk.
+fn import_cert() -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::public_jwk_from_certificate_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("certificate extraction rejected: {e}"))?;
+    emit(&jwk)
 }
 
 /// Read an `ENCRYPTED PRIVATE KEY` PEM from stdin, decrypt with `--password`, print the JWK.

@@ -1,6 +1,7 @@
 //! JSON Web Key (JWK) types and serialization (RFC 7517).
 
 pub mod agreement;
+pub mod cert;
 pub mod convert;
 pub mod encrypted_pkcs8;
 pub mod generate;
@@ -8,6 +9,9 @@ pub mod import;
 pub mod pem;
 pub mod thumbprint;
 
+pub use cert::{
+    public_jwk_from_certificate_der, public_jwk_from_certificate_pem, MAX_CERTIFICATE_DER_BYTES,
+};
 /// The X25519 base point, shared by key generation and by the `d`-derives-`x`
 /// import check so the two cannot drift apart.
 pub(crate) use convert::X25519_BASEPOINT;

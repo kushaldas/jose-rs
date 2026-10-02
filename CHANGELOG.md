@@ -6,6 +6,23 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- X.509 subject public-key extraction (RFC 5280 §4.1, I4):
+  `jwk::public_jwk_from_certificate_der` / `public_jwk_from_certificate_pem` locate
+  `subjectPublicKeyInfo` positionally (handling the index shift when the optional
+  `[0] version` element is absent) and route it through the existing SPKI importer,
+  so unsupported and restricted key types are refused with the same messages as
+  everywhere else. Input is bounded by `MAX_CERTIFICATE_DER_BYTES` and parsed as
+  DER per RFC 5280 Appendix A.1 — definite lengths, low tag numbers, minimal
+  lengths, no trailing bytes — which is stricter than OpenSSL and matches
+  `cryptography`. A PEM file must hold exactly one `CERTIFICATE` block; a chain is
+  refused with its block count rather than silently using the first certificate.
+  **Extraction does not validate anything**: no signature, issuer, validity or
+  chain check, and `x5c` binding remains a separate feature. See ADR 0026.
+- `jwk_from_pem` now refuses a `CERTIFICATE` block naming
+  `public_jwk_from_certificate_pem`, continuing the label-dispatch rule of ADR 0022.
+
+### Added
+
 - Password-encrypted PKCS#8 key files (RFC 5958 §3, I3):
   `jwk::jwk_from_encrypted_pkcs8_der`/`_pem` (plus `*_with_options` for the work
   budget) and `jwk::encrypted_pkcs8_der_from_jwk`/`encrypted_pkcs8_pem_from_jwk`

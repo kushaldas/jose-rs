@@ -52,6 +52,7 @@ interop/.venv/bin/python interop/tests/ecdh_kdf_vectors.py
 interop/.venv/bin/python interop/tests/jwe_ecdh_es_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/pem_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/pkcs8_encrypted_cryptography.py
+interop/.venv/bin/python interop/tests/cert_cryptography.py
 ```
 
 The last check needs `cryptography` (already a `jwcrypto` dependency) and takes

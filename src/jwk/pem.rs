@@ -77,6 +77,9 @@ const MAX_PEM_LINE_LEN: usize = 64;
 const LABEL_RSA_PUBLIC: &str = "RSA PUBLIC KEY";
 /// The RFC 7468 type label for a SEC1 `ECPrivateKey`.
 const LABEL_EC_PRIVATE: &str = "EC PRIVATE KEY";
+/// The X.509 certificate label (RFC 7468 §8.1): recognized, and refused here.
+pub(crate) const LABEL_CERTIFICATE: &str = "CERTIFICATE";
+
 /// The password-encrypted PKCS#8 label (RFC 7468 §11): recognized, and routed to a
 /// different function because reading it needs a password.
 pub(crate) const LABEL_ENCRYPTED_PRIVATE: &str = "ENCRYPTED PRIVATE KEY";
@@ -139,6 +142,14 @@ pub fn jwk_from_pem(text: &str) -> Result<Jwk> {
         // Recognized, and refused *here* rather than routed: reading this block needs a
         // password, and a function that takes none must not be able to return a key whose
         // owner believes it was protected.
+        // A certificate is not a key; it is a claim about one. Routed to its own module, which
+        // is explicit about the difference.
+        LABEL_CERTIFICATE => Err(JoseError::InvalidToken(
+            "PEM \"CERTIFICATE\" is an X.509 certificate, not a key; extract its subject public \
+             key with `jwk::public_jwk_from_certificate_pem`, which does not and cannot validate \
+             the certificate"
+                .into(),
+        )),
         LABEL_ENCRYPTED_PRIVATE => Err(JoseError::InvalidToken(
             "PEM \"ENCRYPTED PRIVATE KEY\" is a password-encrypted PKCS#8 key and needs the \
              password-carrying entry point `jwk::jwk_from_encrypted_pkcs8_pem`"
