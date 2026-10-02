@@ -81,13 +81,25 @@ new behaviour/policy.
 | 29 | `test(fuzz): harnesses for the new parsers, mirrored in CI` | Q0 | **done** — 8 new harnesses + generated, committed seed corpus (`examples/fuzz_seeds.rs`, `--check` for drift) + `tests/fuzz_regressions.rs` (17 tests) mirroring every harness sequence over seeds and mutations on stable; entry-point parity and harness syntax are both asserted mechanically. ADR 0034 |
 | 28 | `docs: definition of done as a command` | Q3 | **done** — `scripts/gate.sh` (+ `just gate`/`gate-quick`/`gate-interop` aliases; CI still calls cargo directly): fmt, tests ×5 configs, clippy ×5 with `RUSTFLAGS='-D warnings'`, strict rustdoc, capability-table drift diff, and `--with-interop` for the matrix + every peer suite; prints per-configuration totals so "ran the gate" is a checkable claim. `docs/definition-of-done.md` splits the checklist into what the script checks and what a human must, and the script prints the human half instead of implying green means done. ADR 0033 |
 
-> **Status (last updated after `docs: make the definition of done a command`).**
+> **Status (last updated after `docs(deps): a dependency record that is checked, not trusted`).**
+>
 > Every backend-independent item in `future_plan.md` is implemented and committed:
-> Q0–Q3 (fuzz corpus and mirrored replay: row 29; performance baselines: row 30; dependency/MSRV/platform record: row 31),
-> J0–J4a, D1, K0–K5,
-> I0–I4, L0–L5. The only remaining plan items are A0–A3
-> (row 26), which require primitives `kryptering 0.6.0` does not expose and are
-> therefore out of scope for this crate, not deferred work in it.
+> **Q0–Q3** (fuzz corpus and mirrored replay: row 29; performance baselines: row 30;
+> dependency/MSRV/platform record: row 31), **J0–J4a**, **D1**, **K0–K5**, **I0–I4**,
+> **L0–L5**.
+>
+> What remains is not deferred work inside this crate:
+>
+> - **A0–A3** (row 26) — Ed448, secp256k1/ES256K, Brainpool, post-quantum maintenance —
+>   need primitives `kryptering 0.6.0` does not expose. Each is implemented as a refusal
+>   that names what is missing and appears in `docs/capabilities.md` as
+>   `RecognizedNotSupported`; adding a local implementation would break the single
+>   software/HSM key boundary (ADR 0016), so they are out of scope here by design.
+> - **R0** (release boundary) — publishing, recording the merged commit and published
+>   version, and confirming a downstream consumer can use the helper are human-owned
+>   actions. The part that was code — "reconcile capability wording so parsed enum names
+>   are not advertised as operational support" — is done by the executable capability
+>   table (row 20, ADR 0028), which fails CI when documentation overstates support.
 
 ## 2. Fixed design rules honoured everywhere
 
