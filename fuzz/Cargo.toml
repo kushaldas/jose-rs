@@ -74,3 +74,59 @@ path = "fuzz_targets/jws_verify_composite.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jwk_from_pem"
+path = "fuzz_targets/jwk_from_pem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk_from_der"
+path = "fuzz_targets/jwk_from_der.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "certificate_extract"
+path = "fuzz_targets/certificate_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encrypted_pkcs8"
+path = "fuzz_targets/encrypted_pkcs8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwkset_select"
+path = "fuzz_targets/jwkset_select.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwe_json_flattened"
+path = "fuzz_targets/jwe_json_flattened.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwe_json_general"
+path = "fuzz_targets/jwe_json_general.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwt_claims"
+path = "fuzz_targets/jwt_claims.rs"
+test = false
+doc = false
+bench = false

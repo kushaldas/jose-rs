@@ -101,7 +101,10 @@ Hard rules:
   `interop/tests/*_jwcrypto.py`, the Node/panva matrix in
   `interop/tests/matrix.sh`.
 - Fuzz targets in `fuzz/` must be extended when a new parser or envelope
-  shape is added; keep any crash as a regression fixture.
+  shape is added; keep any crash as a regression fixture. A new harness also
+  needs seeds (`examples/fuzz_seeds.rs`, corpus committed under `fuzz/seeds/`)
+  and a mirrored `replay_*` function in `tests/fuzz_regressions.rs`, which is
+  what actually executes on stable in CI — the fuzz job only builds (ADR 0034).
 
 ## 5. Design constraints that are never relaxed
 

@@ -52,7 +52,7 @@ cargo +nightly fuzz run jwk_from_json fuzz/artifacts/jwk_from_json/crash-<hash>
 
 ## Build-only
 
-CI runs `cargo fuzz build --dev` on every PR (`.github/workflows/fuzz.yml`)
+CI runs `cargo fuzz build --dev` (`workflow_dispatch`; `.github/workflows/fuzz.yml`)
 to catch compilation regressions without holding up merges with a long
 fuzzing run. To replicate locally:
 
@@ -63,11 +63,38 @@ cargo +nightly fuzz build --dev
 
 ## Corpus and seeds
 
-No seed corpus is checked in yet. For meaningful coverage you can:
+`fuzz/seeds/<target>/` holds a checked-in, generated seed corpus — see
+`fuzz/seeds/README.md` for why it is committed and how it is regenerated
+(`cargo run --example fuzz_seeds`, or `-- --check` to verify it is current).
 
-1. Generate a handful of valid JOSE tokens with the library's own tests
-   or examples and drop them into `fuzz/corpus/<target>/`.
-2. Import public test vectors (RFC 7515 Appendix A, RFC 7520) as seeds.
+Point libFuzzer at it directly:
+
+```sh
+cargo +nightly fuzz run certificate_extract fuzz/seeds/certificate_extract
+```
+
+libFuzzer writes its *own* discoveries to `fuzz/corpus/<target>/` (gitignored) and
+crash artifacts to `fuzz/artifacts/<target>/` (also gitignored). A crash worth
+keeping belongs in `fuzz/seeds/<target>/` instead, so it is replayed by the CI test
+described next.
+
+## Replay without nightly: `tests/fuzz_regressions.rs`
+
+Each harness's input sequence is mirrored in `tests/fuzz_regressions.rs` as an
+ordinary function and driven over every seed plus deterministic mutations (every
+truncation, every single-byte flip on inputs short enough to enumerate). That is
+not fuzzing — no search, no coverage feedback — but it *runs* on stable in CI,
+which is what the build-only fuzz job cannot do. A test additionally requires that
+every `jose_rs::…` entry point a harness calls also appears in the mirror, so the
+two copies cannot drift apart silently.
+
+## Adding a harness
+
+Add the target file, a `[[bin]]` entry in `fuzz/Cargo.toml`, a row in the table
+above, seeds under `fuzz/seeds/<target>/` (via `examples/fuzz_seeds.rs`), and a
+mirrored `replay_*` function plus `drive("<target>", replay_*)` test in
+`tests/fuzz_regressions.rs`. An entry point the harness reaches but the mirror does
+not must either be mirrored or listed in `HARNESS_ONLY_ENTRY_POINTS` with a reason.
 
 ## Reporting findings
 

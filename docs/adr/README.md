@@ -37,3 +37,4 @@ history.
 | [0031](0031-selection-refuses-it-does-not-guess.md) | Selection refuses; it does not guess, and it does not filter | Accepted |
 | [0032](0032-authenticated-results-and-coarse-errors.md) | Authenticated results, and errors coarse enough not to lie | Accepted |
 | [0033](0033-definition-of-done-is-a-command.md) | The definition of done is a command, and the rest is judgement | Accepted |
+| [0034](0034-fuzz-logic-runs-in-ci.md) | Fuzz logic runs in CI; the fuzzer only searches | Accepted |

@@ -116,7 +116,15 @@ PY
 )
     if [[ $? -eq 0 && "$summary" != unreadable:* ]]; then ok "run-interop.sh => $summary"; else bad "run-interop.sh => ${summary:-no results} (see interop/interop-results.json)"; fi
 
-    step "peer suites (jwcrypto / cryptography / panva-jose)"
+    step "fuzz seed corpus"
+if cargo run --locked --quiet --example fuzz_seeds -- --check >/tmp/jose-seeds-check.log 2>&1; then
+    ok "fuzz/seeds matches examples/fuzz_seeds.rs"
+else
+    bad "fuzz/seeds is stale (run: cargo run --example fuzz_seeds)"
+    head -10 /tmp/jose-seeds-check.log | sed 's/^/         /'
+fi
+
+step "peer suites (jwcrypto / cryptography / panva-jose)"
     HARNESS=interop/rust-harness/target/debug/jose-interop
     PY=interop/.venv/bin/python
     if [[ ! -x "$PY" ]]; then
@@ -152,6 +160,7 @@ if [[ "$FAILED" == 0 ]]; then
     cat <<'NOTE'
   Still yours to check (no script can do these):
     - RFC sections and errata re-read against the diff, not from memory
+    - new fuzz harness + seeds + mirrored replay, for any new parser
     - an ADR that states a consequence, not just a decision
     - tests in tests/, not only --lib, and each one fails for its stated reason
     - negative and resource-bound cases, not only happy paths

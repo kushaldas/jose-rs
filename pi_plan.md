@@ -76,11 +76,13 @@ new behaviour/policy.
 | 25 | `feat(jwk): thumbprint URI and typed generation options` | L5 | **done** — `thumbprint_uri`/`thumbprint_uri_sha256` build RFC 9278 URIs and `JwkThumbprintUri::parse` validates one (prefix, IANA *Hash Name String* — `sha-256` hyphenated, others refused per §4 — unpadded base64url, and decoded length **must** equal the named digest); `matches()` compares under the algorithm the URI named. Reproduced the RFC §6 example byte for byte, and 68 interop checks against `jose`'s `calculateJwkThumbprintUri` across RSA/EC×4/Ed25519/oct × SHA-256/384/512. Typed `KeyGeneration`/`EcCurve`/`generate_key` reuse the existing generators (one statement of the RSA floor and curve set), refuse unsupported options by name, and deliberately have **no** feature-gated post-quantum variant. ADR 0027; 3 lib + 8 integration tests |
 | 26 | `docs(adr): curve/algorithm coverage decisions` | A0-A3 | **blocked on kryptering** — Ed448 (A0), secp256k1/ES256K (A1), Brainpool (A2), post-quantum maintenance (A3) all need backend primitives that `kryptering 0.6.0` does not expose; nothing in this crate can supply them. Documented in `docs/capabilities.md` as `RecognizedNotSupported`, naming what is missing. |
 | 27 | `docs: roadmap, changelog and capability tables` | Q3 closeout | **done** — see row 28 for the gate; CHANGELOG/README/ADR index/plan kept current per feature commit |
+| 29 | `test(fuzz): harnesses for the new parsers, mirrored in CI` | Q0 | **done** — 8 new harnesses + generated, committed seed corpus (`examples/fuzz_seeds.rs`, `--check` for drift) + `tests/fuzz_regressions.rs` (17 tests) mirroring every harness sequence over seeds and mutations on stable; entry-point parity and harness syntax are both asserted mechanically. ADR 0034 |
 | 28 | `docs: definition of done as a command` | Q3 | **done** — `scripts/gate.sh` (+ `just gate`/`gate-quick`/`gate-interop` aliases; CI still calls cargo directly): fmt, tests ×5 configs, clippy ×5 with `RUSTFLAGS='-D warnings'`, strict rustdoc, capability-table drift diff, and `--with-interop` for the matrix + every peer suite; prints per-configuration totals so "ran the gate" is a checkable claim. `docs/definition-of-done.md` splits the checklist into what the script checks and what a human must, and the script prints the human half instead of implying green means done. ADR 0033 |
 
 > **Status (last updated after `docs: make the definition of done a command`).**
 > Every backend-independent item in `future_plan.md` is implemented and committed:
-> Q0–Q3, J0–J4a, D1, K0–K5, I0–I4, L0–L5. The only remaining plan items are A0–A3
+> Q0–Q3 (including the Q0 fuzz corpus and mirrored replay, row 29), J0–J4a, D1, K0–K5,
+> I0–I4, L0–L5. The only remaining plan items are A0–A3
 > (row 26), which require primitives `kryptering 0.6.0` does not expose and are
 > therefore out of scope for this crate, not deferred work in it.
 
