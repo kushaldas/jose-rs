@@ -204,18 +204,13 @@ fn structurally_broken_armor_is_refused() {
 fn other_pem_labels_are_refused_by_name() {
     // Each of these is a different structure. The label is the only place the difference
     // is written, so guessing from the bytes is exactly what must not happen.
-    // `RSA PRIVATE KEY` is no longer on this list — PKCS#1 imports (ADR 0023) — which is
-    // the point of keeping the rest of it: each refusal below is a structure this crate
-    // still does not parse, and the day one of them does, this test has to change on
-    // purpose rather than by accident.
-    for (pem_text, label, hint) in [
-        (EC_SEC1, "EC PRIVATE KEY", "SEC1"),
-        (CERT, "CERTIFICATE", "certificate"),
-    ] {
-        let err = pem::jwk_from_pem(pem_text).unwrap_err().to_string();
-        assert!(err.contains(label), "{label}: {err}");
-        assert!(err.contains(hint), "{label}: {err}");
-    }
+    // `RSA PRIVATE KEY` and `EC PRIVATE KEY` are no longer on this list — PKCS#1 (ADR 0023)
+    // and SEC1 (ADR 0024) import — which is the point of keeping the rest of it: each refusal
+    // below is a structure this crate still does not parse, and the day one of them does, this
+    // test has to change on purpose rather than by accident.
+    let err = pem::jwk_from_pem(CERT).unwrap_err().to_string();
+    assert!(err.contains("CERTIFICATE"), "{err}");
+    assert!(err.contains("certificate"), "{err}");
     // A password-encrypted PKCS#8 is a *label* case, and a legacy RFC 1423 key is a
     // *header* case; both say "this is encrypted" rather than failing as corruption.
     let enc = pem::jwk_from_pem(EC_ENCRYPTED_PBKDF2)
@@ -224,6 +219,17 @@ fn other_pem_labels_are_refused_by_name() {
     assert!(enc.contains("ENCRYPTED PRIVATE KEY"), "{enc}");
     let legacy = pem::jwk_from_pem(RSA_LEGACY).unwrap_err().to_string();
     assert!(legacy.contains("password-encrypted"), "{legacy}");
+}
+
+#[test]
+fn the_sec1_label_routes_to_its_own_importer() {
+    let key = pem::jwk_from_pem(EC_SEC1).expect("EC PRIVATE KEY routes to SEC1");
+    assert_eq!(key.kty, "EC");
+    assert_eq!(key.crv.as_deref(), Some("P-256"));
+    assert!(key.d.is_some());
+    // And it is the SEC1 structure being read, not a lucky PKCS#8 parse: the same file fed to
+    // the PKCS#8 importer is refused.
+    assert!(pem::jwk_from_pkcs8_pem(EC_SEC1).is_err());
 }
 
 #[test]

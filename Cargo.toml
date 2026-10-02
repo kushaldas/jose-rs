@@ -43,6 +43,10 @@ zeroize = "1"
 # RFC 7468 PEM armour (I0). Already resolved in Cargo.lock as a dependency of
 # `der`/`pkcs8`, so this adds an explicit edge and no new package.
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+# SEC1 `ECPrivateKey` (RFC 5915) structure (I2). Already resolved in Cargo.lock as a
+# dependency of the nist-curve crates, so this names an existing package rather than
+# adding one.
+sec1 = { version = "0.7", features = ["pkcs8"] }
 
 # Post-quantum (optional)
 ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core"], optional = true }

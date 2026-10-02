@@ -207,6 +207,19 @@ def encode_dss(r, s):
     return b"\x30" + der_len(len(body)) + body
 
 
+def _extract_block(pem_text, label):
+    """Pull one `-----BEGIN <label>-----` block out of a multi-block PEM document."""
+    marker = b"-----BEGIN " + label + b"-----"
+    end = b"-----END " + label + b"-----"
+    start = pem_text.find(marker)
+    if start < 0:
+        return None
+    stop = pem_text.find(end, start)
+    if stop < 0:
+        return None
+    return pem_text[start : stop + len(end)] + b"\n"
+
+
 def _rewrap_body(pem_text, width):
     """Re-wrap a PEM body at `width` columns, as a generic base64 writer would."""
     lines = pem_text.splitlines()
@@ -381,7 +394,32 @@ def main(harness_path):
         serialization.PrivateFormat.TraditionalOpenSSL,
         NO_ENC,
     )
-    samples.append(("SEC1 block", sec1, ["EC PRIVATE KEY", "SEC1"]))
+    # SEC1 imports (I2), including the public point consistency check, so the assertion is
+    # that it imports as the same key.
+    ok, out, err = harness_raw(harness_path, refuser, sec1)
+    if not ok:
+        FAIL.append("SEC1 private block was refused: %s" % (err or out)[:200])
+    else:
+        want = expected_jwk_from_python(ec_key, include_private=True)
+        bad = subset_match(json.loads(out), want, sorted(want.keys()))
+        check("SEC1 private file imports as the same key", not bad, "differ: %s" % bad)
+    # Explicit curve parameters (RFC 5915's full domain-parameter block) are refused rather
+    # than matched to the nearest named curve.
+    explicit = ec_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        NO_ENC,
+        # `cryptography` cannot emit explicit parameters, so build it with openssl below.
+    )
+    ok, openssl_explicit, _ = openssl(
+        ["ecparam", "-name", "prime256v1", "-genkey", "-param_enc", "explicit"], b""
+    )
+    if ok:
+        only = _extract_block(openssl_explicit, b"EC PRIVATE KEY")
+        if only:
+            refused, why = harness_fails(harness_path, refuser, only, ["explicit curve parameters"])
+            check("explicit curve parameters are refused by name", refused, why)
+    del explicit
 
     # A self-signed certificate wrapping the public key: a certificate, not a key.
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"jose-rs interop")])

@@ -298,6 +298,234 @@ fn biguint(bytes: &[u8]) -> num_bigint_dig::BigUint {
     num_bigint_dig::BigUint::from_bytes_be(bytes)
 }
 
+/// Import a SEC1 (`ECPrivateKey`) DER-encoded EC private key into a [`Jwk`].
+///
+/// SEC1 (RFC 5915) is what `openssl ec -traditional` and many hardware tools write: the
+/// scalar, optionally the curve, optionally the public point. PKCS#8 wraps the same scalar
+/// and states the curve in an `AlgorithmIdentifier`, which is why the two need separate entry
+/// points — a SEC1 file's curve lives in a different place, and may not be in it at all.
+///
+/// Three refusals do the security work here, and all three are about not guessing:
+///
+/// * **No curve, no key.** `parameters` is OPTIONAL in this structure. A bare scalar with no
+///   curve is not a key, and the plausible-looking recovery — try each supported curve until
+///   one accepts the scalar — is exactly how a P-256 secret ends up being read as a P-384
+///   key. Such a file is refused.
+/// * **Explicit curve parameters are refused, not matched to the nearest named curve.**
+///   RFC 5915 lets a key carry the whole domain-parameter block (`field-id`, `a`, `b`, `base`,
+///   `order`, `cofactor`). Reading that as "close enough to P-256" would import a key whose
+///   curve is *asserted by the file* rather than named by an OID — and an anomalous or
+///   unsafely-generated curve is exactly what an attacker wants this crate to accept. Only
+///   named curves this crate supports are read.
+/// * **A supplied public point must match the scalar.** `publicKey` is OPTIONAL; when present
+///   it is compared against the point the secret derives. A file pairing a scalar with
+///   someone else's public point would yield a JWK whose public half verifies nothing, while
+///   both halves look valid in isolation.
+///
+/// What survives is normalized to PKCS#8 and run through [`jwk_from_pkcs8_der`], so curve
+/// dispatch, the backend's checks and JWK construction are the same code path every other EC
+/// import uses.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, absent or explicit curve parameters, an unsupported
+/// named curve, a scalar outside `[1, n−1]`, and a public point that disagrees with it.
+pub fn jwk_from_sec1_der(der: &[u8]) -> Result<Jwk> {
+    use sec1::der::Decode;
+    use sec1::EcParameters;
+
+    let parsed = sec1::EcPrivateKey::from_der(der).map_err(|err| sec1_decode_error(der, err))?;
+
+    let curve = match parsed.parameters {
+        Some(EcParameters::NamedCurve(oid)) => oid,
+        None => {
+            return Err(JoseError::Key(
+                "SEC1 EC private key carries no curve parameters; a scalar without its curve is                  not a key, and guessing one would silently change which key this is"
+                    .into(),
+            ));
+        }
+    };
+
+    // Per curve: build the scalar (which enforces the range and rejects zero), compare any
+    // public point the file asserts against the one it derives, then hand the normalized
+    // PKCS#8 form to the shared importer.
+    match curve {
+        OID_P256 => sec1_p256_import(der, parsed.public_key),
+        OID_P384 => sec1_p384_import(der, parsed.public_key),
+        OID_P521 => sec1_p521_import(der, parsed.public_key),
+        other => Err(JoseError::Key(format!(
+            "unsupported SEC1 curve OID {other}; this crate reads P-256, P-384 and P-521"
+        ))),
+    }
+}
+
+/// SEC1 import for one NIST curve, written concretely per curve rather than generically: the
+/// three bodies differ in which `SecretKey` type they use and how its public point is
+/// reached, and the generic form needed an `elliptic_curve` edge this crate does not have.
+macro_rules! sec1_import {
+    ($name:ident, $secret:ty, $point:path, $curve_name:literal) => {
+        fn $name(der: &[u8], asserted: Option<&[u8]>) -> Result<Jwk> {
+            use $point as _;
+
+            let secret = <$secret>::from_sec1_der(der).map_err(|e| {
+                // The decoder rejects an out-of-range scalar and an unusable embedded point
+                // through the same call, so the message names both possibilities rather than
+                // blaming the scalar for a point problem.
+                JoseError::Key(format!(
+                    "invalid SEC1 {} ECPrivateKey: the scalar must lie in [1, n-1] and any                      embedded public point must be a valid point on that curve ({e})",
+                    $curve_name
+                ))
+            })?;
+            // `to_sec1_der` round-trip: the scalar must survive re-encoding at its own
+            // width, which catches a representation the curve would otherwise silently
+            // reduce.
+            secret
+                .to_sec1_der()
+                .map_err(|e| JoseError::Key(format!("SEC1 scalar is not representable: {e}")))?;
+            ensure_point_matches(
+                secret.public_key().to_encoded_point(false).as_bytes(),
+                asserted,
+                $curve_name,
+            )?;
+            let normalized = secret.to_pkcs8_der().map_err(|e| {
+                JoseError::Key(format!(
+                    "SEC1 to PKCS#8 normalization failed for {}: {e}",
+                    $curve_name
+                ))
+            })?;
+            jwk_from_pkcs8_der(normalized.as_bytes())
+        }
+    };
+}
+
+sec1_import!(
+    sec1_p256_import,
+    p256::SecretKey,
+    p256::elliptic_curve::sec1::ToEncodedPoint,
+    "P-256"
+);
+sec1_import!(
+    sec1_p384_import,
+    p384::SecretKey,
+    p384::elliptic_curve::sec1::ToEncodedPoint,
+    "P-384"
+);
+
+/// P-521, whose key types need the same workaround the PKCS#8 importer uses for them.
+fn sec1_p521_import(der: &[u8], asserted: Option<&[u8]>) -> Result<Jwk> {
+    use p521::elliptic_curve::sec1::ToEncodedPoint;
+
+    let secret = p521::SecretKey::from_sec1_der(der).map_err(|e| {
+        JoseError::Key(format!(
+            "invalid SEC1 P-521 ECPrivateKey: the scalar must lie in [1, n-1] and any embedded              public point must be a valid point on that curve ({e})"
+        ))
+    })?;
+    let point = secret.public_key().to_encoded_point(false);
+    ensure_point_matches(point.as_bytes(), asserted, "P-521")?;
+    let normalized = secret.to_pkcs8_der().map_err(|e| {
+        JoseError::Key(format!(
+            "SEC1 to PKCS#8 normalization failed for P-521: {e}"
+        ))
+    })?;
+    jwk_from_pkcs8_der(normalized.as_bytes())
+}
+
+/// Compare the public point a file asserts with the one its scalar derives.
+fn ensure_point_matches(computed: &[u8], asserted: Option<&[u8]>, name: &str) -> Result<()> {
+    match asserted {
+        None => Ok(()),
+        Some(point) if point == computed => Ok(()),
+        Some(_) => Err(JoseError::Key(format!(
+            "{name} SEC1 key's public point does not match its private scalar; importing it              would produce a JWK whose public half verifies nothing"
+        ))),
+    }
+}
+
+/// Turn a SEC1 decode failure into the message that explains it.
+///
+/// `sec1` models only the named-curve form of `ECParameters`, so a file carrying RFC 5915's
+/// explicit domain-parameter block fails to decode as a generic ASN.1 error. This looks at the
+/// tag of the `parameters` member to say so — which can only ever turn a vague refusal into a
+/// specific one. Nothing is accepted here that the decoder did not accept.
+fn sec1_decode_error(der: &[u8], err: sec1::der::Error) -> JoseError {
+    if carries_explicit_parameters(der) {
+        return JoseError::Key(
+            "SEC1 keys with explicit curve parameters (RFC 5915's full domain-parameter block)              are unsupported: matching them to the nearest named curve would import a key whose              curve is asserted by the file rather than named by an OID. Export a named curve"
+                .into(),
+        );
+    }
+    JoseError::Key(format!("invalid SEC1 ECPrivateKey DER: {err}"))
+}
+
+/// Does the `parameters [0]` member hold a SEQUENCE (explicit parameters) rather than an OID?
+///
+/// A minimal walk over the top-level `ECPrivateKey` SEQUENCE, used *only* to classify a
+/// refusal it can already make. Anything it cannot read is reported as "not explicit
+/// parameters", so this function can never cause something to be accepted.
+fn carries_explicit_parameters(der: &[u8]) -> bool {
+    // ECPrivateKey ::= SEQUENCE { version, privateKey, parameters [0], publicKey [1] }
+    let Some(mut body) = der_sequence_body(der) else {
+        return false;
+    };
+    while !body.is_empty() {
+        let tag = body[0];
+        let Some((len, header)) = der_member_header(body) else {
+            return false;
+        };
+        // 0xa0 is the constructed `parameters [0]` member: an OID (named curve) or a
+        // SEQUENCE (explicit parameters) inside it.
+        if tag == 0xa0 {
+            return body
+                .get(header..header + len)
+                .is_some_and(|value| value.first() == Some(&0x30));
+        }
+        let Some(next) = header.checked_add(len) else {
+            return false;
+        };
+        let Some(rest) = body.get(next..) else {
+            return false;
+        };
+        body = rest;
+    }
+    false
+}
+
+/// The content of a DER `SEQUENCE`'s body, or `None` if this is not one.
+fn der_sequence_body(der: &[u8]) -> Option<&[u8]> {
+    if der.first() != Some(&0x30) {
+        return None;
+    }
+    let (len, header) = der_member_header(der)?;
+    der.get(header..header + len)
+}
+
+/// `(value length, header size)` of the DER member at the start of `buf`.
+///
+/// Only definite lengths are read; an indefinite length is not valid DER and is reported as
+/// unreadable, which the caller treats as "not explicit parameters".
+fn der_member_header(buf: &[u8]) -> Option<(usize, usize)> {
+    let (&_tag, rest) = buf.split_first()?;
+    let &first = rest.first()?;
+    if first & 0x80 == 0 {
+        return Some((first as usize, 2));
+    }
+    let octets = (first & 0x7f) as usize;
+    if octets == 0 || octets > 4 {
+        return None;
+    }
+    let len = read_length(rest.get(1..1 + octets)?)?;
+    Some((len, 2 + octets))
+}
+
+/// A length value from its big-endian length octets.
+fn read_length(octets: &[u8]) -> Option<usize> {
+    let mut acc: usize = 0;
+    for byte in octets {
+        acc = acc.checked_shl(8)?.checked_add(*byte as usize)?;
+    }
+    Some(acc)
+}
+
 // ── EC dispatch by named-curve OID ──────────────────────────────────────
 
 fn ec_private_from_pkcs8(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering::SoftwareKey> {

@@ -33,10 +33,10 @@
 //!   its own dependency and scheme allow-list, so the refusal says where it leads rather
 //!   than pretending the bytes are a key.
 //! * **Labels are dispatched, not guessed.** `PRIVATE KEY` is PKCS#8, `PUBLIC KEY` is SPKI,
-//!   and the two RSA-specific labels `RSA PRIVATE KEY` / `RSA PUBLIC KEY` are PKCS#1.
-//!   `EC PRIVATE KEY` (SEC1) and `CERTIFICATE` are still refused **by name** with a pointer
-//!   to the entry point that will serve them — they are different structures, and the label
-//!   is the only place the difference is written.
+//!   `RSA PRIVATE KEY` / `RSA PUBLIC KEY` are PKCS#1, and `EC PRIVATE KEY` is SEC1.
+//!   `CERTIFICATE` is still refused **by name** with a pointer to the entry point that will
+//!   serve it — these are different structures, and the label is the only place the
+//!   difference is written.
 //! * **Private export is its own function.** [`private_pem_from_jwk`] is the only way to
 //!   get a `PRIVATE KEY` block, and it requires private material;
 //!   [`public_pem_from_jwk`] exports the SPKI public half and will not emit a private
@@ -75,6 +75,8 @@ const MAX_PEM_LINE_LEN: usize = 64;
 
 /// The RFC 7468 type label for a PKCS#1 `RSAPublicKey`.
 const LABEL_RSA_PUBLIC: &str = "RSA PUBLIC KEY";
+/// The RFC 7468 type label for a SEC1 `ECPrivateKey`.
+const LABEL_EC_PRIVATE: &str = "EC PRIVATE KEY";
 
 /// Labels this crate recognizes but does not yet parse, each with the reason a caller
 /// needs.
@@ -85,10 +87,6 @@ const LABEL_RSA_PUBLIC: &str = "RSA PUBLIC KEY";
 /// would either fail cryptically or — worse, for lengths that happen to line up —
 /// succeed at the wrong thing.
 const KNOWN_BUT_UNSUPPORTED: &[(&str, &str)] = &[
-    (
-        "EC PRIVATE KEY",
-        "SEC1 (RFC 5915), not PKCS#8; import through the SEC1 entry point",
-    ),
     (
         "CERTIFICATE",
         "an X.509 certificate; extract the public key through the certificate entry point",
@@ -134,6 +132,7 @@ pub fn jwk_from_pem(text: &str) -> Result<Jwk> {
         LABEL_PUBLIC => super::import::jwk_from_spki_der(&der),
         LABEL_RSA_PRIVATE => super::import::jwk_from_pkcs1_der(&der),
         LABEL_RSA_PUBLIC => super::import::jwk_from_pkcs1_public_der(&der),
+        LABEL_EC_PRIVATE => super::import::jwk_from_sec1_der(&der),
         other => Err(unsupported_label(other)),
     }
 }

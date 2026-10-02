@@ -158,6 +158,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   generic base64 writer emits 76-column lines, and "invalid base64" was not a useful answer).
   See ADR 0023.
 
+- **SEC1 (RFC 5915) EC private-key import**: `jwk_from_sec1_der`, with the
+  `EC PRIVATE KEY` PEM label routed to it. SEC1's curve and public point are OPTIONAL members,
+  and each has a permissive reading that is wrong, so all three are refused: a scalar with no
+  curve (guessing one reads a P-256 secret as a P-384 key), explicit curve parameters
+  (RFC 5915's full domain-parameter block would import a key whose curve is asserted by the
+  file rather than named — anomalous and unsafely-generated curves are why that matters), and a
+  public point that does not belong to the scalar (a JWK whose public half verifies nothing).
+  An unsupported named curve is refused naming its OID. What survives is normalized to PKCS#8
+  and run through the shared importer, so SEC1, PKCS#8 and SPKI imports of one EC key yield the
+  same JWK, the same RFC 7638 thumbprint and byte-identical signatures. The explicit-parameter
+  refusal reads the `parameters [0]` member's tag to name the structure — a classifier that can
+  only sharpen a refusal, never grant an acceptance. See ADR 0024.
+
 ### Internal
 
 - `jose_rs::jwe` is split into `content` (AEAD / AES-CBC-HMAC), `internal`
