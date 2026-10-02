@@ -505,6 +505,26 @@ assert_eq!(payload, b"payload");
 
 ## Development tooling
 
+### Verifying a change
+
+The mechanical half of this repository's per-change definition of done is one
+command:
+
+```sh
+./scripts/gate.sh                # fmt + tests × 5 configs + clippy × 5 + strict rustdoc + capability drift
+./scripts/gate.sh --quick        # default configuration only, while iterating
+./scripts/gate.sh --with-interop # plus the interop matrix and every peer suite
+just gate                        # same script, if you have `just`
+```
+
+It prints per-configuration test totals so "I ran the gate" is a checkable claim
+rather than an assertion. The rest of the checklist — RFC and errata review, an
+ADR that states a consequence, negative tests that fail for the reason they
+claim, peer evidence that also pins what the peer *accepts*, migration notes,
+staged-file review and human merge — lives in
+[`docs/definition-of-done.md`](docs/definition-of-done.md), where it is labelled
+as judgement instead of pretending to be automated (ADR 0033).
+
 ### Dependency audit
 
 The repository is wired for [`cargo-audit`](https://rustsec.org/).

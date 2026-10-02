@@ -53,6 +53,30 @@ audit:
 # Everything CI runs on the core Rust crate.
 check-all: fmt-check clippy test doc
 
+# --- Definition of done --------------------------------------------------
+#
+# The mechanical half of `docs/definition-of-done.md`, in one command. The script
+# is the implementation (and runs without `just` installed); these recipes are
+# aliases so the gate is discoverable from `just --list`.
+
+# Full pre-commit gate: fmt, tests and Clippy in every CI configuration, strict
+# rustdoc, and the capability tables' drift check.
+gate:
+    ./scripts/gate.sh
+
+# Just fmt + default-configuration tests + rustdoc + capability drift.
+gate-quick:
+    ./scripts/gate.sh --quick
+
+# Gate plus the interop matrix and every peer suite (needs the harness build and
+# the interop venv; see interop/README.md).
+gate-interop:
+    ./scripts/gate.sh --with-interop
+
+# Regenerate the capability tables from the code.
+capabilities:
+    cargo run --locked --example capabilities > docs/capabilities.md
+
 # --- Interop (panva/jose) ------------------------------------------------
 
 # Build the Rust harness and install JS deps. Prerequisite for any

@@ -22,8 +22,18 @@ form of authorization logic.
 ## 2. Definition of done — CI parity is mandatory
 
 Every change must pass **all** of the following locally before it is
-considered ready. CI enforces the same list, and `just check-all` mirrors the
-core subset.
+considered ready. CI enforces the same list. One command runs the whole set:
+
+```sh
+./scripts/gate.sh            # or: just gate   (--quick while iterating)
+./scripts/gate.sh --with-interop   # plus the matrix and every peer suite
+```
+
+The script is the implementation of this section's commands; the expanded
+checklist, including the judgement calls no script can make (RFC review, ADR
+consequences, negative tests that fail for the right reason, migration notes,
+human merge), is [`docs/definition-of-done.md`](docs/definition-of-done.md).
+`just check-all` mirrors only the core subset. Expanded list, for reference:
 
 ```sh
 cargo fmt --all -- --check                                  # must be silent

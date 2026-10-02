@@ -19,6 +19,15 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- A runnable definition of done (Q3): `scripts/gate.sh` (`just gate`,
+  `just gate-quick`, `just gate-interop`) runs fmt, tests and Clippy across all five
+  CI feature configurations, strict rustdoc, and a drift check on the generated
+  capability tables — printing per-configuration totals as evidence.
+  `docs/definition-of-done.md` holds the full checklist, with the judgement calls
+  the script deliberately does not fake. See ADR 0033.
+
+### Added
+
 - Authenticated results (L4): `jose_rs::Authenticated<T>` returns the verified
   payload/claims together with the protected header the signature or AEAD tag
   actually covered, and keeps unauthenticated metadata in a separately named
