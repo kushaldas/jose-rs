@@ -65,6 +65,8 @@ fn run() -> Result<()> {
     let mut enc: Option<String> = None;
     let mut crv: Option<String> = None;
     let mut pem_kind: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut iterations: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -92,6 +94,18 @@ fn run() -> Result<()> {
         } else if a == "--pem" {
             pem_kind = raw.get(i + 1).cloned();
             i += 2;
+        } else if let Some(rest) = a.strip_prefix("--password=") {
+            password = Some(rest.to_string());
+            i += 1;
+        } else if a == "--password" {
+            password = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--iterations=") {
+            iterations = Some(rest.to_string());
+            i += 1;
+        } else if a == "--iterations" {
+            iterations = raw.get(i + 1).cloned();
+            i += 2;
         } else {
             i += 1;
         }
@@ -118,6 +132,10 @@ fn run() -> Result<()> {
         "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "import-pem" => import_pem(),
+        "import-pkcs8-encrypted" => import_pkcs8_encrypted(&require_password(password)?),
+        "export-pkcs8-encrypted" => {
+            export_pkcs8_encrypted(&require_password(password)?, iterations.as_deref())
+        }
         "export-pem" => export_pem(&require_pem_kind(pem_kind)?),
         "sign-pem" => sign_pem(&require_alg(alg)?),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
@@ -128,6 +146,10 @@ fn run() -> Result<()> {
 
 fn require_alg(alg: Option<String>) -> Result<String> {
     alg.ok_or_else(|| anyhow!("--alg is required"))
+}
+
+fn require_password(password: Option<String>) -> Result<String> {
+    password.ok_or_else(|| anyhow!("--password is required"))
 }
 
 fn require_enc(enc: Option<String>) -> Result<String> {
@@ -892,6 +914,43 @@ fn export_pem(kind: &str) -> Result<()> {
     .map_err(|e| anyhow!("PEM export refused: {e}"))?;
     // Emitted verbatim: the library's PEM already ends in exactly one newline, and the
     // byte-exact checks compare against other implementations' files.
+    print!("{text}");
+    Ok(())
+}
+
+/// Read an `ENCRYPTED PRIVATE KEY` PEM from stdin, decrypt with `--password`, print the JWK.
+///
+/// The password is a command-line argument because this is a test harness; a real CLI would
+/// prompt for it. The point of the command is that a key produced by another implementation's
+/// password-based exporter becomes a usable JWK here.
+fn import_pkcs8_encrypted(password: &str) -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::jwk_from_encrypted_pkcs8_pem(
+        text.trim_end_matches('\n'),
+        &jose_rs::Password::from_utf8(password),
+    )
+    .map_err(|e| anyhow!("encrypted PKCS#8 import rejected: {e}"))?;
+    emit(&jwk)
+}
+
+/// Read a JWK from stdin and print it as an `ENCRYPTED PRIVATE KEY` PEM, verbatim.
+///
+/// `--iterations` overrides the (deliberately high) default count; peers are expected to
+/// compute whatever the file names, so raising it tests their patience rather than ours.
+fn export_pkcs8_encrypted(password: &str, iterations: Option<&str>) -> Result<()> {
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let scheme = match iterations {
+        Some(raw) => jose_rs::jwk::Pkcs8Encryption::Aes256CbcPbkdf2HmacSha256 {
+            iterations: raw.parse().map_err(|_| anyhow!("--iterations must be a number"))?,
+        },
+        None => jose_rs::jwk::Pkcs8Encryption::default(),
+    };
+    let text = jose_rs::jwk::encrypted_pkcs8_pem_from_jwk(
+        &jwk,
+        &jose_rs::Password::from_utf8(password),
+        &scheme,
+    )
+    .map_err(|e| anyhow!("encrypted PKCS#8 export refused: {e}"))?;
     print!("{text}");
     Ok(())
 }

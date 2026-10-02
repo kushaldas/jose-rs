@@ -77,6 +77,9 @@ const MAX_PEM_LINE_LEN: usize = 64;
 const LABEL_RSA_PUBLIC: &str = "RSA PUBLIC KEY";
 /// The RFC 7468 type label for a SEC1 `ECPrivateKey`.
 const LABEL_EC_PRIVATE: &str = "EC PRIVATE KEY";
+/// The password-encrypted PKCS#8 label (RFC 7468 §11): recognized, and routed to a
+/// different function because reading it needs a password.
+pub(crate) const LABEL_ENCRYPTED_PRIVATE: &str = "ENCRYPTED PRIVATE KEY";
 
 /// Labels this crate recognizes but does not yet parse, each with the reason a caller
 /// needs.
@@ -133,6 +136,14 @@ pub fn jwk_from_pem(text: &str) -> Result<Jwk> {
         LABEL_RSA_PRIVATE => super::import::jwk_from_pkcs1_der(&der),
         LABEL_RSA_PUBLIC => super::import::jwk_from_pkcs1_public_der(&der),
         LABEL_EC_PRIVATE => super::import::jwk_from_sec1_der(&der),
+        // Recognized, and refused *here* rather than routed: reading this block needs a
+        // password, and a function that takes none must not be able to return a key whose
+        // owner believes it was protected.
+        LABEL_ENCRYPTED_PRIVATE => Err(JoseError::InvalidToken(
+            "PEM \"ENCRYPTED PRIVATE KEY\" is a password-encrypted PKCS#8 key and needs the \
+             password-carrying entry point `jwk::jwk_from_encrypted_pkcs8_pem`"
+                .into(),
+        )),
         other => Err(unsupported_label(other)),
     }
 }
@@ -214,7 +225,7 @@ pub fn private_pem_from_jwk(jwk: &Jwk) -> Result<String> {
 ///
 /// Keys that already have no attribute — RSA and the EC curves — pass through untouched,
 /// byte for byte.
-fn pkcs8_portable_form(der: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn pkcs8_portable_form(der: &[u8]) -> Result<Vec<u8>> {
     use pkcs8::der::{Decode, Encode};
     let info = pkcs8::PrivateKeyInfo::from_der(der).map_err(|e| {
         JoseError::Key(format!(
@@ -310,7 +321,7 @@ fn unsupported_label(label: &str) -> JoseError {
 ///
 /// The armor-level rules live here so all three import entry points share them; only the
 /// label dispatch differs between them.
-fn decompose(text: &str) -> Result<(&str, Vec<u8>)> {
+pub(crate) fn decompose(text: &str) -> Result<(&str, Vec<u8>)> {
     // Bound the input before parsing anything, as everywhere in this crate: PEM is text,
     // and a 4 GiB "key file" should be refused rather than allocated through.
     crate::ensure_emit_size(text.len())?;
@@ -418,6 +429,14 @@ fn armor_error(err: pem_rfc7468::Error) -> JoseError {
              -----BEGIN and -----END, canonical padding, no text around it"
         )),
     }
+}
+
+/// Armor DER as a PEM document with an arbitrary RFC 7468 label.
+///
+/// Used by the encrypted-PKCS#8 export, whose label (`ENCRYPTED PRIVATE KEY`) is not one of
+/// the two this module exports directly.
+pub(crate) fn encode_with_label(label: &str, der: &[u8]) -> Result<String> {
+    encode(label, der)
 }
 
 /// Armor DER as a PEM document, with an RFC 7468 type label.

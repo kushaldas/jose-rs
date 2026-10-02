@@ -6,6 +6,30 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- Password-encrypted PKCS#8 key files (RFC 5958 §3, I3):
+  `jwk::jwk_from_encrypted_pkcs8_der`/`_pem` (plus `*_with_options` for the work
+  budget) and `jwk::encrypted_pkcs8_der_from_jwk`/`encrypted_pkcs8_pem_from_jwk`
+  with an explicit `Pkcs8Encryption` scheme. Reading checks the file's scheme
+  against an allow-list **before** deriving any key: PBES2 with
+  PBKDF2-HMAC-SHA256/384/512 and AES-128/256-CBC is accepted; PBES1, scrypt,
+  HMAC-SHA1/SHA-224 PRFs and DES/3DES are refused naming the scheme. Iteration
+  counts are bounded (`PKCS8_MIN_ITERATIONS` 2 048 — the count OpenSSL and
+  `cryptography` emit by default — up to `PKCS8_DEFAULT_MAX_ITERATIONS`
+  10 000 000 ≈ 1.7 s measured), and exported files use
+  `PKCS8_DEFAULT_ITERATIONS` 600 000 with fresh salt and IV. There is no
+  fallback in either direction: the password door refuses an unencrypted block
+  and `jwk_from_pem` refuses an encrypted one, naming the function that reads it.
+  See ADR 0025.
+- `Password` moved to the crate root (`jose_rs::Password`, re-exported from
+  `jwk` and `jwe`) because two features now take one. `jwe::Password` and
+  `jwe::password::*` paths are unchanged.
+- Enabling the `encryption` feature of `pkcs8` (already a dependency, `rsa`'s
+  feature) is the scheme allow-list at compile time: HMAC-SHA1, DES and 3DES sit
+  behind `pkcs5`'s separately-named `-insecure`/`3des` features, which this crate
+  does not enable, so those schemes are unreachable by any input.
+
+### Added
+
 - Flattened JWE JSON Serialization (RFC 7516 §7.2.2) in the new
   `jose_rs::jwe::json` module: `encrypt_flattened*`, `decrypt_flattened*`,
   `FlattenedJwe::from_json`/`to_json`, and `to_compact`/`from_compact` for

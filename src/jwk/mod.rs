@@ -2,6 +2,7 @@
 
 pub mod agreement;
 pub mod convert;
+pub mod encrypted_pkcs8;
 pub mod generate;
 pub mod import;
 pub mod pem;
@@ -11,6 +12,12 @@ pub mod thumbprint;
 /// import check so the two cannot drift apart.
 pub(crate) use convert::X25519_BASEPOINT;
 pub use convert::{jwk_to_signature_key, jwk_to_software_key, software_key_to_jwk};
+pub use encrypted_pkcs8::{
+    encrypted_pkcs8_der_from_jwk, encrypted_pkcs8_pem_from_jwk, jwk_from_encrypted_pkcs8_der,
+    jwk_from_encrypted_pkcs8_der_with_options, jwk_from_encrypted_pkcs8_pem,
+    jwk_from_encrypted_pkcs8_pem_with_options, Pkcs8Encryption, Pkcs8ReadOptions,
+    PKCS8_DEFAULT_ITERATIONS, PKCS8_DEFAULT_MAX_ITERATIONS, PKCS8_MIN_ITERATIONS,
+};
 #[cfg(feature = "post-quantum")]
 pub use generate::{generate_composite_mldsa, generate_mldsa};
 pub use generate::{
@@ -21,6 +28,9 @@ pub use import::{
     jwk_from_pkcs1_der, jwk_from_pkcs1_public_der, jwk_from_pkcs8_der, jwk_from_sec1_der,
     jwk_from_spki_der,
 };
+// The same type, reachable from the module that needs a password for it; see
+// `crate::password` for why it is shared.
+pub use crate::password::Password;
 pub use pem::{
     jwk_from_pem, jwk_from_pkcs8_pem, jwk_from_spki_pem, private_pem_from_jwk, public_pem_from_jwk,
 };

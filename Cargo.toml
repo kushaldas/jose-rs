@@ -30,7 +30,10 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8.6"
 rsa = "0.9"
-pkcs8 = "0.10"
+# `encryption` enables the PKCS#5 PBES2 path (I3). The dependency's own feature set is
+# this crate's scheme allow-list: PBKDF2-HMAC-SHA2 + AES-CBC, with SHA-1, DES and 3DES
+# each behind a separately named `-insecure`/`3des` feature we do not enable.
+pkcs8 = { version = "0.10", features = ["encryption"] }
 digest = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
