@@ -179,14 +179,22 @@ async function decryptCompact(alg, enc) {
 async function encryptFlattened(alg, enc) {
   if (!alg) throw new Error('--alg is required')
   if (!enc) throw new Error('--enc is required')
-  const { jwk, plaintext_b64u, header, aad_b64u } = JSON.parse(readStdin())
-  if (header && ('alg' in header || 'enc' in header)) {
-    throw new Error('header input must not override `alg` / `enc`')
+  const { jwk, plaintext_b64u, header, aad_b64u, unprotected, recipient_header } =
+    JSON.parse(readStdin())
+  for (const [name, value] of Object.entries({ header, unprotected, recipient_header })) {
+    if (value && ('alg' in value || 'enc' in value)) {
+      throw new Error(`${name} input must not override \`alg\` / \`enc\``)
+    }
   }
   if (jwk.alg !== alg) throw new Error(`JWK alg ${jwk.alg} does not match expected ${alg}`)
   const key = await importJWK(jwk, alg)
   const enc_ = new FlattenedEncrypt(b64uDecode(plaintext_b64u))
     .setProtectedHeader({ ...(header ?? {}), alg, enc })
+  // RFC 7516 §7.2.1 header locations that are NOT integrity protected. jose-rs
+  // refuses to emit these, so this is the only side of the pair that can
+  // produce them — which makes it the interesting direction to test.
+  if (unprotected) enc_.setSharedUnprotectedHeader(unprotected)
+  if (recipient_header) enc_.setUnprotectedHeader(recipient_header)
   // External AAD (RFC 7516 §7.2.1): panva encodes it into the `aad` member and
   // folds the encoded text into the content AAD input, exactly as RFC 7516
   // §5.1 step 14 requires — which is what makes this cell meaningful.

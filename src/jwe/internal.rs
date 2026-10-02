@@ -413,6 +413,14 @@ pub(crate) struct ParsedEnvelope<'a> {
     pub header_b64: &'a str,
     /// Key-management algorithm, already allow-listed by the caller.
     pub alg: JweAlgorithm,
+    /// Whether `alg` came from the integrity-protected header.
+    ///
+    /// RFC 7516 §7.2.1 allows `alg` to sit in an unprotected member of the JSON
+    /// serialization. Nothing in this crate *trusts* an unauthenticated
+    /// algorithm: when this is `false` the caller must have independently
+    /// pinned the algorithm to the key it holds (see the JWK decrypt paths),
+    /// so the header value is being *checked*, not believed.
+    pub alg_authenticated: bool,
     /// Content-encryption algorithm, already allow-listed by the caller.
     pub enc: JweEncryption,
     /// Wrapped key (empty for `dir`).
@@ -426,6 +434,9 @@ pub(crate) struct ParsedEnvelope<'a> {
 }
 
 /// Decode and policy-check one envelope's fields.
+///
+/// `unprotected_alg` is the `alg` value conveyed outside the protected header,
+/// if any (JSON serialization only; the compact path passes `None`).
 ///
 /// Rejects `zip` (compression is not implemented, so returning the still
 /// compressed bytes as "plaintext" would be a silent integrity failure) and
@@ -442,6 +453,7 @@ pub(crate) struct ParsedEnvelope<'a> {
 /// Returns the envelope content together with the parsed protected header.
 pub(crate) fn parse_envelope<'a>(
     header_b64: &'a str,
+    unprotected_alg: Option<&str>,
     encrypted_key_b64: &str,
     iv_b64: &str,
     ciphertext_b64: &str,
@@ -472,7 +484,16 @@ pub(crate) fn parse_envelope<'a>(
         )));
     }
 
-    let alg = JweAlgorithm::from_str(&header.alg)?;
+    // `alg` normally lives in the protected header. The JSON serialization may
+    // instead convey it in an unprotected member (`unprotected_alg`), which is
+    // legal (RFC 7516 §7.2.1) but unauthenticated: the flag records where it
+    // came from so callers can demand a key-pinned algorithm before accepting
+    // it. The compact serialization always passes `None`, so an absent `alg`
+    // there keeps its original "unknown algorithm" error.
+    let (alg, alg_authenticated) = match (header.alg.as_str(), unprotected_alg) {
+        ("", Some(outer)) => (JweAlgorithm::from_str(outer)?, false),
+        (protected, _) => (JweAlgorithm::from_str(protected)?, !protected.is_empty()),
+    };
     let enc_str = header
         .enc
         .as_deref()
@@ -482,6 +503,7 @@ pub(crate) fn parse_envelope<'a>(
     let envelope = ParsedEnvelope {
         header_b64,
         alg,
+        alg_authenticated,
         enc,
         encrypted_key: base64url::decode(encrypted_key_b64)?,
         iv: base64url::decode(iv_b64)?,

@@ -23,6 +23,14 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   disagreement is reported by name instead of as a generic authentication
   failure, an empty value is refused, and the compact serialization refuses the
   option because it cannot represent it. See ADR 0012.
+- The unprotected header members of the JSON serializations (`unprotected`
+  shared, `header` per-recipient) are now read, with the parameter-name
+  disjointness RFC 7516 §7.2.1 requires, so RFC 7516 §A.5's own flattened
+  example decrypts. An `alg` conveyed there is accepted only when the caller's
+  JWK pins the same algorithm; the raw-key APIs refuse it, and `enc`, `zip`,
+  `crit` and the unimplemented key-agreement parameters are refused in
+  unprotected positions outright. jose-rs never emits unprotected parameters.
+  See ADR 0013.
 
 ### Internal
 

@@ -60,7 +60,12 @@ The `jwe_json_jwcrypto.py` check covers the flattened JSON JWE (RFC 7516
 §7.2.2) over nine `alg`/`enc` combinations in both directions, asserting the
 emitted member shape on each side, **and** repeats every combination with
 external additional authenticated data — including that jose-rs refuses a
-message whose `aad` member it cannot match against the caller's bytes. It also **pins the documented divergence**
+message whose `aad` member it cannot match against the caller's bytes. It also
+pins the unprotected-header boundary from ADR 0013: the RFC §A.5 shape (enc
+protected, `alg` unprotected) decrypts against a pinned key, a tampered
+unprotected `alg` is refused by the pin, and jwcrypto's default output (no
+protected member at all, `enc` unprotected) is refused because an
+unauthenticated `enc` is a substitution attack rather than a trust question. It also **pins the documented divergence**
 from ADR 0011: jwcrypto's default flattened output puts `alg`/`enc` in the
 per-recipient *unprotected* `header` member (the shape RFC 7516 §A.5 uses),
 which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
@@ -72,7 +77,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **63 cells**:
+Full matrix is **67 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -82,6 +87,7 @@ Full matrix is **63 cells**:
 | JWE compact | `jwe` | 4 alg:enc × 2 directions = 8 | `dir:A256GCM`, `dir:A128CBC-HS256`, `A256KW:A256GCM`, `A256KW:A128CBC-HS256`; same custom header; plaintext + header compared |
 | JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | JWE flattened JSON + external AAD | `jwe-json-aad` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.1 `aad` member: emitted with the right encoding, decryptable by the peer **with** the out-of-band bytes, and **refused without them** |
+| JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
 
 The four JWS directions:
@@ -179,7 +185,7 @@ encoded by the caller and turned into the `aad` member by each implementation.
 | `encrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, plaintext_b64u, header?}`        | `{jwe}`                                       |
 | `decrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, jwe}`                            | `{ok, plaintext_b64u, protected_header}`      |
 | `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?, aad_b64u?}` | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string |
-| `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?}`                 | `{ok, plaintext_b64u, protected_header}`      |
+| `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?}`                 | `{ok, plaintext_b64u, protected_header, unprotected_header?}` |
 | `sign-compact-raw --alg <ALG>` (Rust only)  | `{jwk, header_raw, payload_b64u}`       | `{jws}` signed over `header_raw` verbatim     |
 
 `header` is an optional object of extra protected-header members (e.g.

@@ -13,11 +13,11 @@ Three things are checked per (alg, enc) combination:
 2b. the same pair with **external additional authenticated data** (RFC 7516
    §7.2.1) in play, including the requirement that jose-rs refuses the message
    when the out-of-band bytes are withheld.
-3. jose-rs *refuses* the shape jwcrypto produces by default — ``alg``/``enc`` in
-   the per-recipient unprotected ``header`` member. RFC 7516 §7.2.1 permits that
-   shape and RFC 7516 §A.5 uses it; jose-rs requires the protected header until
-   unprotected headers are implemented (docs/adr/0012). This is a documented
-   divergence, asserted rather than discovered by accident.
+3. the shape jwcrypto produces by default — ``alg``/``kid`` in the
+   per-recipient unprotected ``header`` member, as RFC 7516 §A.5 does — is read
+   *and* policed: a key that pins the algorithm accepts it, a message whose
+   unauthenticated ``alg`` has been tampered with is refused
+   (docs/adr/0013).
 """
 
 import base64
@@ -195,27 +195,84 @@ def check_external_aad_both_directions(binary: str, alg: str, enc: str) -> None:
     assert "does not match" in stderr, stderr
 
 
-def check_unprotected_header_is_refused(binary: str, alg: str, enc: str) -> None:
-    """jwcrypto's default output puts alg/enc in the unprotected `header`.
+def check_unprotected_alg_shape(binary: str, alg: str, enc: str) -> None:
+    """jwcrypto's default output puts `alg`/`kid` in the unprotected `header`.
 
-    jose-rs must refuse it by name (ADR 0012) instead of reading an
-    unauthenticated `alg`. The assertion pins the *reason*, so a future change
-    that silently starts accepting this shape has to update this test.
+    RFC 7516 §7.2.1 permits that placement, and RFC 7516 §A.5 uses it, but the
+    value is then attacker-controlled. jose-rs accepts it only for a key that
+    pins the same algorithm (ADR 0013), so the header value is checked against
+    the key instead of believed. Both halves of that rule are asserted here:
+    the honest message decrypts, and a tampered `alg` is refused.
     """
     key = rust(binary, "gen-key", alg, enc, {})
-    token = jwe.JWE(
+
+    # jwcrypto's default puts *everything* unprotected, `enc` included, and
+    # emits no protected member at all. jose-rs refuses that: an
+    # unauthenticated `enc` decides how the ciphertext and tag octets are split,
+    # which is a genuine substitution attack rather than a trust question. The
+    # refusal is asserted so the boundary is never moved by accident.
+    default_shape = jwe.JWE(
         PLAINTEXT,
         recipient=jwk.JWK(**key),
         header={"alg": alg, "enc": enc, **EXTRA_HEADER},
-    )
-    message = json.loads(token.serialize())
-    assert "header" in message and "protected" not in message, message.keys()
-
+    ).serialize()
+    assert "protected" not in json.loads(default_shape)
     stderr = rust_expect_failure(binary, "decrypt-flattened", alg, enc, {
         "jwk": key,
-        "jwe": json.dumps(message),
+        "jwe": default_shape,
     })
-    assert "unsupported JWE JSON member" in stderr and "header" in stderr, stderr
+    assert "\"protected\" is required" in stderr and "integrity protected" in stderr, stderr
+
+    # The RFC 7516 §A.5 shape — `enc` protected, `alg`/`kid` unprotected — is
+    # read, because the key pins the one value the message cannot prove.
+    honest = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({"enc": enc}),
+        recipient=jwk.JWK(**key),
+        header={"alg": alg, **EXTRA_HEADER},
+    ).serialize()
+    decrypted = rust(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": honest,
+    })
+    assert base64.urlsafe_b64decode(decrypted["plaintext_b64u"] + "==") == PLAINTEXT, (
+        "a pinned key must be able to read the RFC §A.5 shape"
+    )
+    reported = decrypted["unprotected_header"]
+    assert reported.get("kid") == "interop-kid-1", reported
+    assert reported.get("tenant") == "interop", reported
+
+    # Tamper with the *unauthenticated* algorithm and the key's pin refuses it.
+    # Rewrite the *unauthenticated* algorithm and ask for the rewritten one, so
+    # the driver's own wiring check stays out of the way and what is being
+    # tested is jose-rs's key pin: the key still says `alg`, the token now says
+    # something else.
+    tampered_alg = "A256KW" if alg != "A256KW" else "A128KW"
+    tampered = json.loads(honest)
+    tampered["header"]["alg"] = tampered_alg
+    stderr = rust_expect_failure(binary, "decrypt-flattened", tampered_alg, enc, {
+        "jwk": key,
+        "jwe": json.dumps(tampered),
+    })
+    assert "does not match token header alg" in stderr, stderr
+
+    # The RFC 7516 §A.5 three-location shape (enc protected, alg per-recipient
+    # unprotected, jku shared unprotected) is read as well.
+    three = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({"enc": enc}),
+        unprotected={"jku": "https://interop.invalid/keys.jwks"},
+        recipient=jwk.JWK(**key),
+        header={"alg": alg, "kid": "interop-kid-1"},
+    )
+    decrypted = rust(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": three.serialize(),
+    })
+    assert base64.urlsafe_b64decode(decrypted["plaintext_b64u"] + "==") == PLAINTEXT
+    reported = decrypted["unprotected_header"]
+    assert reported.get("jku") == "https://interop.invalid/keys.jwks", reported
+    assert reported.get("alg") == alg, reported
 
 
 def main(binary: str) -> None:
@@ -224,7 +281,7 @@ def main(binary: str) -> None:
         check_rust_to_jwcrypto(binary, alg, enc)
         check_jwcrypto_to_rust(binary, alg, enc)
         check_external_aad_both_directions(binary, alg, enc)
-        check_unprotected_header_is_refused(binary, alg, enc)
+        check_unprotected_alg_shape(binary, alg, enc)
     print(json.dumps({
         "cell": "jwe-json-jwcrypto",
         "result": "PASS",

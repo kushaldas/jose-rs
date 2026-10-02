@@ -296,8 +296,11 @@ pub fn decrypt_with_options(
     // The compact serialization exposes no header to the caller, so the
     // parsed protected header is discarded here; the JSON serializations
     // return it as authenticated metadata.
+    // RFC 7516 §7.1 defines no unprotected header member, so `alg` cannot
+    // legitimately come from anywhere but the protected header here.
     let (envelope, _protected) = parse_envelope(
         header_b64,
+        None,
         encrypted_key_b64,
         iv_b64,
         ciphertext_b64,

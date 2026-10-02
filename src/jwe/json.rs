@@ -15,14 +15,17 @@
 //! }
 //! ```
 //!
-//! Deliberately not implemented yet, and refused with an explicit error
-//! rather than ignored, because each changes what a recipient must believe
-//! about the message:
+//! The unprotected header locations — `unprotected` (shared) and `header`
+//! (per-recipient) — are **read**, under one rule (ADR 0013): a value the
+//! message cannot authenticate may only answer a question something else has
+//! already answered. So `alg` is accepted there only for a key that pins it (the
+//! JWK APIs), while `enc` — which decides how the ciphertext and tag octets are
+//! split — must always be integrity protected, and the parameter names across
+//! the three locations must be disjoint (RFC 7516 §7.2.1). This crate never
+//! *emits* unprotected parameters.
 //!
-//! - `unprotected` / `header` — unprotected header parameters, whose
-//!   disjointness across the three header locations RFC 7516 §7.2.1 requires
-//!   (ADR 0013);
-//! - `recipients` — the general syntax and multiple recipients (ADR 0014).
+//! Still refused by name: `recipients`, the general syntax and multiple
+//! recipients (ADR 0014).
 //!
 //! External additional authenticated data *is* supported: pass it with
 //! [`crate::jwe::JweEncryptOptions::with_external_aad`] when encrypting and
@@ -53,29 +56,17 @@ use crate::jwe::internal::{
 };
 use crate::member_map::MemberMap;
 
-/// Top-level members of the JWE JSON Serialization that this module rejects
-/// by name, with the reason surfaced to the caller.
+/// Top-level members of the JWE JSON Serialization that this module rejects by
+/// name, with the reason surfaced to the caller.
 ///
 /// These are *registered* members (RFC 7516 §7.2.1), not unknown private
 /// members, so ignoring them would silently discard header parameters that
 /// change how the ciphertext must be interpreted.
-const REJECTED_MEMBERS: &[(&str, &str)] = &[
-    (
-        "recipients",
-        "general JWE JSON serialization (multiple recipients) is not implemented \
+const REJECTED_MEMBERS: &[(&str, &str)] = &[(
+    "recipients",
+    "general JWE JSON serialization (multiple recipients) is not implemented \
          by this crate version; use the flattened syntax or the compact serialization",
-    ),
-    (
-        "unprotected",
-        "the JWE shared unprotected header is not implemented by this crate version; \
-         carry header parameters in the protected header",
-    ),
-    (
-        "header",
-        "the JWE per-recipient unprotected header is not implemented by this crate \
-         version; carry header parameters in the protected header",
-    ),
-];
+)];
 
 /// Members that identify the object as a JWS rather than a JWE
 /// (RFC 7516 §9: a JWS has `payload`/`signature`, a JWE has `ciphertext`).
@@ -105,10 +96,22 @@ const JWS_MEMBERS: &[&str] = &["payload", "signatures", "signature"];
 pub struct FlattenedJwe {
     /// `BASE64URL(UTF8(JWE Protected Header))`.
     ///
-    /// Required by this crate version: the `alg` and `enc` parameters must be
-    /// integrity protected, and unprotected header members are not
-    /// implemented (ADR 0011).
+    /// Required by this crate version: `enc` (and, for the raw-key APIs,
+    /// `alg`) must be integrity protected, so a message with no protected
+    /// header cannot be authenticated here at all (ADR 0011).
     pub protected: Option<String>,
+    /// JWE Shared Unprotected Header, the `unprotected` member
+    /// (RFC 7516 §7.2.1).
+    ///
+    /// **Not integrity protected.** Nothing in a decrypt decision may depend on
+    /// these values unless the caller independently pinned the answer to the key
+    /// it holds — which is what the JWK APIs do for `alg` and the only exception
+    /// this crate grants (ADR 0013). Retained verbatim so that re-serializing
+    /// does not drop them.
+    pub unprotected: Option<serde_json::Map<String, serde_json::Value>>,
+    /// JWE Per-Recipient Unprotected Header, the flattened `header` member
+    /// (RFC 7516 §7.2.2). Same trust rules as [`Self::unprotected`].
+    pub header: Option<serde_json::Map<String, serde_json::Value>>,
     /// `BASE64URL(JWE AAD)`: external additional authenticated data supplied
     /// out of band (RFC 7516 §2, §7.2.1).
     ///
@@ -166,7 +169,32 @@ impl FlattenedJwe {
             }
         }
 
-        let protected = require_member(&mut map, "protected")?;
+        let protected = match map.take_string("protected")? {
+            None => {
+                // RFC 7516 §7.2.1 permits an absent protected header, but this
+                // crate always requires one: `enc` must be integrity protected
+                // (it decides how the ciphertext and tag octets are split), and
+                // a message with no protected header has nowhere to put it.
+                // ADR 0011 and ADR 0013.
+                return Err(JoseError::InvalidToken(
+                    "JWE JSON member \"protected\" is required by this crate: the content \
+                     encryption algorithm (\"enc\") must be integrity protected"
+                        .into(),
+                ));
+            }
+            Some(value) if value.is_empty() => {
+                return Err(JoseError::InvalidToken(
+                    "JWE JSON member \"protected\" must be absent rather than empty \
+                     (RFC 7516 §7.2.1)"
+                        .into(),
+                ))
+            }
+            Some(value) => value,
+        };
+        let unprotected = object_member(&mut map, "unprotected")?;
+        // `header` is the *per-recipient* unprotected header in the flattened
+        // syntax (RFC 7516 §7.2.2), not a JWS signature.
+        let per_recipient = object_member(&mut map, "header")?;
         let aad = optional_member(&mut map, "aad")?;
         let ciphertext = require_member(&mut map, "ciphertext")?;
         let iv = optional_member(&mut map, "iv")?;
@@ -190,10 +218,15 @@ impl FlattenedJwe {
             base64url::decode(value)?;
         }
 
+        // RFC 7516 §7.2.1: one header parameter may not live in two places.
+        ensure_header_locations_disjoint(&protected, unprotected.as_ref(), per_recipient.as_ref())?;
+
         let other = map.drain_leftovers().into_iter().collect::<Vec<_>>();
 
         Ok(Self {
             protected: Some(protected),
+            unprotected,
+            header: per_recipient,
             aad,
             encrypted_key,
             iv,
@@ -212,6 +245,19 @@ impl FlattenedJwe {
         let mut map = serde_json::Map::new();
         if let Some(protected) = &self.protected {
             map.insert("protected".into(), serde_json::json!(protected));
+        }
+        if let Some(unprotected) = &self.unprotected {
+            if !unprotected.is_empty() {
+                map.insert(
+                    "unprotected".into(),
+                    serde_json::Value::Object(unprotected.clone()),
+                );
+            }
+        }
+        if let Some(header) = &self.header {
+            if !header.is_empty() {
+                map.insert("header".into(), serde_json::Value::Object(header.clone()));
+            }
         }
         if let Some(aad) = &self.aad {
             // RFC 7516 §7.2.1: absent rather than empty.
@@ -266,6 +312,18 @@ impl FlattenedJwe {
                  have no compact representation"
             )));
         }
+        for (name, present) in [
+            ("unprotected", self.unprotected.is_some()),
+            ("header", self.header.is_some()),
+        ] {
+            if present {
+                return Err(JoseError::InvalidToken(format!(
+                    "cannot convert to compact serialization: {name} header parameters are \
+                     not integrity protected and the compact form has nowhere to put them \
+                     (RFC 7516 \u{a7}7.1)"
+                )));
+            }
+        }
         if self.aad.is_some() {
             return Err(JoseError::InvalidToken(
                 "cannot convert to compact serialization: the compact form has no \"aad\" \
@@ -310,6 +368,8 @@ impl FlattenedJwe {
         }
         let jwe = Self {
             protected: Some(parts[0].to_string()),
+            unprotected: None,
+            header: None,
             aad: None,
             encrypted_key: (!parts[1].is_empty()).then(|| parts[1].to_string()),
             iv: Some(parts[2].to_string()),
@@ -336,6 +396,53 @@ impl FlattenedJwe {
         let json = base64url::decode(protected)?;
         let header: JoseHeader = serde_json::from_slice(&json)?;
         Ok(Some(header))
+    }
+
+    /// `alg` as conveyed **outside** the protected header, if the message puts
+    /// it there (RFC 7516 §7.2.1 allows `unprotected` or `header`).
+    ///
+    /// Untrusted by construction — the point of exposing it separately is that
+    /// a caller must never treat it as the answer.
+    pub fn unprotected_alg(&self) -> Option<&str> {
+        [self.unprotected.as_ref(), self.header.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|location| location.get("alg").and_then(|v| v.as_str()))
+            .next()
+    }
+
+    /// The JOSE Header as the recipient sees it: the union of the protected,
+    /// shared unprotected and per-recipient unprotected members
+    /// (RFC 7516 §7.2.1).
+    ///
+    /// Inspection only, and *unauthenticated* by definition wherever an
+    /// unprotected member contributes a value — see
+    /// [`Self::peek_protected_header`] for the authenticated subset.
+    pub fn peek_jose_header(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let mut union = serde_json::Map::new();
+        // Take the protected members from the *raw* encoded JSON rather than
+        // from a re-serialized `JoseHeader`: re-serializing would synthesize
+        // fields the sender never sent (an empty `alg`, for instance) and would
+        // lose the sender's own member set.
+        if let Some(protected) = self.protected.as_deref() {
+            let json = base64url::decode(protected)?;
+            let object: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&json)?;
+            union.extend(object);
+        }
+        for location in [self.unprotected.as_ref(), self.header.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            for (key, value) in location {
+                if union.contains_key(key) {
+                    return Err(JoseError::InvalidToken(format!(
+                        "header parameter {key} appears in more than one header location"
+                    )));
+                }
+                union.insert(key.clone(), value.clone());
+            }
+        }
+        Ok(union)
     }
 
     /// The declared key-management algorithm, if the header parses.
@@ -370,6 +477,112 @@ fn require_member(map: &mut MemberMap, name: &str) -> Result<String> {
         ))),
         Some(value) => Ok(value),
     }
+}
+
+/// Header parameters that must never appear in an unprotected location.
+///
+/// - `enc`: the content encryption algorithm decides how the ciphertext and tag
+///   octets are split. If it were attacker-chosen, swapping bytes between the
+///   `ciphertext` and `tag` members under a *different* `enc` could produce a
+///   message that authenticates under one reading of the envelope and means
+///   something else under another;
+/// - `zip`: RFC 7516 §4.1.3 — "MUST occur only within the JWE Protected
+///   Header";
+/// - `crit`: declaring an extension critical in data nobody authenticates lets
+///   an attacker either force rejection or, symmetrically, strip the marker;
+/// - `b64`: an RFC 7797 member that does not exist for JWE at all;
+/// - `epk`/`apu`/`apv`/`p2s`/`p2c`/`iv`/`tag`: parameters of key-management
+///   algorithms this crate does not implement (see
+///   [`crate::jwe::internal::UNIMPLEMENTED_JWE_MEMBERS`]). Accepting them in an
+///   unauthenticated position would mean reading key-agreement inputs an
+///   attacker chose.
+const UNPROTECTED_FORBIDDEN: &[&str] = &[
+    "enc", "zip", "crit", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag",
+];
+
+/// Read an optional unprotected-header member (`unprotected`, `header`).
+///
+/// These members carry a JSON *object*, not a base64url string. An empty object
+/// is refused: RFC 7516 §7.2.1 says the member MUST be absent when the
+/// corresponding header value is empty, and an empty object would otherwise be
+/// an ambiguous "present but says nothing" header location.
+fn object_member(
+    map: &mut MemberMap,
+    name: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    let Some(value) = map.take(name) else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(object) = value else {
+        return Err(JoseError::InvalidToken(format!(
+            "JWE JSON member {name} must be a JSON object of header parameters"
+        )));
+    };
+    if object.is_empty() {
+        return Err(JoseError::InvalidToken(format!(
+            "JWE JSON member {name} must be absent rather than empty (RFC 7516 §7.2.1)"
+        )));
+    }
+    // RFC 7516 §4.1.1: `alg` is a case-sensitive ASCII string. A number or
+    // object here is a header parameter nobody could honour, and ignoring it
+    // silently would leave the message with no algorithm and a puzzling
+    // downstream error.
+    if let Some(alg) = object.get("alg") {
+        if !alg.is_string() {
+            return Err(JoseError::InvalidToken(format!(
+                "JWE JSON member {name} carries a non-string \"alg\" value"
+            )));
+        }
+    }
+    for forbidden in UNPROTECTED_FORBIDDEN {
+        if object.contains_key(*forbidden) {
+            // (`alg` is deliberately absent from this list: RFC 7516 §7.2.1
+            // allows it in an unprotected location, and the decrypt path only
+            // accepts it when the caller's key pins the same value.)
+            return Err(JoseError::InvalidToken(format!(
+                "header parameter {forbidden} must be integrity protected and cannot appear in \
+                 the {name} member"
+            )));
+        }
+    }
+    Ok(Some(object))
+}
+
+/// RFC 7516 §7.2.1: "The Header Parameter names in the three locations MUST be
+/// disjoint."
+///
+/// A name in two locations has no defined meaning — implementations disagree on
+/// which wins, which is exactly the ambiguity that header-injection attacks
+/// exploit. Enforced at parse time, so no code downstream has to decide.
+fn ensure_header_locations_disjoint(
+    protected_b64: &str,
+    unprotected: Option<&serde_json::Map<String, serde_json::Value>>,
+    per_recipient: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<()> {
+    let protected_json = base64url::decode(protected_b64)?;
+    let protected: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&protected_json)?;
+
+    let mut seen: Vec<(&str, &'static str)> = protected
+        .keys()
+        .map(|key| (key.as_str(), "protected"))
+        .collect();
+    for (location, object) in [("unprotected", unprotected), ("header", per_recipient)] {
+        let Some(object) = object else {
+            continue;
+        };
+        for key in object.keys() {
+            if let Some((first, first_location)) =
+                seen.iter().find(|(name, _)| *name == key.as_str())
+            {
+                return Err(JoseError::InvalidToken(format!(
+                    "header parameter {first} appears in both the {first_location} and {location} members; the three header locations must be disjoint (RFC 7516 §7.2.1)"
+                )));
+            }
+            seen.push((key.as_str(), location));
+        }
+    }
+    Ok(())
 }
 
 /// Read an optional string member; `None` when absent or empty.
@@ -533,6 +746,12 @@ impl FlattenedJwe {
     fn from_core(core: &internal::EncryptedCore) -> Self {
         Self {
             protected: Some(core.header_b64.clone()),
+            // This crate never emits unprotected header members (ADR 0013): a
+            // parameter that is not integrity protected is a target, and every
+            // message we produce can carry its parameters in the protected
+            // header.
+            unprotected: None,
+            header: None,
             // External AAD is set by the caller-side entry point, which is the
             // only place that knows the octets.
             aad: None,
@@ -579,13 +798,75 @@ pub fn decrypt_flattened_with_options(
     jwe: &FlattenedJwe,
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
-    // This crate version requires alg/enc to be integrity protected; with no
-    // unprotected-header support there is nowhere else to carry them.
+    // Raw key material pins nothing, so this entry point has to be able to
+    // authenticate `alg` itself: an algorithm read from an unprotected member
+    // would simply be the attacker's choice. The JWK APIs, which do pin an
+    // algorithm on the key, may accept the unprotected placement.
+    decrypt_impl(key, jwe, options, None)
+}
+
+/// Shared decryption core behind the raw-key and JWK entry points.
+///
+/// `pinned_alg` is the algorithm the caller's key already pins, when it pins
+/// one. With a pin, an `alg` conveyed outside the protected header
+/// (RFC 7516 §7.2.1) is *checked against the key* instead of believed, which is
+/// the only safe way to use it; the token cannot steer the key-management
+/// algorithm anywhere the key disagrees. Without a pin, `alg` must come from
+/// the integrity-protected header.
+///
+/// `enc` always comes from the protected header: it decides how the ciphertext
+/// and tag octets are split, so an attacker-chosen `enc` could make a byte
+/// stream authenticate under one reading and mean something else under another.
+fn decrypt_impl(
+    key: &[u8],
+    jwe: &FlattenedJwe,
+    options: &JweDecryptOptions,
+    pinned_alg: Option<&str>,
+) -> Result<Vec<u8>> {
     let protected = jwe.protected.as_deref().ok_or_else(|| {
-        JoseError::InvalidHeader("JWE JSON requires a protected header carrying alg and enc".into())
+        JoseError::InvalidHeader("JWE JSON requires a protected header carrying enc".into())
     })?;
     ensure_token_size(protected)?;
     ensure_token_size(&jwe.ciphertext)?;
+
+    let protected_header = jwe
+        .peek_protected_header()?
+        .ok_or_else(|| JoseError::InvalidHeader("unreadable protected header".into()))?;
+
+    // Resolve where `alg` is conveyed, and refuse the unprotected placement
+    // unless something other than the token pins it.
+    let unprotected_alg = if protected_header.alg.is_empty() {
+        let outer = jwe.unprotected_alg().ok_or_else(|| {
+            JoseError::InvalidHeader(
+                "neither the protected header nor an unprotected header member conveys alg \
+                 (RFC 7516 §7.2.1)"
+                    .into(),
+            )
+        })?;
+        match pinned_alg {
+            Some(pinned) if pinned != outer => {
+                return Err(JoseError::InvalidToken(format!(
+                    "JWK alg {pinned} does not match token header alg {outer}"
+                )));
+            }
+            Some(_) => Some(outer),
+            None => {
+                return Err(JoseError::InvalidHeader(format!(
+                    "alg {outer} is conveyed in an unprotected header member, which the raw-key API cannot trust; use the JWK API with a key whose `alg` pins it, or send a message that carries alg in the protected header"
+                )))
+            }
+        }
+    } else {
+        if let Some(pinned) = pinned_alg {
+            if pinned != protected_header.alg {
+                return Err(JoseError::InvalidToken(format!(
+                    "JWK alg {pinned} does not match token header alg {}",
+                    protected_header.alg
+                )));
+            }
+        }
+        None
+    };
 
     let encrypted_key_b64 = jwe.encrypted_key.as_deref().unwrap_or_default();
     let iv_b64 = jwe.iv.as_deref().unwrap_or_default();
@@ -593,11 +874,16 @@ pub fn decrypt_flattened_with_options(
 
     let (envelope, _protected_header) = internal::parse_envelope(
         protected,
+        unprotected_alg,
         encrypted_key_b64,
         iv_b64,
         &jwe.ciphertext,
         tag_b64,
     )?;
+
+    // Defence in depth: `pinned_alg` is the policy that permits an
+    // unauthenticated `alg`, so the envelope must never report one without it.
+    debug_assert!(envelope.alg_authenticated || pinned_alg.is_some());
 
     options.check(envelope.alg, envelope.enc)?;
     options.check_plaintext_size(minimum_plaintext_len(jwe.ciphertext.len(), envelope.enc))?;
@@ -610,10 +896,14 @@ pub fn decrypt_flattened_with_options(
 
 /// Decrypt with a JWK, mirroring [`crate::jwe::decrypt_with_jwk`].
 ///
-/// `jwk.alg` must be set and must equal the token's protected `alg`, so the
-/// key-management algorithm is bound to the key rather than to attacker-
-/// controlled header data; `Jwk::check_op` (`Decrypt` / `UnwrapKey`) is
-/// enforced as well.
+/// `jwk.alg` must be set and must equal the token's `alg`, whether the token
+/// conveys it in the protected header or in an unprotected member
+/// (RFC 7516 §7.2.1): the key pins the key-management algorithm, so the header
+/// value is checked rather than believed. `Jwk::check_op` (`Decrypt` /
+/// `UnwrapKey`) is enforced as well.
+///
+/// This is the only JWE entry point that accepts an unprotected `alg`, and it
+/// is safe precisely because the key answers the question first.
 ///
 /// Refuses a message that carries an `aad` member, because the out-of-band
 /// bytes cannot be guessed: use [`decrypt_flattened_with_jwk_and_aad`] for
@@ -645,21 +935,13 @@ fn decrypt_flattened_with_jwk_impl(
     jwe: &FlattenedJwe,
     external_aad: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    let header = jwe
-        .peek_protected_header()?
-        .ok_or_else(|| JoseError::InvalidHeader("missing protected header".into()))?;
-    let alg = JweAlgorithm::from_str(&header.alg)?;
-
     let jwk_alg = jwk
         .alg
         .as_deref()
         .ok_or_else(|| JoseError::Key("JWK alg must be set for the JWE JWK APIs".into()))?;
-    if jwk_alg != header.alg {
-        return Err(JoseError::InvalidToken(format!(
-            "JWK alg {jwk_alg} does not match token header alg {}",
-            header.alg
-        )));
-    }
+    // The algorithm is taken from the key. The token's own claim (wherever it
+    // is placed) is compared against it inside `decrypt_impl`.
+    let alg = JweAlgorithm::from_str(jwk_alg)?;
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
@@ -668,7 +950,7 @@ fn decrypt_flattened_with_jwk_impl(
         internal::ensure_external_aad_present(aad)?;
         options = options.with_external_aad(aad);
     }
-    decrypt_flattened_with_options(&key_bytes, jwe, &options)
+    decrypt_impl(&key_bytes, jwe, &options, Some(jwk_alg))
 }
 
 /// Decode the protected header of a flattened JWE **without** authenticating
@@ -890,11 +1172,20 @@ mod tests {
             let err = json::FlattenedJwe::from_json(&value.to_string())
                 .unwrap_err()
                 .to_string();
-            assert!(
-                err.contains(&format!("member {missing} is required")),
-                "{err}"
-            );
+            assert!(err.contains("is required"), "{missing}: {err}");
         }
+
+        // The `protected` message says *why*, because that member is the
+        // difference between an authenticated and an unauthenticated `enc`.
+        let mut value: serde_json::Value = serde_json::from_str(&base).unwrap();
+        value.as_object_mut().unwrap().remove("protected");
+        let err = json::FlattenedJwe::from_json(&value.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("integrity protected") && err.contains("encryption algorithm"),
+            "{err}"
+        );
     }
 
     /// RFC 7516 §7.2.1: a member whose value is empty MUST be absent, so an
@@ -950,20 +1241,211 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unimplemented_members_with_a_reason() {
-        for member in ["unprotected", "header", "recipients"] {
+    fn rejects_the_general_syntax_member_with_a_reason() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("protected".into(), serde_json::json!("AA"));
+        obj.insert("ciphertext".into(), serde_json::json!("AA"));
+        obj.insert("recipients".into(), serde_json::json!([]));
+        let err = FlattenedJwe::from_json(&serde_json::to_string(&obj).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsupported JWE JSON member recipients"),
+            "{err}"
+        );
+    }
+
+    // -- unprotected header members (RFC 7516 §7.2.1) --
+
+    /// A message shape as compact as the syntax it replaces: `kid` where an
+    /// attacker can see it, but not where they can change it.
+    #[test]
+    fn unprotected_members_are_parsed_and_retained() {
+        let jwe = FlattenedJwe::from_json(
+            r#"{
+                "protected": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0",
+                "unprotected": {"jku": "https://example.invalid/jwks"},
+                "header": {"kid": "recipient-1"},
+                "iv": "AAAAAAAAAAAAAAAA",
+                "ciphertext": "AA",
+                "tag": "AAAAAAAAAAAAAAAA"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            jwe.unprotected
+                .as_ref()
+                .and_then(|m| m.get("jku"))
+                .and_then(|v| v.as_str()),
+            Some("https://example.invalid/jwks")
+        );
+        assert_eq!(
+            jwe.header
+                .as_ref()
+                .and_then(|m| m.get("kid"))
+                .and_then(|v| v.as_str()),
+            Some("recipient-1")
+        );
+        // Round-trips, so re-serializing a peer's message loses nothing.
+        let text = jwe.to_json().unwrap();
+        assert_eq!(FlattenedJwe::from_json(&text).unwrap(), jwe);
+        // But the compact form has nowhere to put them.
+        let err = jwe.to_compact().unwrap_err().to_string();
+        assert!(err.contains("not integrity protected"), "{err}");
+    }
+
+    #[test]
+    fn header_parameter_names_must_be_disjoint_across_locations() {
+        // RFC 7516 §7.2.1: the three locations MUST be disjoint.
+        let text = r#"{
+            "protected": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIiwia2lkIjoiaW4ifQ",
+            "unprotected": {"kid": "out"},
+            "ciphertext": "AA",
+            "iv": "AAAAAAAAAAAAAAAA",
+            "tag": "AAAAAAAAAAAAAAAA"
+        }"#;
+        let err = FlattenedJwe::from_json(text).unwrap_err().to_string();
+        assert!(
+            err.contains("kid appears in both the protected and unprotected members"),
+            "{err}"
+        );
+
+        let text = r#"{
+            "protected": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0",
+            "unprotected": {"kid": "shared"},
+            "header": {"kid": "per-recipient"},
+            "ciphertext": "AA",
+            "iv": "AAAAAAAAAAAAAAAA",
+            "tag": "AAAAAAAAAAAAAAAA"
+        }"#;
+        let err = FlattenedJwe::from_json(text).unwrap_err().to_string();
+        assert!(
+            err.contains("kid appears in both the unprotected and header members"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parameters_that_must_be_authenticated_cannot_sit_unprotected() {
+        for (member, parameter) in [
+            ("unprotected", "enc"),
+            ("unprotected", "crit"),
+            ("unprotected", "zip"),
+            ("unprotected", "epk"),
+            ("header", "enc"),
+            ("header", "b64"),
+            ("header", "p2s"),
+        ] {
             let mut obj = serde_json::Map::new();
-            obj.insert("protected".into(), serde_json::json!("AA"));
+            obj.insert(
+                "protected".into(),
+                serde_json::json!("eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0"),
+            );
             obj.insert("ciphertext".into(), serde_json::json!("AA"));
-            obj.insert(member.into(), serde_json::json!({}));
-            let err = json::FlattenedJwe::from_json(&serde_json::to_string(&obj).unwrap())
+            obj.insert("iv".into(), serde_json::json!("AAAAAAAAAAAAAAAA"));
+            obj.insert("tag".into(), serde_json::json!("AAAAAAAAAAAAAAAA"));
+            obj.insert(member.into(), serde_json::json!({ parameter: "whatever" }));
+            let err = FlattenedJwe::from_json(&serde_json::to_string(&obj).unwrap())
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains(&format!("unsupported JWE JSON member {member}")),
-                "{err}"
+                err.contains(&format!(
+                    "header parameter {parameter} must be integrity protected"
+                )) && err.contains(&format!("the {member} member")),
+                "{member}/{parameter}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn unprotected_header_member_shape_is_strict() {
+        let base = r#"{"protected":"eyJlbmMiOiJBMjU2R0NNIn0","ciphertext":"AA","iv":"AAAAAAAAAAAAAAAA","tag":"AAAAAAAAAAAAAAAA"}"#;
+        for (member, value) in [
+            // RFC 7516 §7.2.1: absent rather than empty.
+            ("unprotected", serde_json::json!({})),
+            ("header", serde_json::json!({})),
+            // Not an object at all.
+            ("unprotected", serde_json::json!("kid")),
+            ("header", serde_json::json!(["kid"])),
+            // An algorithm that is not a string.
+            ("header", serde_json::json!({"alg": 128})),
+        ] {
+            let mut obj: serde_json::Value = serde_json::from_str(base).unwrap();
+            obj[member] = value.clone();
+            let err = FlattenedJwe::from_json(&obj.to_string())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("JWE JSON member {member}"))
+                    || err.contains("non-string \"alg\""),
+                "{member}={value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unprotected_alg_requires_a_key_that_pins_it() {
+        // The message conveys alg only in the per-recipient unprotected header,
+        // exactly as RFC 7516 §A.5 does.
+        let jwe = FlattenedJwe::from_json(
+            r#"{
+                "protected": "eyJlbmMiOiJBMjU2R0NNIn0",
+                "header": {"alg": "dir"},
+                "ciphertext": "AA",
+                "iv": "AAAAAAAAAAAAAAAA",
+                "tag": "AAAAAAAAAAAAAAAA"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(jwe.unprotected_alg(), Some("dir"));
+        assert_eq!(jwe.peek_alg().unwrap(), None, "protected header has no alg");
+
+        // The raw-key API has nothing to check it against, so it refuses.
+        let err = decrypt_flattened(&key(), &jwe).unwrap_err().to_string();
+        assert!(
+            err.contains("raw-key API cannot trust") && err.contains("alg dir"),
+            "{err}"
+        );
+
+        // A key pinned to the same algorithm accepts it...
+        let mut pinned = crate::jwk::generate_symmetric(32).unwrap();
+        pinned.alg = Some("dir".into());
+        assert!(decrypt_flattened_with_jwk(&pinned, &jwe).is_err()); // wrong key bytes, but the
+                                                                     // policy accepted the algorithm
+                                                                     // ...and a key pinned elsewhere refuses it before any crypto.
+        let mut mismatched = crate::jwk::generate_symmetric(32).unwrap();
+        mismatched.alg = Some("A256KW".into());
+        let err = decrypt_flattened_with_jwk(&mismatched, &jwe)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("JWK alg A256KW does not match token header alg dir"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn jose_header_union_is_reported_without_being_trusted() {
+        let jwe = FlattenedJwe::from_json(
+            r#"{
+                "protected": "eyJlbmMiOiJBMjU2R0NNIn0",
+                "unprotected": {"jku": "https://example.invalid/jwks"},
+                "header": {"alg": "dir", "kid": "7"},
+                "ciphertext": "AA",
+                "iv": "AAAAAAAAAAAAAAAA",
+                "tag": "AAAAAAAAAAAAAAAA"
+            }"#,
+        )
+        .unwrap();
+        let union = jwe.peek_jose_header().unwrap();
+        assert_eq!(union["enc"], serde_json::json!("A256GCM"));
+        assert_eq!(union["alg"], serde_json::json!("dir"));
+        assert_eq!(union["kid"], serde_json::json!("7"));
+        assert_eq!(
+            union["jku"],
+            serde_json::json!("https://example.invalid/jwks"),
+            "reported as data; nothing in this crate fetches or trusts it"
+        );
     }
 
     #[test]

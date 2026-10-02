@@ -20,11 +20,13 @@
 //! - `A128GCM`, `A192GCM`, `A256GCM` -- AES-GCM
 //! - `A128CBC-HS256`, `A192CBC-HS384`, `A256CBC-HS512` -- AES-CBC with HMAC
 //!
+//! External additional authenticated data (`aad`) and the unprotected header
+//! members (`unprotected`, `header`) are read under the policies in ADR 0012
+//! and ADR 0013; this crate emits neither unprotected parameters nor anything
+//! it cannot itself decrypt.
+//!
 //! Not implemented, and refused by name rather than ignored: the General JSON
-//! Serialization (`recipients`), external additional authenticated data
-//! (`aad`), and the unprotected header members (`unprotected`, `header`) --
-//! see ADR 0011, ADR 0012, ADR 0013 and ADR 0014. Compression (`zip`) is not
-//! implemented either.
+//! Serialization (`recipients`, ADR 0014) and content compression (`zip`).
 
 pub mod compact;
 pub mod json;

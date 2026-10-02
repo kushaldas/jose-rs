@@ -233,9 +233,14 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   when present, must be listed in `crit` (RFC 7797 §6).
 - **JWE JSON Serialization is protected-header-only.**
   `jwe::json::FlattenedJwe` (RFC 7516 §7.2.2) requires a `protected` member,
-  because `alg` must be integrity protected, and refuses `unprotected`,
-  `header` and `recipients` by name rather than ignoring them — they are
-  registered members whose presence changes what a recipient must believe.
+  because `enc` must be integrity protected, and refuses `recipients` by name
+  rather than ignoring it. The unprotected header members (`unprotected`,
+  `header`) **are** read, with the disjointness RFC 7516 §7.2.1 requires, under
+  one rule: an unauthenticated `alg` is accepted only for a key that pins it
+  (the JWK APIs), so the header value is checked against the key instead of
+  believed; the raw-key APIs refuse it. `enc`, `zip`, `crit` and the
+  key-agreement parameters can never sit unprotected. jose-rs never *emits*
+  unprotected parameters (ADR 0013).
   External additional authenticated data (`aad`) **is** supported:
   `JweEncryptOptions::with_external_aad` /
   `JweDecryptOptions::with_external_aad` bind out-of-band bytes to the
@@ -248,8 +253,8 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   (which `serde_json` would otherwise resolve last-key-wins), non-string member
   values, non-canonical base64url and oversized input; the parsed protected
   header is available through `peek_protected_header()` for inspection only,
-  and no return value attests to it until decryption succeeds. See ADR 0011,
-  and ADR 0012 for external AAD.
+  and no return value attests to it until decryption succeeds — see ADR 0011,
+  ADR 0012 (external AAD) and ADR 0013 (unprotected header members).
 - **RSA minimum key size.** Keys below 2048 bits are rejected at parse
   and at generation time (RFC 7518 §3.3 / §4.2).
 - **AES-GCM nonce collision bound.** Content encryption with A128GCM /

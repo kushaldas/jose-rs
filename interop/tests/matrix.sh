@@ -192,7 +192,7 @@ run_jwe_cell() {
 # when the out-of-band bytes are withheld — i.e. the peer really folded them
 # into the content AAD input rather than shipping them as decoration.
 run_jwe_json_cell() {
-  local direction="$1" alg="${2%%:*}" enc="${2#*:}" aad_b64u="${3:-}"
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}" aad_b64u="${3:-}" unprot="${4:-no}"
   local key_path="$VECTORS/${CELL}.key.json"
   local enc_path="$VECTORS/${CELL}.encrypted.json"
   local out_path="$VECTORS/${CELL}.decrypted.json"
@@ -203,15 +203,26 @@ run_jwe_json_cell() {
     *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
   esac
   "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+  # In the `unprot` variant the JS producer moves `tenant` into the
+  # per-recipient unprotected header and adds a `jku` to the shared unprotected
+  # header. jose-rs never emits these members, so only js-encrypt-rust-decrypt
+  # can exercise them — and that is precisely the direction worth testing.
+  local unprot_json='{}'
+  if [ "$unprot" = yes ]; then
+    unprot_json='{"unprotected":{"jku":"https://interop.invalid/keys.jwks"},"recipient_header":{"tenant":"interop"}}'
+  fi
   "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
-    --arg a "$aad_b64u" \
-    '{jwk:$jwk, plaintext_b64u:$p, header:$h} + (if $a == "" then {} else {aad_b64u:$a} end)' \
+    --arg a "$aad_b64u" --argjson u "$unprot_json" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}
+     + (if $a == "" then {} else {aad_b64u:$a} end)
+     + $u
+     + (if $u.unprotected then {header: ($h - ["tenant"])} else {} end)' \
     | "$producer" encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
   local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
 
   # Serialization-shape assertions on the emitted object: RFC 7516 §7.2.1
   # presence rules, and nothing in an unprotected position.
-  printf '%s' "$jwe" | "$JQ" -e --arg alg "$alg" '
+  printf '%s' "$jwe" | "$JQ" -e --arg alg "$alg" --arg u "$unprot" '
     (.protected | type) == "string" and
     (.ciphertext | type) == "string" and
     (.iv | type) == "string" and
@@ -219,10 +230,12 @@ run_jwe_json_cell() {
     (if $alg == "dir"
        then (has("encrypted_key") | not)
        else (.encrypted_key | type) == "string" end) and
-    (has("unprotected") | not) and
-    (has("header") | not) and
     (has("recipients") | not) and
-    (has("aad") | not)
+    (if $u == "yes" then
+       true
+     else
+       ((has("unprotected") | not) and (has("header") | not) and (has("aad") | not))
+     end)
   ' > /dev/null || { echo "flattened JSON members wrong for $alg: $jwe" >&2; return 1; }
 
   if [ -n "$aad_b64u" ]; then
@@ -234,7 +247,16 @@ run_jwe_json_cell() {
     '{jwk:$jwk, jwe:$jwe} + (if $a == "" then {} else {aad_b64u:$a} end)' \
     | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
   [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
-  assert_header "$out_path"
+
+  if [ "$unprot" = yes ]; then
+    # The consumer must report the unprotected members back as data — proof it
+    # read all three header locations rather than only the protected one.
+    "$JQ" -e '.protected_header.tenant == null and .unprotected_header.jku == "https://interop.invalid/keys.jwks" and .unprotected_header.tenant == "interop"' \
+      "$out_path" > /dev/null \
+      || { echo "unprotected header members not reported: $(cat "$out_path")" >&2; return 1; }
+  else
+    assert_header "$out_path"
+  fi
 
   if [ -n "$aad_b64u" ]; then
     # Withholding the out-of-band bytes must break authentication on the peer,
@@ -334,6 +356,10 @@ run_cell() {
       jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-aad)
         run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
+      jwe-json-unprot)
+        # Only the JS side can emit unprotected header members.
+        [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
+        run_jwe_json_cell "$direction" "$alg" "" yes; exit 0 ;;
       jws-dup) run_dup_cell "$direction" "$alg"; exit 0 ;;
     esac
     local priv_path="$VECTORS/${cell}.priv.json"
@@ -499,6 +525,14 @@ for alg in "${ALGS_JWE[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-json-aad" || true
   done
+done
+
+# Flattened JSON JWE with unprotected header members (RFC 7516 §7.2.1). The
+# producer puts `tenant` in the per-recipient unprotected header and a `jku` in
+# the shared one; jose-rs must read them (as unauthenticated data) and still
+# authenticate the ciphertext.
+for alg in "${ALGS_JWE[@]}"; do
+  run_cell "js-encrypt-rust-decrypt" "$alg" "jwe-json-unprot" || true
 done
 
 # Duplicate-member negative vectors (L-4): does a last-key-wins JSON parser

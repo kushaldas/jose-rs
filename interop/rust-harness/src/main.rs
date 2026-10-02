@@ -407,8 +407,16 @@ fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
     let jwe = jose_rs::jwe::json::FlattenedJwe::from_json(&input.jwe)?;
     let header = jose_rs::jwe::json::decode_header(&jwe)?
         .ok_or_else(|| anyhow!("flattened JWE has no protected header"))?;
-    if header.alg != alg {
-        bail!("token alg {} does not match expected {alg}", header.alg);
+    // RFC 7516 §7.2.1 lets `alg` ride in an unprotected member, so the harness
+    // sanity check looks at the union the recipient actually sees. jose-rs
+    // itself still demands the key's pinned `alg` matches; this only stops the
+    // driver blaming the wrong thing for a wiring mistake.
+    let reported_alg = match header.alg.as_str() {
+        "" => jwe.unprotected_alg().unwrap_or_default().to_string(),
+        other => other.to_string(),
+    };
+    if reported_alg != alg {
+        bail!("token alg {reported_alg} does not match expected {alg}");
     }
     if header.enc.as_deref() != Some(enc) {
         bail!("token enc {:?} does not match expected {enc}", header.enc);
@@ -423,10 +431,17 @@ fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
         )?,
         None => jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?,
     };
+    let mut unprotected_header = serde_json::Map::new();
+    for location in [&jwe.unprotected, &jwe.header] {
+        if let Some(location) = location {
+            unprotected_header.extend(location.clone());
+        }
+    }
     emit(&DecryptCompactOutput {
         ok: true,
         plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
         protected_header: header,
+        unprotected_header: (!unprotected_header.is_empty()).then_some(unprotected_header),
     })
 }
 
@@ -445,6 +460,12 @@ struct DecryptCompactOutput {
     plaintext_b64u: String,
     /// The protected header as jose-rs parsed it (re-serialized).
     protected_header: JoseHeader,
+    /// The unprotected header members the message carried, merged
+    /// (`unprotected` then per-recipient `header`). Present only for a JSON
+    /// message that had them — the consumer read them as *data*, which is what
+    /// the `jwe-json-unprot` cells assert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unprotected_header: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
@@ -462,5 +483,6 @@ fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
         ok: true,
         plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
         protected_header: header,
+        unprotected_header: None,
     })
 }
