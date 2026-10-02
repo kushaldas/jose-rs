@@ -34,14 +34,17 @@ function parseArgs(argv) {
   const [cmd, ...rest] = argv
   let alg
   let enc
+  let crv
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a.startsWith('--alg=')) alg = a.slice('--alg='.length)
     else if (a === '--alg') { alg = rest[i + 1]; i++ }
     else if (a.startsWith('--enc=')) enc = a.slice('--enc='.length)
     else if (a === '--enc') { enc = rest[i + 1]; i++ }
+    else if (a.startsWith('--crv=')) crv = a.slice('--crv='.length)
+    else if (a === '--crv') { crv = rest[i + 1]; i++ }
   }
-  return { cmd, alg, enc }
+  return { cmd, alg, enc, crv }
 }
 
 function readStdin() {
@@ -61,8 +64,21 @@ function b64uDecode(s) {
 
 const JWE_KW_ALGS = new Set(['A128KW', 'A192KW', 'A256KW'])
 
-async function genKey(alg, enc) {
+async function genKey(alg, enc, crv) {
   if (!alg) throw new Error('--alg is required')
+  if (alg === 'ECDH-ES') {
+    // panva takes the JOSE agreement `alg` value here and maps it to the ECDH
+    // primitive with the requested curve; `use: enc` and the `alg` pin are added
+    // afterwards so the key says what it is for, exactly as the Rust harness
+    // pins it.
+    if (!crv) throw new Error('gen-key --alg ECDH-ES requires --crv')
+    const { privateKey } = await generateKeyPair(alg, { crv, use: 'enc', extractable: true })
+    const jwk = await exportJWK(privateKey)
+    jwk.alg = alg
+    jwk.use = 'enc'
+    emit(jwk)
+    return
+  }
   if (JWE_KW_ALGS.has(alg) || alg === 'dir') {
     // Symmetric JWE key. For `dir` the secret *is* the CEK, so its size
     // follows `enc`; for AES-KW it follows the wrapping alg.
@@ -284,9 +300,9 @@ async function decryptGeneral(alg, enc) {
 }
 
 async function main() {
-  const { cmd, alg, enc } = parseArgs(process.argv.slice(2))
+  const { cmd, alg, enc, crv } = parseArgs(process.argv.slice(2))
   switch (cmd) {
-    case 'gen-key': return genKey(alg, enc)
+    case 'gen-key': return genKey(alg, enc, crv)
     case 'export-pub': return exportPub()
     case 'sign-compact': return signCompact(alg)
     case 'verify-compact': return verifyCompact(alg)

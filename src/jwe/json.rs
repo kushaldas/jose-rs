@@ -52,8 +52,8 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jwe::internal::{
-    self, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op, jwk_to_jwe_key_bytes,
-    minimum_plaintext_len, JweDecryptOptions, JweEncryptOptions,
+    self, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op, minimum_plaintext_len,
+    recipient_key, JweDecryptOptions, JweEncryptOptions, KeyMaterial,
 };
 use crate::member_map::MemberMap;
 
@@ -659,6 +659,25 @@ pub fn encrypt_flattened_with_header_options(
     enc: JweEncryption,
     opts: &JweEncryptOptions,
 ) -> Result<FlattenedJwe> {
+    encrypt_flattened_material(
+        header,
+        KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
+
+/// Shared flattened-JSON emit core for both key shapes.
+fn encrypt_flattened_material(
+    header: JoseHeader,
+    key: KeyMaterial,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<FlattenedJwe> {
     // External AAD, if configured, is encoded once and used for both the AAD
     // input and the `aad` member, so the two can never disagree.
     let aad_b64 = match opts.external_aad() {
@@ -686,8 +705,14 @@ pub fn encrypt_flattened_with_jwk(
 ) -> Result<FlattenedJwe> {
     let alg = pinned_alg(jwk)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_flattened(&key_bytes, plaintext, alg, enc)
+    encrypt_flattened_material(
+        JoseHeader::for_jwe(alg, enc),
+        recipient_key(jwk, alg, false)?,
+        plaintext,
+        alg,
+        enc,
+        &JweEncryptOptions::new(),
+    )
 }
 
 /// [`encrypt_flattened_with_jwk`] with an explicit protected header.
@@ -721,8 +746,14 @@ pub fn encrypt_flattened_with_jwk_header_options(
 ) -> Result<FlattenedJwe> {
     let alg = pinned_alg(jwk)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_flattened_with_header_options(header, &key_bytes, plaintext, alg, enc, opts)
+    encrypt_flattened_material(
+        header,
+        recipient_key(jwk, alg, false)?,
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
 }
 
 /// Read the key-management algorithm pinned in `jwk.alg`.
@@ -803,7 +834,12 @@ pub fn decrypt_flattened_with_options(
     // authenticate `alg` itself: an algorithm read from an unprotected member
     // would simply be the attacker's choice. The JWK APIs, which do pin an
     // algorithm on the key, may accept the unprotected placement.
-    decrypt_impl(key, jwe, options, None)
+    decrypt_impl(
+        &KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        jwe,
+        options,
+        None,
+    )
 }
 
 /// Shared decryption core behind the raw-key and JWK entry points.
@@ -819,7 +855,7 @@ pub fn decrypt_flattened_with_options(
 /// and tag octets are split, so an attacker-chosen `enc` could make a byte
 /// stream authenticate under one reading and mean something else under another.
 fn decrypt_impl(
-    key: &[u8],
+    key: &KeyMaterial,
     jwe: &FlattenedJwe,
     options: &JweDecryptOptions,
     pinned_alg: Option<&str>,
@@ -890,7 +926,15 @@ fn decrypt_impl(
     options.check(envelope.alg, envelope.enc)?;
     options.check_plaintext_size(minimum_plaintext_len(jwe.ciphertext.len(), envelope.enc))?;
 
-    let cek = internal::recover_cek(key, envelope.alg, envelope.enc, &envelope.encrypted_key)?;
+    // `protected_header` is the decoded *protected* header: the only place a
+    // peer key (`epk`) is believed (ADR 0013 refuses it anywhere else).
+    let cek = internal::recover_cek(
+        key,
+        envelope.alg,
+        envelope.enc,
+        &envelope.encrypted_key,
+        &protected_header,
+    )?;
     let external_aad = options.resolve_external_aad(jwe.aad.as_deref())?;
     let aad = internal::aad_input(protected, external_aad.as_deref());
     internal::finish_decrypt(&envelope, &cek, &aad, options)
@@ -972,9 +1016,9 @@ pub fn decrypt_flattened_with_jwk_options(
     let alg = JweAlgorithm::from_str(jwk_alg)?;
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
+    let key = recipient_key(jwk, alg, true)?;
     let options = options.clone().allow_any_enc_when_unset();
-    decrypt_impl(&key_bytes, jwe, &options, Some(jwk_alg))
+    decrypt_impl(&key, jwe, &options, Some(jwk_alg))
 }
 
 /// Decode the protected header of a flattened JWE **without** authenticating

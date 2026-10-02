@@ -15,7 +15,7 @@ use crate::header::JoseHeader;
 
 use crate::jwe::internal::{
     self, all_enc_algorithms, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op,
-    jwk_to_jwe_key_bytes, minimum_plaintext_len, parse_envelope, recover_cek,
+    minimum_plaintext_len, parse_envelope, recipient_key, recover_cek, KeyMaterial,
 };
 
 pub use crate::jwe::internal::{JweDecryptOptions, JweEncryptOptions};
@@ -98,6 +98,30 @@ pub fn encrypt_with_header_options(
     // recipient has no way to learn.
     ensure_no_external_aad(opts.external_aad())?;
 
+    // Raw bytes can only mean a transported or wrapped key, so the key
+    // agreement algorithms are unreachable from here by construction; see
+    // [`KeyMaterial`].
+    encrypt_with_header_options_material(
+        header,
+        KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
+
+/// Shared compact-emit core for both key shapes.
+fn encrypt_with_header_options_material(
+    header: JoseHeader,
+    key: KeyMaterial,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<String> {
+    ensure_no_external_aad(opts.external_aad())?;
+
     // All emit-side policy lives in the shared core, which the JSON
     // serializations call too; this function only joins the five parts.
     let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, None)?;
@@ -133,13 +157,13 @@ pub fn encrypt_with_jwk(
         .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_with_header(
+    encrypt_with_header_options_material(
         JoseHeader::for_jwe(alg, enc),
-        &key_bytes,
+        recipient_key(jwk, alg, false)?,
         plaintext,
         alg,
         enc,
+        &JweEncryptOptions::new(),
     )
 }
 
@@ -204,8 +228,14 @@ pub fn encrypt_with_jwk_header_options(
         .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_with_header_options(header, &key_bytes, plaintext, alg, enc, opts)
+    encrypt_with_header_options_material(
+        header,
+        recipient_key(jwk, alg, false)?,
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
 }
 
 /// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.
@@ -237,14 +267,14 @@ pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
     }
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
+    let key = recipient_key(jwk, alg, true)?;
 
     // Pin the key-management algorithm to the JWK's alg. Content encryption
     // (`enc`) stays flexible — its key length is bound to the CEK size and
     // re-validated in the key-management layer — so we permit every supported
     // `enc`.
     let options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
-    decrypt_with_options(&key_bytes, token, &options)
+    decrypt_with_options_material(&key, token, &options)
 }
 
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
@@ -273,6 +303,23 @@ pub fn decrypt_with_options(
     token: &str,
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
+    decrypt_with_options_material(
+        &KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        token,
+        options,
+    )
+}
+
+/// Shared compact-decrypt core for both key shapes.
+///
+/// The protected header is kept (not discarded as the raw-key path used to do)
+/// because key agreement reads the peer value `epk` from it — the
+/// integrity-protected one, which is the only place a peer key is believed.
+fn decrypt_with_options_material(
+    key: &KeyMaterial,
+    token: &str,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
     ensure_token_size(token)?;
     // Symmetric with the emit side: a compact token cannot carry external
     // additional authenticated data, so options that supply it mean the caller
@@ -298,7 +345,7 @@ pub fn decrypt_with_options(
     // return it as authenticated metadata.
     // RFC 7516 §7.1 defines no unprotected header member, so `alg` cannot
     // legitimately come from anywhere but the protected header here.
-    let (envelope, _protected) = parse_envelope(
+    let (envelope, protected) = parse_envelope(
         header_b64,
         None,
         encrypted_key_b64,
@@ -316,7 +363,13 @@ pub fn decrypt_with_options(
     options.check_plaintext_size(minimum_plaintext_len(ciphertext_b64.len(), envelope.enc))?;
 
     // 3. Recover CEK.
-    let cek = recover_cek(key, envelope.alg, envelope.enc, &envelope.encrypted_key)?;
+    let cek = recover_cek(
+        key,
+        envelope.alg,
+        envelope.enc,
+        &envelope.encrypted_key,
+        &protected,
+    )?;
 
     // 4. Content decryption; AAD = ASCII(BASE64URL(header)).
     let aad = envelope.header_b64.as_bytes();

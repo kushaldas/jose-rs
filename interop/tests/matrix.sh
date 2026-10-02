@@ -60,6 +60,8 @@ DIRECTIONS_HDR=("rust-sign-js-verify" "js-sign-rust-verify")
 # JWE cells: "<key-management alg>:<content enc>".
 ALGS_JWE=("dir:A256GCM" "dir:A128CBC-HS256" "A256KW:A256GCM" "A256KW:A128CBC-HS256")
 DIRECTIONS_JWE=("rust-encrypt-js-decrypt" "js-encrypt-rust-decrypt")
+# ECDH-ES cells: "<curve>:<content enc>", key management is always ECDH-ES.
+ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A256GCM")
 # Duplicate-member negative cells (signature alg is ES256 throughout).
 DIRECTIONS_DUP=("dup-kid" "dup-alg" "dup-ext")
 
@@ -518,6 +520,7 @@ run_cell() {
         run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
       jwe-crit) run_jwe_crit_cell "$direction" "$alg"; exit 0 ;;
       jwe-general) run_jwe_general_cell "$direction" "$alg"; exit 0 ;;
+      jwe-ecdh) run_jwe_ecdh_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
         [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
@@ -633,6 +636,57 @@ run_cell() {
 }
 
 # --cell <direction> <alg> <format>  — run one cell, exit non-zero on fail
+# run_jwe_ecdh_cell <direction> <crv:enc>
+#
+# Direct key agreement (RFC 7518 §4.6, "ECDH-ES"). Structurally unlike every
+# other JWE family in this matrix: no key is transported, so the producer needs
+# only the recipient's **public** half and the consumer needs the private one.
+# The cells therefore run the key pair through `export-pub` on the producer side
+# — an encrypt step that had to see `d` would fail here, and that is part of what
+# the cell proves.
+#
+# The cell also asserts the `epk` shape on the consuming side: it must be
+# reported back as authenticated metadata, and it must carry public material only
+# (RFC 7518 §4.6.1.1), which is a claim about the *producer's* serialization.
+run_jwe_ecdh_cell() {
+  local direction="$1" crv="${2%%:*}" enc="${2#*:}" alg="ECDH-ES"
+  local priv_path="$VECTORS/${CELL}.priv.json"
+  local pub_path="$VECTORS/${CELL}.pub.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$producer" gen-key --alg "$alg" --crv "$crv" > "$priv_path"
+  "$producer" export-pub < "$priv_path" > "$pub_path"
+  "$JQ" -n --argjson jwk "$(cat "$pub_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | "$producer" encrypt-compact --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$priv_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-compact --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+  assert_header "$out_path"
+
+  # The ephemeral key the content was agreed under must be reported back, on the
+  # curve the recipient's key is on, and without a private component.
+  "$JQ" -e --arg crv "$crv" '
+    .protected_header.epk as $epk
+    | ($epk != null) and ($epk.crv == $crv) and ($epk.kty == "EC")
+      and ($epk.d == null) and ($epk.x != null) and ($epk.y != null)
+  ' "$out_path" > /dev/null \
+    || { echo "epk shape wrong: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  # And no key was transported: the compact serialization's second segment is
+  # the empty octet sequence in direct mode (RFC 7518 §4.6).
+  [ "$(printf '%s' "$jwe" | cut -d. -f2)" = "" ] \
+    || { echo "ECDH-ES must not convey an encrypted key" >&2; return 1; }
+}
+
 if [ "${1:-}" = "--cell" ]; then
   shift
   dir="${1:?direction required}"; alg="${2:?alg required}"; fmt="${3:?format required}"
@@ -702,6 +756,13 @@ done
 for alg in "${ALGS_JWE[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-crit" || true
+  done
+done
+
+# Direct ECDH key agreement, across curves and content algorithms.
+for alg in "${ALGS_ECDH[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-ecdh" || true
   done
 done
 

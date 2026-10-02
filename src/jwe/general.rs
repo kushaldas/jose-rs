@@ -496,7 +496,18 @@ pub fn encrypt_general_options(
         }
     };
 
-    let keys: Vec<&[u8]> = recipients.iter().map(|recipient| recipient.key).collect();
+    // Direct key agreement agrees the CEK with exactly one recipient, so it can
+    // never address a general JWE. Refused here, before any key work, with the
+    // reason and the alternative named.
+    if internal::alg_is_agreement(alg) {
+        return Err(internal::direct_agreement_not_multi(alg));
+    }
+    let keys: Vec<internal::KeyMaterial> = recipients
+        .iter()
+        .map(|recipient| {
+            internal::KeyMaterial::Bytes(zeroize::Zeroizing::new(recipient.key.to_vec()))
+        })
+        .collect();
     let (core, wrapped) =
         internal::encrypt_core_multi(header, &keys, plaintext, alg, enc, opts, aad_b64.as_deref())?;
 
@@ -565,6 +576,11 @@ pub fn encrypt_general_with_jwks_options(
     let mut pinned: Option<JweAlgorithm> = None;
     for jwk in jwks {
         let alg = json_mod::pinned_alg(jwk)?;
+        // Refused per key, before any material is built: a recipient pinned to
+        // direct agreement cannot be addressed by a general JWE at all.
+        if internal::alg_is_agreement(alg) {
+            return Err(internal::direct_agreement_not_multi(alg));
+        }
         jwk.check_op(internal::jwe_alg_encrypt_op(alg))?;
         match pinned {
             None => pinned = Some(alg),

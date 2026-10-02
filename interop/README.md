@@ -49,6 +49,7 @@ interop/.venv/bin/python interop/tests/ed25519_jwcrypto.py interop/rust-harness/
 interop/.venv/bin/python interop/tests/numeric_dates_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/jwe_json_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/ecdh_kdf_vectors.py
+interop/.venv/bin/python interop/tests/jwe_ecdh_es_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 ```
 
 The last check needs `cryptography` (already a `jwcrypto` dependency) and takes
@@ -78,6 +79,23 @@ which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
 
+### Direct ECDH agreement against jwcrypto (`jwe_ecdh_es_jwcrypto.py`)
+
+60 checks over P-256/P-384/P-521 with GCM and CBC-HMAC content encryption:
+jose-rs → jwcrypto in both serializations (with the `epk` shape and the empty
+encrypted key asserted), and jwcrypto → jose-rs in the compact form — which is the
+real crypto cross-check, since only a matching Concat KDF opens jwcrypto's
+ciphertext.
+
+It also pins one **divergence**. jwcrypto ships `epk` in the *unprotected*
+`header` member of its JWE JSON Serialization, and jose-rs refuses a peer key it
+cannot authenticate (ADRs 0013/0017), so that one combination is refused by name
+before any cryptographic work. Its compact form puts `epk` in the protected header
+— where it has to go, since compact has nowhere else to put it — and does
+interoperate; panva puts `epk` in the protected header in both serializations and
+interoperates in both directions. The refusal is asserted so that any future
+loosening of the rule is a deliberate edit rather than a silent behaviour change.
+
 ### Key agreement and the Concat KDF (`ecdh_kdf_vectors.py`)
 
 ECDH is where an implementation can be silently wrong: a missing `0x04` point
@@ -103,7 +121,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **79 cells**:
+Full matrix is **87 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -114,6 +132,7 @@ Full matrix is **79 cells**:
 | JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | JWE flattened JSON + external AAD | `jwe-json-aad` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.1 `aad` member: emitted with the right encoding, decryptable by the peer **with** the out-of-band bytes, and **refused without them** |
 | JWE critical extensions | `jwe-crit` | 4 alg:enc × 2 directions = 8 | RFC 7516 §4.1.13: jose-rs emits `crit` only for a caller-declared parameter, and the parameter must be integrity protected. jwcrypto refuses to read an extension it cannot process and panva refuses to emit one, so the cell asserts the peer's rejection **and** a control message without `crit` that the peer accepts |
+| JWE direct ECDH agreement | `jwe-ecdh` | 3 curves × 2 enc × 2 directions = 8 | RFC 7518 §4.6 (`ECDH-ES`): the producer encrypts to the recipient's **public** half and the consumer reads it with the private half, so the cell proves the agreement needs no `d` on the send side. The consuming side must report an authenticated `epk` on the recipient's curve with no private part, and the compact form's encrypted-key segment must be empty |
 | JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
@@ -206,7 +225,7 @@ encoded by the caller and turned into the `aad` member by each implementation.
 | ------------------------------------------- | --------------------------------------- | --------------------------------------------- |
 Every JWE command accepts an optional `understood_crit` list: the private header parameters the caller implements, which `crit` may then name (ADR 0015).
 
-| `gen-key --alg <ALG> [--enc <ENC>]`         | —                                       | private JWK (`--enc` needed for `dir`)        |
+| `gen-key --alg <ALG> [--enc <ENC>] [--crv <CRV>]` | —                                 | private JWK (`--enc` for `dir`, `--crv` for `ECDH-ES`) |
 | `export-pub`                                | private JWK                             | public JWK (private fields dropped)           |
 | `sign-compact --alg <ALG>`                  | `{jwk, payload_b64u, header?}`          | `{jws}`                                       |
 | `verify-compact --alg <ALG>`                | `{jwk, jws}`                            | `{ok, payload_b64u, protected_header}`        |
@@ -224,7 +243,11 @@ Every JWE command accepts an optional `understood_crit` list: the private header
 `{"kid":"…","tenant":"…"}`); `alg` / `enc` always come from the flags and may
 not be overridden. `protected_header` is the header as that library parsed it.
 
-The two agreement commands have no JS counterpart and no matrix cells — they
+`gen-key --alg ECDH-ES --crv <P-256|P-384|P-521>` produces an agreement recipient
+key (curve chosen by the caller, `alg` pinned, `use: enc`); both harnesses do it,
+so either side can play producer in an `jwe-ecdh` cell.
+
+The two agreement probe commands have no JS counterpart and no matrix cells — they
 exist for `tests/ecdh_kdf_vectors.py`, which compares them against OpenSSL and
 against RFC 7518 Appendix C. `agree` emits the raw shared secret, which is a test
 probe and never a key; `derive-key` is what JOSE actually consumes.

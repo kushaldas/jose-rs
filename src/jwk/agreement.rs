@@ -69,6 +69,19 @@ pub enum AgreementCurve {
 }
 
 impl AgreementCurve {
+    /// The `crv` member naming this curve on the wire.
+    ///
+    /// Needed to build an `epk` JWK for a freshly generated ephemeral key, and
+    /// to generate that key on the recipient's curve in the first place.
+    #[must_use]
+    pub fn as_crv_str(self) -> &'static str {
+        match self {
+            Self::P256 => "P-256",
+            Self::P384 => "P-384",
+            Self::P521 => "P-521",
+        }
+    }
+
     /// Coordinate length in bytes.
     #[must_use]
     pub fn coord_len(self) -> usize {

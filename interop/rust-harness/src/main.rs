@@ -63,6 +63,7 @@ fn run() -> Result<()> {
         .clone();
     let mut alg: Option<String> = None;
     let mut enc: Option<String> = None;
+    let mut crv: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -78,13 +79,19 @@ fn run() -> Result<()> {
         } else if a == "--enc" {
             enc = raw.get(i + 1).cloned();
             i += 2;
+        } else if let Some(rest) = a.strip_prefix("--crv=") {
+            crv = Some(rest.to_string());
+            i += 1;
+        } else if a == "--crv" {
+            crv = raw.get(i + 1).cloned();
+            i += 2;
         } else {
             i += 1;
         }
     }
 
     match cmd.as_str() {
-        "gen-key" => gen_key(&require_alg(alg)?, enc.as_deref()),
+        "gen-key" => gen_key(&require_alg(alg)?, enc.as_deref(), crv.as_deref()),
         "export-pub" => export_pub(),
         "agree" => agree(),
         "derive-key" => derive_key(),
@@ -128,7 +135,7 @@ fn emit<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
-fn gen_key(alg: &str, enc: Option<&str>) -> Result<()> {
+fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
     let jwk: Jwk = match alg {
         "A128KW" | "A192KW" | "A256KW" => jose_rs::jwk::generate_symmetric_for_alg(alg)?,
         "dir" => {
@@ -160,6 +167,17 @@ fn gen_key(alg: &str, enc: Option<&str>) -> Result<()> {
         "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
+        // An ECDH-ES recipient key: an EC key pair pinned for agreement, with
+        // `use: enc` because RFC 7517 §4.2 says a key used for encryption use
+        // must not claim `sig`. The curve is the caller's choice so one family
+        // can cover several curves without new cell scaffolding.
+        "ECDH-ES" => {
+            let crv = crv.ok_or_else(|| anyhow!("gen-key --alg ECDH-ES requires --crv"))?;
+            let mut jwk = jose_rs::jwk::generate_ec(crv)?;
+            jwk.alg = Some(alg.to_string());
+            jwk.use_ = Some("enc".to_string());
+            jwk
+        }
         other => bail!("unsupported alg for gen-key: {other}"),
     };
     emit(&jwk)

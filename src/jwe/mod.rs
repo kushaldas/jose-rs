@@ -15,6 +15,11 @@
 //! - `dir` -- direct use of a shared symmetric key as the CEK
 //! - `A128KW`, `A192KW`, `A256KW` -- AES Key Wrap (RFC 3394)
 //! - `RSA-OAEP`, `RSA-OAEP-256` -- RSA-OAEP key transport
+//! - `ECDH-ES` -- direct ECDH key agreement (RFC 7518 §4.6): the CEK is agreed
+//!   with one recipient, the ephemeral key is generated per message and published
+//!   as `epk` in the protected header, and nothing is conveyed as the encrypted
+//!   key. Needs a JWK (a curve and coordinates are not something `&[u8]` can
+//!   carry) and provides **no origin authentication** -- see ADR 0016/0017.
 //!
 //! Content encryption algorithms:
 //! - `A128GCM`, `A192GCM`, `A256GCM` -- AES-GCM
@@ -32,11 +37,10 @@
 //!
 //! Not implemented, and refused by name rather than ignored: content
 //! compression (`zip`), which this crate cannot decrypt and therefore will not
-//! emit; and the ECDH key-management modes (`ECDH-ES`, `ECDH-ES+A128KW`,
-//! `+A192KW`, `+A256KW`). The boundary those modes will sit behind — own key vs
-//! peer key, curve enforcement, and RFC 7518 §4.6.2's Concat KDF — already
-//! exists as [`crate::jwk::agreement`] (ADR 0016); wiring it into envelope
-//! production and consumption is what is still missing.
+//! emit; and the key-agreement-with-wrapping modes (`ECDH-ES+A128KW`,
+//! `+A192KW`, `+A256KW`), whose agreement half already exists
+//! ([`crate::jwk::agreement`], ADR 0016) and whose direct form is implemented
+//! above (ADR 0017).
 
 pub mod compact;
 pub mod general;

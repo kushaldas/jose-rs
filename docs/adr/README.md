@@ -20,3 +20,4 @@ history.
 | [0014](0014-jwe-general-serialization.md) | A recipient is named by the caller, never chosen by the library | Accepted |
 | [0015](0015-jwe-critical-extensions.md) | `crit` is refused by default and understood only by the caller | Accepted |
 | [0016](0016-key-agreement-boundary.md) | The key-agreement boundary enforces operation, material and curve | Accepted |
+| [0017](0017-direct-ecdh-key-agreement.md) | Direct key agreement agrees the CEK and publishes its own ephemeral key | Accepted |

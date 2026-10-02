@@ -30,15 +30,16 @@ ML-DSA-87 (FIPS 204), plus the six composite algorithms from
 ML-DSA-65-ES256, ML-DSA-87-ES384, ML-DSA-44-Ed25519,
 ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
-**JWE key management**: dir, A128KW/A192KW/A256KW, RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
+**JWE key management**: dir, A128KW/A192KW/A256KW, ECDH-ES (P-256/P-384/P-521), RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 
-ECDH key management (`ECDH-ES`, `ECDH-ES+AxxxKW`) is not implemented yet; the
-key-agreement boundary that will drive it — own key vs peer key, curve
-enforcement, and RFC 7518 §4.6.2's Concat KDF, verified against the RFC's own
-Appendix C vector — is already available as
-[`jose_rs::jwk::agreement`](src/jwk/agreement.rs) (see ADR 0016).
+`ECDH-ES` needs a JWK (a curve cannot be named by a byte string), agrees the
+content key with exactly one recipient, generates its ephemeral key per message,
+and provides **no origin authentication**: anyone with the recipient's public key
+can produce a message the recipient will decrypt. `ECDH-ES+A128KW`/`+A192KW`/
+`+A256KW` (the modes that reach several recipients) are not implemented yet. See
+ADRs 0016 and 0017.
 
 ## Feature flags
 

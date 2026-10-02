@@ -49,6 +49,18 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- **Direct ECDH key agreement (`ECDH-ES`, RFC 7518 §4.6)** in both JWE
+  serializations: the content encryption key is agreed with the recipient rather
+  than carried, so nothing is conveyed as the encrypted key, an ephemeral key pair
+  is generated per message and published as `epk` in the protected header, and the
+  recipient's key is consumed as a peer value with its point validated. It is
+  reachable only through the JWK APIs (a `&[u8]` cannot name a curve), its
+  operation permission is `deriveKey` rather than `encrypt`/`wrapKey`, it addresses
+  exactly one recipient, `epk` is read from the integrity-protected header only,
+  and `apu`/`apv` are honoured as Concat KDF inputs. `ECDH-ES+A128KW`/`+A192KW`/
+  `+A256KW` remain unimplemented. Decrypts RFC 7520 §5.5's message; interoperates
+  with panva in both directions and with jwcrypto (whose JSON serialization ships
+  `epk` unprotected, a refusal that is documented and asserted). See ADR 0017.
 - The **key-agreement boundary** in the new `jose_rs::jwk::agreement` module:
   `agreement_key()` prepares one's own half (curve support, `use`/`key_ops`
   permitting `deriveKey`, an `alg` pin that names a key-agreement algorithm, and
