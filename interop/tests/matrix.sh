@@ -88,6 +88,11 @@ PAYLOAD_TEXT="interop payload $(date -u +%FT%TZ)"
 # for macOS/BSD parity. (GNU wraps at 76 chars by default; BSD doesn't wrap.)
 PAYLOAD_B64U="$(printf '%s' "$PAYLOAD_TEXT" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
 CLAIMS='{"iss":"interop","sub":"matrix","foo":"bar"}'
+# External additional authenticated data for the `jwe-json-aad` cells (raw
+# octets; producers base64url-encode it into the `aad` member themselves).
+AAD_TEXT="interop external aad"
+AAD_B64U="$(printf '%s' "$AAD_TEXT" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+
 # Extra protected-header members for the `hdr` / `jwe` cells: one registered
 # (kid) and one private, non-registered member (tenant). Consumers must
 # report both back unchanged.
@@ -175,13 +180,19 @@ run_jwe_cell() {
   assert_header "$out_path"
 }
 
-# run_jwe_json_cell <direction> <alg:enc> — flattened JSON JWE (RFC 7516 §7.2.2).
+# run_jwe_json_cell <direction> <alg:enc> [aad-b64u] — flattened JSON JWE
+# (RFC 7516 §7.2.2), optionally with external additional authenticated data.
 #
 # Same key material, header members and payload as `run_jwe_cell`; the only
 # difference is the serialization, which is the point: a JSON-serialization bug
 # must show up here even though the crypto is shared.
+#
+# With an AAD argument the cell additionally asserts (a) that the producer
+# emitted an `aad` member, and (b) that the consumer *refuses* the same message
+# when the out-of-band bytes are withheld — i.e. the peer really folded them
+# into the content AAD input rather than shipping them as decoration.
 run_jwe_json_cell() {
-  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}" aad_b64u="${3:-}"
   local key_path="$VECTORS/${CELL}.key.json"
   local enc_path="$VECTORS/${CELL}.encrypted.json"
   local out_path="$VECTORS/${CELL}.decrypted.json"
@@ -193,7 +204,8 @@ run_jwe_json_cell() {
   esac
   "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
   "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
-    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    --arg a "$aad_b64u" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h} + (if $a == "" then {} else {aad_b64u:$a} end)' \
     | "$producer" encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
   local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
 
@@ -213,10 +225,26 @@ run_jwe_json_cell() {
     (has("aad") | not)
   ' > /dev/null || { echo "flattened JSON members wrong for $alg: $jwe" >&2; return 1; }
 
-  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+  if [ -n "$aad_b64u" ]; then
+    printf '%s' "$jwe" | "$JQ" -e '(.aad | type) == "string"' > /dev/null \
+      || { echo "external AAD was not emitted as an aad member: $jwe" >&2; return 1; }
+  fi
+
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" --arg a "$aad_b64u" \
+    '{jwk:$jwk, jwe:$jwe} + (if $a == "" then {} else {aad_b64u:$a} end)' \
     | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
   [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
   assert_header "$out_path"
+
+  if [ -n "$aad_b64u" ]; then
+    # Withholding the out-of-band bytes must break authentication on the peer,
+    # not silently succeed. Expected failure, so no `set -e` trap is needed.
+    if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+      | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "consumer accepted an external-AAD message without the AAD" >&2
+      return 1
+    fi
+  fi
 }
 
 # try_verify <rs|js> <alg> <pub-jwk-file> <jws> — never fails; prints
@@ -304,6 +332,8 @@ run_cell() {
       hdr) run_hdr_cell "$direction" "$alg"; exit 0 ;;
       jwe) run_jwe_cell "$direction" "$alg"; exit 0 ;;
       jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
+      jwe-json-aad)
+        run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
       jws-dup) run_dup_cell "$direction" "$alg"; exit 0 ;;
     esac
     local priv_path="$VECTORS/${cell}.priv.json"
@@ -460,6 +490,14 @@ done
 for alg in "${ALGS_JWE[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-json" || true
+  done
+done
+
+# Flattened JSON JWE with external additional authenticated data (RFC 7516
+# §7.2.1): the aad member must be emitted, and withholding it must fail.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-json-aad" || true
   done
 done
 

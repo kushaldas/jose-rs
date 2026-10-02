@@ -19,8 +19,10 @@
 //!       Like encrypt-compact but emits the RFC 7516 §7.2.2 flattened JSON
 //!       Serialization, as a JSON *string* in `jwe` (so the matrix plumbing is
 //!       identical for both formats).
-//!   decrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, jwe}) -> {ok, plaintext_b64u, protected_header}
-//!       `jwe` is the flattened JSON Serialization text.
+//!   decrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, jwe, aad_b64u?}) -> {ok, plaintext_b64u, protected_header}
+//!       `jwe` is the flattened JSON Serialization text. Both flattened
+//!       commands accept an optional `aad_b64u` (external additional
+//!       authenticated data, RFC 7516 §7.2.1).
 //!   sign-jwt       --alg <ALG>            (stdin: {jwk, claims}) -> JWT
 //!   verify-jwt     --alg <ALG>            (stdin: {jwk, jwt}) -> {ok, claims}
 //!
@@ -329,6 +331,9 @@ fn verify_jwt(alg: &str) -> Result<()> {
 struct EncryptCompactInput {
     jwk: Jwk,
     plaintext_b64u: String,
+    /// Optional external AAD (base64url), JSON serialization only.
+    #[serde(default)]
+    aad_b64u: Option<String>,
     /// Optional extra protected-header members (e.g. `kid`, `tenant`).
     /// `alg` / `enc` are always taken from `--alg` / `--enc`.
     #[serde(default)]
@@ -377,7 +382,19 @@ fn encrypt_flattened(alg: &str, enc: &str) -> Result<()> {
         JoseHeader::for_jwe(JweAlgorithm::from_str(alg)?, enc_v),
         input.header,
     )?;
-    let jwe = jose_rs::jwe::json::encrypt_flattened_with_jwk_header(&input.jwk, header, &plaintext, enc_v)?;
+    // External AAD, when the driver supplied any, is decoded once and handed
+    // to the encrypt options; the harness would otherwise have no way to prove
+    // the two implementations build the same AAD input.
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(aad_b64u) = &input.aad_b64u {
+        let aad = URL_SAFE_NO_PAD
+            .decode(aad_b64u.as_bytes())
+            .context("decoding aad_b64u")?;
+        opts = opts.with_external_aad(aad);
+    }
+    let jwe = jose_rs::jwe::json::encrypt_flattened_with_jwk_header_options(
+        &input.jwk, header, &plaintext, enc_v, &opts,
+    )?;
     emit(&EncryptCompactOutput {
         jwe: jwe.to_json()?,
     })
@@ -396,7 +413,16 @@ fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
     if header.enc.as_deref() != Some(enc) {
         bail!("token enc {:?} does not match expected {enc}", header.enc);
     }
-    let plaintext = jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?;
+    let plaintext = match &input.aad_b64u {
+        Some(aad_b64u) => jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(
+            &input.jwk,
+            &jwe,
+            &URL_SAFE_NO_PAD
+                .decode(aad_b64u.as_bytes())
+                .context("decoding aad_b64u")?,
+        )?,
+        None => jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?,
+    };
     emit(&DecryptCompactOutput {
         ok: true,
         plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
@@ -408,6 +434,9 @@ fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
 struct DecryptCompactInput {
     jwk: Jwk,
     jwe: String,
+    /// Optional external AAD (base64u), JSON serialization only.
+    #[serde(default)]
+    aad_b64u: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -95,10 +95,15 @@ pub struct JweEncryptOptions {
     /// This crate never reads them, but a peer may dereference or trust
     /// them, so they are refused unless the caller opts in.
     pub allow_key_reference_headers: bool,
+    /// External additional authenticated data, carried by the JSON `aad`
+    /// member (RFC 7516 §2 / §7.2.1). Never `pub`: the value must reach
+    /// [`aad_input`](self::aad_input) unaltered, so only this crate's
+    /// serializers may position it.
+    external_aad: Option<Vec<u8>>,
 }
 
 impl JweEncryptOptions {
-    /// Strict defaults: no key-reference header members.
+    /// Strict defaults: no key-reference header members, no external AAD.
     pub fn new() -> Self {
         Self::default()
     }
@@ -108,6 +113,36 @@ impl JweEncryptOptions {
     pub fn with_key_reference_headers(mut self, allow: bool) -> Self {
         self.allow_key_reference_headers = allow;
         self
+    }
+
+    /// Encrypt with external additional authenticated data.
+    ///
+    /// The bytes are placed in the message's `aad` member and are covered by
+    /// the content authentication tag through the RFC's AAD input construction
+    /// (`ASCII(protected || '.' || BASE64URL(aad))`, RFC 7516 §5.1 step 14);
+    /// they are *not* encrypted, so they must
+    /// not be confidential, and the recipient has to know them out of band.
+    /// Only the JSON serializations can carry them — the compact form has no
+    /// `aad` member, so the compact APIs refuse this option rather than
+    /// dropping it. An empty value is refused at use time, because RFC 7516
+    /// §7.2.1 requires the member to be absent when the value is empty and an
+    /// empty AAD is therefore indistinguishable from no AAD at all.
+    ///
+    /// ```
+    /// use jose_rs::jwe::JweEncryptOptions;
+    /// let opts = JweEncryptOptions::new().with_external_aad(b"invoice-42");
+    /// assert!(opts.external_aad().is_some());
+    /// ```
+    #[must_use]
+    pub fn with_external_aad(mut self, aad: impl AsRef<[u8]>) -> Self {
+        self.external_aad = Some(aad.as_ref().to_vec());
+        self
+    }
+
+    /// The configured external additional authenticated data, if any.
+    #[must_use]
+    pub fn external_aad(&self) -> Option<&[u8]> {
+        self.external_aad.as_deref()
     }
 }
 
@@ -191,6 +226,10 @@ pub struct JweDecryptOptions {
     allowed_enc: Vec<JweEncryption>,
     allow_all: bool,
     max_plaintext: Option<usize>,
+    /// External additional authenticated data expected from the message's
+    /// `aad` member (RFC 7516 §2). See
+    /// [`JweDecryptOptions::with_external_aad`].
+    external_aad: Option<Vec<u8>>,
 }
 
 impl JweDecryptOptions {
@@ -201,6 +240,7 @@ impl JweDecryptOptions {
             allowed_enc,
             allow_all: false,
             max_plaintext: None,
+            external_aad: None,
         }
     }
 
@@ -213,6 +253,7 @@ impl JweDecryptOptions {
             allowed_enc: Vec::new(),
             allow_all: true,
             max_plaintext: None,
+            external_aad: None,
         }
     }
 
@@ -240,6 +281,74 @@ impl JweDecryptOptions {
     pub fn with_max_plaintext(mut self, bytes: usize) -> Self {
         self.max_plaintext = Some(bytes);
         self
+    }
+
+    /// Supply the external additional authenticated data for a message that
+    /// carries an `aad` member.
+    ///
+    /// RFC 7516 keeps this data out of the ciphertext but *inside* the content
+    /// authentication tag's reach: it is authenticated, not confidential, and
+    /// a recipient must already know it. If the message has no `aad` member,
+    /// or the bytes differ from it, decryption is refused with an explanatory
+    /// error instead of a bare authentication failure — the member's presence
+    /// and encoding are not secret, and a caller who forgot to pass the AAD
+    /// deserves better than `Crypto("decryption failed")`.
+    ///
+    /// ```
+    /// use jose_rs::{jwe::JweDecryptOptions, JweAlgorithm, JweEncryption};
+    /// let options = JweDecryptOptions::new(
+    ///     vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM],
+    /// ).with_external_aad(b"invoice-42");
+    /// assert_eq!(options.external_aad(), Some(&b"invoice-42"[..]));
+    /// ```
+    #[must_use]
+    pub fn with_external_aad(mut self, aad: impl AsRef<[u8]>) -> Self {
+        self.external_aad = Some(aad.as_ref().to_vec());
+        self
+    }
+
+    /// The configured external additional authenticated data, if any.
+    #[must_use]
+    pub fn external_aad(&self) -> Option<&[u8]> {
+        self.external_aad.as_deref()
+    }
+
+    /// Resolve a message's `aad` member against the caller's expectation.
+    ///
+    /// Returns the **encoded** form to feed [`aad_input`][self::aad_input], or
+    /// `None` when neither side has external AAD. Every disagreement between
+    /// "the message says there is external AAD" and "the caller supplied some"
+    /// is refused here, before key derivation, because all four combinations
+    /// are distinguishable without any secret and each is a plausible
+    /// integration mistake.
+    pub(crate) fn resolve_external_aad(&self, aad_b64: Option<&str>) -> Result<Option<String>> {
+        let supplied = self.external_aad.as_deref();
+        match (aad_b64, supplied) {
+            (None, None) => Ok(None),
+            (Some(member), None) => Err(JoseError::InvalidToken(format!(
+                "message carries external additional authenticated data ({member}); supply \
+                 the same bytes with JweDecryptOptions::with_external_aad"
+            ))),
+            (None, Some(_)) => Err(JoseError::InvalidToken(
+                "decrypt options carry external additional authenticated data but the message \
+                 has no \"aad\" member"
+                    .into(),
+            )),
+            (Some(member), Some(bytes)) => {
+                // The tag covers the base64url *text*, so the caller's bytes
+                // must re-encode to the member exactly. Checking it here turns
+                // "wrong external AAD" into a named error rather than a
+                // generic authentication failure.
+                if base64url::encode(bytes) != member {
+                    return Err(JoseError::InvalidToken(
+                        "external additional authenticated data does not match the message's \
+                         \"aad\" member"
+                            .into(),
+                    ));
+                }
+                Ok(Some(member.to_string()))
+            }
+        }
     }
 
     pub(crate) fn check_plaintext_size(&self, bytes: usize) -> Result<()> {
@@ -764,6 +873,22 @@ pub(crate) struct EncryptedCore {
 /// `external_aad_b64` must be the *encoded* form: the RFC authenticates the
 /// base64url text, not the raw additional-authenticated-data octets, so the
 /// same bytes under two different encodings are different messages.
+/// Refuse an external AAD that encodes to nothing.
+///
+/// RFC 7516 §7.2.1 requires the `aad` member to be absent when the value is
+/// empty, and the AAD *input* differs between "no member" and `""` (the
+/// separator), so accepting an empty value would let a sender and a recipient
+/// disagree about which message they hold.
+pub(crate) fn ensure_external_aad_present(bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() {
+        return Err(JoseError::InvalidHeader(
+            "external additional authenticated data must not be empty; an empty              JWE AAD is indistinguishable from no AAD (RFC 7516 §7.2.1)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn aad_input(header_b64: &str, external_aad_b64: Option<&str>) -> Vec<u8> {
     match external_aad_b64 {
         None => header_b64.as_bytes().to_vec(),
@@ -817,8 +942,13 @@ pub(crate) fn encrypt_core(
     let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
     // The ciphertext is at least as long as the plaintext, so refuse before
-    // any key wrapping or encryption when the token cannot possibly fit.
-    crate::ensure_emit_size(header_b64.len() + content::base64url_len(plaintext.len()) + 4)?;
+    // any key wrapping or encryption when the token cannot possibly fit. The
+    // external AAD (plus its `.` separator) is part of the serialized
+    // message, so it counts against the limit too.
+    let aad_len = aad_b64.map_or(0, |aad| aad.len() + 1);
+    crate::ensure_emit_size(
+        header_b64.len() + aad_len + content::base64url_len(plaintext.len()) + 4,
+    )?;
 
     // 1. Generate or use CEK, produce encrypted key.
     let (cek, encrypted_key) = produce_cek(key, alg, enc)?;

@@ -9,7 +9,10 @@ Three things are checked per (alg, enc) combination:
 
 1. jose-rs emits a flattened JSON object and jwcrypto reads it (member names,
    base64url encodings, and the ``encrypted_key`` presence rule for ``dir``).
-2. jwcrypto emits a flattened JSON object and jose-rs reads it.
+2. jwcrypto emits a flattened JSON object and jose-rs reads it;
+2b. the same pair with **external additional authenticated data** (RFC 7516
+   §7.2.1) in play, including the requirement that jose-rs refuses the message
+   when the out-of-band bytes are withheld.
 3. jose-rs *refuses* the shape jwcrypto produces by default — ``alg``/``enc`` in
    the per-recipient unprotected ``header`` member. RFC 7516 §7.2.1 permits that
    shape and RFC 7516 §A.5 uses it; jose-rs requires the protected header until
@@ -36,6 +39,11 @@ COMBOS = [
     ("A256KW", "A256GCM"),
     ("A256KW", "A256CBC-HS512"),
 ]
+
+# Out-of-band bytes for the external-AAD checks. jwcrypto and jose-rs both
+# base64url-encode them into the `aad` member, so identical text here proves the
+# two implementations agree on the content AAD input, not just the member name.
+EXTERNAL_AAD = b"tenant=acme;purpose=interop"
 
 # Extra protected-header members: one registered, one private. Both sides must
 # report them back unchanged.
@@ -134,6 +142,59 @@ def check_jwcrypto_to_rust(binary: str, alg: str, enc: str) -> None:
         assert header.get(name) == want, f"{name}: {header}"
 
 
+def check_external_aad_both_directions(binary: str, alg: str, enc: str) -> None:
+    """External AAD must be emitted, understood, and *required* by both sides."""
+    key = rust(binary, "gen-key", alg, enc, {})
+    aad_b64u = b64u(EXTERNAL_AAD)
+
+    # jose-rs -> jwcrypto
+    produced = rust(binary, "encrypt-flattened", alg, enc, {
+        "jwk": key,
+        "plaintext_b64u": b64u(PLAINTEXT),
+        "aad_b64u": aad_b64u,
+    })
+    message = json.loads(produced["jwe"])
+    assert message.get("aad") == aad_b64u, (
+        "the aad member must carry the base64url octets verbatim: " + str(sorted(message))
+    )
+    token = jwe.JWE()
+    token.deserialize(produced["jwe"], key=jwk.JWK(**key))
+    assert token.payload == PLAINTEXT, "jwcrypto could not read a jose-rs external-AAD message"
+
+    # jwcrypto -> jose-rs
+    py_token = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({"alg": alg, "enc": enc}),
+        recipient=jwk.JWK(**key),
+        aad=EXTERNAL_AAD.decode(),
+    )
+    serialized = py_token.serialize()
+    assert json.loads(serialized).get("aad") == aad_b64u, (
+        "jwcrypto and jose-rs disagree on the aad member encoding"
+    )
+    decrypted = rust(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": serialized,
+        "aad_b64u": aad_b64u,
+    })
+    assert base64.urlsafe_b64decode(decrypted["plaintext_b64u"] + "==") == PLAINTEXT
+
+    # Withholding the out-of-band bytes must be refused, not silently accepted.
+    stderr = rust_expect_failure(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": serialized,
+    })
+    assert "external additional authenticated data" in stderr, stderr
+
+    # Wrong bytes must be refused too, by name.
+    stderr = rust_expect_failure(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": serialized,
+        "aad_b64u": b64u(b"tenant=evil;purpose=interop"),
+    })
+    assert "does not match" in stderr, stderr
+
+
 def check_unprotected_header_is_refused(binary: str, alg: str, enc: str) -> None:
     """jwcrypto's default output puts alg/enc in the unprotected `header`.
 
@@ -162,6 +223,7 @@ def main(binary: str) -> None:
     for alg, enc in COMBOS:
         check_rust_to_jwcrypto(binary, alg, enc)
         check_jwcrypto_to_rust(binary, alg, enc)
+        check_external_aad_both_directions(binary, alg, enc)
         check_unprotected_header_is_refused(binary, alg, enc)
     print(json.dumps({
         "cell": "jwe-json-jwcrypto",

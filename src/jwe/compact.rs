@@ -93,6 +93,11 @@ pub fn encrypt_with_header_options(
     enc: JweEncryption,
     opts: &JweEncryptOptions,
 ) -> Result<String> {
+    // RFC 7516 §7.1 defines no `aad` member, so this serialization cannot
+    // honour external AAD. Refusing beats encrypting under an AAD the
+    // recipient has no way to learn.
+    ensure_no_external_aad(opts.external_aad())?;
+
     // All emit-side policy lives in the shared core, which the JSON
     // serializations call too; this function only joins the five parts.
     let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, None)?;
@@ -140,6 +145,23 @@ pub fn encrypt_with_jwk(
 
 /// Encrypt plaintext using a JWK and an explicit authenticated protected header.
 ///
+/// Refuse external additional authenticated data on the compact path.
+///
+/// The option is shared between serializations (`JweEncryptOptions` /
+/// `JweDecryptOptions` are used by both), so each front end has to say what it
+/// cannot do with it. Silent omission here would produce a token whose AAD
+/// input differs from the one the sender believed it authenticated.
+fn ensure_no_external_aad(external_aad: Option<&[u8]>) -> Result<()> {
+    if external_aad.is_some() {
+        return Err(JoseError::InvalidHeader(
+            "external additional authenticated data requires the JWE JSON serialization \u{2014} \
+             the compact form has no \"aad\" member (RFC 7516 \u{a7}7.1)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The key-management algorithm comes from `jwk.alg`, which must be set and
 /// match `header.alg`; `header.enc` must match `enc`. Enforces `Encrypt` for
 /// `dir` and `WrapKey` for AES key wrap and RSA-OAEP. All serialized protected
@@ -252,6 +274,11 @@ pub fn decrypt_with_options(
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
     ensure_token_size(token)?;
+    // Symmetric with the emit side: a compact token cannot carry external
+    // additional authenticated data, so options that supply it mean the caller
+    // is holding the wrong serialization, not that the tag will simply fail.
+    ensure_no_external_aad(options.external_aad())?;
+
     // 1. Parse compact serialization.
     let parts: Vec<&str> = token.splitn(6, '.').collect();
     if parts.len() != 5 {

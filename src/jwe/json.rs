@@ -19,11 +19,16 @@
 //! rather than ignored, because each changes what a recipient must believe
 //! about the message:
 //!
-//! - `aad` — external additional authenticated data (ADR 0012);
 //! - `unprotected` / `header` — unprotected header parameters, whose
 //!   disjointness across the three header locations RFC 7516 §7.2.1 requires
 //!   (ADR 0013);
 //! - `recipients` — the general syntax and multiple recipients (ADR 0014).
+//!
+//! External additional authenticated data *is* supported: pass it with
+//! [`crate::jwe::JweEncryptOptions::with_external_aad`] when encrypting and
+//! [`crate::jwe::JweDecryptOptions::with_external_aad`] when decrypting. It
+//! lands in the `aad` member and is authenticated (not encrypted), which is
+//! exactly why the compact serialization cannot carry it.
 //!
 //! Unknown *private* members are ignored during processing as RFC 7516
 //! §7.2.1 requires, but they are retained in [`FlattenedJwe::other`] so that
@@ -70,11 +75,6 @@ const REJECTED_MEMBERS: &[(&str, &str)] = &[
         "the JWE per-recipient unprotected header is not implemented by this crate \
          version; carry header parameters in the protected header",
     ),
-    (
-        "aad",
-        "external additional authenticated data (\"aad\") is not implemented by this \
-         crate version",
-    ),
 ];
 
 /// Members that identify the object as a JWS rather than a JWE
@@ -109,6 +109,14 @@ pub struct FlattenedJwe {
     /// integrity protected, and unprotected header members are not
     /// implemented (ADR 0011).
     pub protected: Option<String>,
+    /// `BASE64URL(JWE AAD)`: external additional authenticated data supplied
+    /// out of band (RFC 7516 §2, §7.2.1).
+    ///
+    /// Authenticated but not encrypted, and covered by the content tag only
+    /// through the AAD input `ASCII(protected || '.' || this member)`, so a
+    /// recipient must know these bytes before it can authenticate the message.
+    /// See [`crate::jwe::JweDecryptOptions::with_external_aad`].
+    pub aad: Option<String>,
     /// `BASE64URL(JWE Encrypted Key)`; `None` when the member is absent,
     /// which is required for `dir` (RFC 7516 §5.1 step 5).
     pub encrypted_key: Option<String>,
@@ -159,6 +167,7 @@ impl FlattenedJwe {
         }
 
         let protected = require_member(&mut map, "protected")?;
+        let aad = optional_member(&mut map, "aad")?;
         let ciphertext = require_member(&mut map, "ciphertext")?;
         let iv = optional_member(&mut map, "iv")?;
         let tag = optional_member(&mut map, "tag")?;
@@ -169,6 +178,7 @@ impl FlattenedJwe {
         // inside the crypto layer later.
         for value in [
             Some(protected.as_str()),
+            aad.as_deref(),
             iv.as_deref(),
             tag.as_deref(),
             encrypted_key.as_deref(),
@@ -184,6 +194,7 @@ impl FlattenedJwe {
 
         Ok(Self {
             protected: Some(protected),
+            aad,
             encrypted_key,
             iv,
             ciphertext,
@@ -201,6 +212,12 @@ impl FlattenedJwe {
         let mut map = serde_json::Map::new();
         if let Some(protected) = &self.protected {
             map.insert("protected".into(), serde_json::json!(protected));
+        }
+        if let Some(aad) = &self.aad {
+            // RFC 7516 §7.2.1: absent rather than empty.
+            if !aad.is_empty() {
+                map.insert("aad".into(), serde_json::json!(aad));
+            }
         }
         if let Some(encrypted_key) = &self.encrypted_key {
             // RFC 7516 §7.2.1: absent when the JWE Encrypted Key is empty.
@@ -249,6 +266,13 @@ impl FlattenedJwe {
                  have no compact representation"
             )));
         }
+        if self.aad.is_some() {
+            return Err(JoseError::InvalidToken(
+                "cannot convert to compact serialization: the compact form has no \"aad\" \
+                 member, so external additional authenticated data would be lost"
+                    .into(),
+            ));
+        }
         let protected = self.protected.as_deref().ok_or_else(|| {
             JoseError::InvalidToken(
                 "cannot convert to compact serialization: no protected header".into(),
@@ -286,6 +310,7 @@ impl FlattenedJwe {
         }
         let jwe = Self {
             protected: Some(parts[0].to_string()),
+            aad: None,
             encrypted_key: (!parts[1].is_empty()).then(|| parts[1].to_string()),
             iv: Some(parts[2].to_string()),
             ciphertext: parts[3].to_string(),
@@ -420,8 +445,19 @@ pub fn encrypt_flattened_with_header_options(
     enc: JweEncryption,
     opts: &JweEncryptOptions,
 ) -> Result<FlattenedJwe> {
-    let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, None)?;
-    Ok(FlattenedJwe::from_core(&core))
+    // External AAD, if configured, is encoded once and used for both the AAD
+    // input and the `aad` member, so the two can never disagree.
+    let aad_b64 = match opts.external_aad() {
+        None => None,
+        Some(bytes) => {
+            internal::ensure_external_aad_present(bytes)?;
+            Some(base64url::encode(bytes))
+        }
+    };
+    let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, aad_b64.as_deref())?;
+    let mut jwe = FlattenedJwe::from_core(&core);
+    jwe.aad = aad_b64;
+    Ok(jwe)
 }
 
 /// Encrypt with a JWK, mirroring [`crate::jwe::encrypt_with_jwk`].
@@ -497,6 +533,9 @@ impl FlattenedJwe {
     fn from_core(core: &internal::EncryptedCore) -> Self {
         Self {
             protected: Some(core.header_b64.clone()),
+            // External AAD is set by the caller-side entry point, which is the
+            // only place that knows the octets.
+            aad: None,
             encrypted_key: (!core.encrypted_key.is_empty())
                 .then(|| base64url::encode(&core.encrypted_key)),
             iv: (!core.iv.is_empty()).then(|| base64url::encode(&core.iv)),
@@ -564,7 +603,8 @@ pub fn decrypt_flattened_with_options(
     options.check_plaintext_size(minimum_plaintext_len(jwe.ciphertext.len(), envelope.enc))?;
 
     let cek = internal::recover_cek(key, envelope.alg, envelope.enc, &envelope.encrypted_key)?;
-    let aad = internal::aad_input(protected, None);
+    let external_aad = options.resolve_external_aad(jwe.aad.as_deref())?;
+    let aad = internal::aad_input(protected, external_aad.as_deref());
     internal::finish_decrypt(&envelope, &cek, &aad, options)
 }
 
@@ -574,7 +614,37 @@ pub fn decrypt_flattened_with_options(
 /// key-management algorithm is bound to the key rather than to attacker-
 /// controlled header data; `Jwk::check_op` (`Decrypt` / `UnwrapKey`) is
 /// enforced as well.
+///
+/// Refuses a message that carries an `aad` member, because the out-of-band
+/// bytes cannot be guessed: use [`decrypt_flattened_with_jwk_and_aad`] for
+/// those.
 pub fn decrypt_flattened_with_jwk(jwk: &crate::jwk::Jwk, jwe: &FlattenedJwe) -> Result<Vec<u8>> {
+    decrypt_flattened_with_jwk_impl(jwk, jwe, None)
+}
+
+/// [`decrypt_flattened_with_jwk`] for a message that carries an `aad` member.
+///
+/// The key checks are identical; the only difference is that `external_aad`
+/// supplies the out-of-band bytes the content tag is computed over.
+///
+/// # Errors
+///
+/// As for [`decrypt_flattened_with_jwk`], plus
+/// [`crate::jwe::JweDecryptOptions::with_external_aad`]'s mismatch errors when
+/// the message's `aad` member and `external_aad` disagree.
+pub fn decrypt_flattened_with_jwk_and_aad(
+    jwk: &crate::jwk::Jwk,
+    jwe: &FlattenedJwe,
+    external_aad: &[u8],
+) -> Result<Vec<u8>> {
+    decrypt_flattened_with_jwk_impl(jwk, jwe, Some(external_aad))
+}
+
+fn decrypt_flattened_with_jwk_impl(
+    jwk: &crate::jwk::Jwk,
+    jwe: &FlattenedJwe,
+    external_aad: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     let header = jwe
         .peek_protected_header()?
         .ok_or_else(|| JoseError::InvalidHeader("missing protected header".into()))?;
@@ -593,7 +663,11 @@ pub fn decrypt_flattened_with_jwk(jwk: &crate::jwk::Jwk, jwe: &FlattenedJwe) -> 
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
-    let options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
+    let mut options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
+    if let Some(aad) = external_aad {
+        internal::ensure_external_aad_present(aad)?;
+        options = options.with_external_aad(aad);
+    }
     decrypt_flattened_with_options(&key_bytes, jwe, &options)
 }
 
@@ -877,7 +951,7 @@ mod tests {
 
     #[test]
     fn rejects_unimplemented_members_with_a_reason() {
-        for member in ["unprotected", "header", "recipients", "aad"] {
+        for member in ["unprotected", "header", "recipients"] {
             let mut obj = serde_json::Map::new();
             obj.insert("protected".into(), serde_json::json!("AA"));
             obj.insert("ciphertext".into(), serde_json::json!("AA"));
@@ -1147,6 +1221,202 @@ mod tests {
             json::decrypt_flattened_with_jwk(&jwk, &back).unwrap(),
             b"rsa"
         );
+    }
+
+    // -- external additional authenticated data --
+
+    fn aad_opts(bytes: &[u8]) -> JweEncryptOptions {
+        JweEncryptOptions::new().with_external_aad(bytes)
+    }
+
+    fn aad_dec_opts(bytes: &[u8]) -> JweDecryptOptions {
+        JweDecryptOptions::new(vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM])
+            .with_external_aad(bytes)
+    }
+
+    #[test]
+    fn external_aad_roundtrips_and_is_authenticated() {
+        let aad = b"invoice-42";
+        let jwe = encrypt_flattened_with_header_options(
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            &key(),
+            b"payload",
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+            &aad_opts(aad),
+        )
+        .unwrap();
+
+        // The member is present, base64url, and carries the octets.
+        assert_eq!(jwe.aad.as_deref(), Some(base64url::encode(aad).as_str()));
+        assert!(jwe.to_json().unwrap().contains("\"aad\""));
+
+        // Same bytes: decrypts.
+        assert_eq!(
+            decrypt_flattened_with_options(&key(), &jwe, &aad_dec_opts(aad)).unwrap(),
+            b"payload"
+        );
+
+        // Different bytes: named error, not a bare authentication failure.
+        let wrong = decrypt_flattened_with_options(&key(), &jwe, &aad_dec_opts(b"invoice-43"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong.contains("does not match the message's \"aad\" member"),
+            "{wrong}"
+        );
+
+        // No bytes at all: told what is missing.
+        let missing = decrypt_flattened(&key(), &jwe).unwrap_err().to_string();
+        assert!(missing.contains("with_external_aad"), "{missing}");
+
+        // Tampering with the member changes the AAD input, so the tag fails.
+        // This is the point: `aad` is unencrypted but authenticated.
+        let mut tampered = jwe.clone();
+        tampered.aad = Some(base64url::encode(b"invoice-99"));
+        let err = decrypt_flattened_with_options(&key(), &tampered, &aad_dec_opts(b"invoice-42"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match"), "{err}");
+        // The interesting substitution: an attacker replaces the member *and*
+        // the recipient is talked into using the substituted bytes. Caller
+        // expectation and member now agree, so the only thing left standing is
+        // the content tag, which was computed over the original AAD input.
+        // That is the proof that `aad` is authenticated, not merely sent.
+        let substituted = b"invoice-99";
+        let mut flipped = jwe.clone();
+        flipped.aad = Some(base64url::encode(substituted));
+        assert!(matches!(
+            decrypt_flattened_with_options(&key(), &flipped, &aad_dec_opts(substituted)),
+            Err(JoseError::Crypto(_))
+        ));
+    }
+
+    #[test]
+    fn options_and_message_must_agree_about_the_aad_member() {
+        // Message without external AAD, caller supplies some.
+        let plain =
+            encrypt_flattened(&key(), b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        assert!(plain.aad.is_none());
+        let err = decrypt_flattened_with_options(&key(), &plain, &aad_dec_opts(b"extra"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has no \"aad\" member"), "{err}");
+    }
+
+    #[test]
+    fn empty_external_aad_is_refused_on_both_sides() {
+        let err = encrypt_flattened_with_header_options(
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            &key(),
+            b"p",
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+            &aad_opts(b""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not be empty"), "{err}");
+
+        let jwe = encrypt_flattened_with_header_options(
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            &key(),
+            b"p",
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+            &aad_opts(b"x"),
+        )
+        .unwrap();
+        let err = decrypt_flattened_with_jwk_and_aad(
+            &{
+                let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+                jwk.alg = Some("dir".into());
+                jwk
+            },
+            &jwe,
+            b"",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn external_aad_blocks_the_compact_serialization() {
+        // Encrypting compact with the option set is refused rather than
+        // silently producing a token whose AAD the recipient cannot rebuild.
+        let err = compact::encrypt_with_header_options(
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            &key(),
+            b"p",
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+            &aad_opts(b"secret-context"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires the JWE JSON serialization"), "{err}");
+
+        // And decrypting compact with it is refused too.
+        let token =
+            compact::encrypt(&key(), b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        let err = compact::decrypt_with_options(&key(), &token, &aad_dec_opts(b"ctx"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires the JWE JSON serialization"), "{err}");
+
+        // A JSON message with external AAD cannot be pushed into compact.
+        let jwe = encrypt_flattened_with_header_options(
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            &key(),
+            b"p",
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+            &aad_opts(b"ctx"),
+        )
+        .unwrap();
+        let err = jwe.to_compact().unwrap_err().to_string();
+        assert!(
+            err.contains("external additional authenticated data"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn jwk_path_carries_external_aad() {
+        let mut jwk = crate::jwk::generate_symmetric(32).unwrap();
+        jwk.alg = Some("dir".into());
+        let jwe = encrypt_flattened_with_jwk_header_options(
+            &jwk,
+            JoseHeader::for_jwe(JweAlgorithm::Dir, JweEncryption::A256GCM),
+            b"ctx",
+            JweEncryption::A256GCM,
+            &aad_opts(b"tenant-7"),
+        )
+        .unwrap();
+        assert_eq!(
+            decrypt_flattened_with_jwk_and_aad(&jwk, &jwe, b"tenant-7").unwrap(),
+            b"ctx"
+        );
+        // Without the AAD the same key refuses the message.
+        assert!(decrypt_flattened_with_jwk(&jwk, &jwe).is_err());
+    }
+
+    #[test]
+    fn aad_member_must_be_a_string_and_canonical() {
+        let jwe =
+            encrypt_flattened(&key(), b"p", JweAlgorithm::Dir, JweEncryption::A256GCM).unwrap();
+        for value in [serde_json::json!(5), serde_json::json!("AA==")] {
+            let mut obj: serde_json::Value = serde_json::from_str(&jwe.to_json().unwrap()).unwrap();
+            obj["aad"] = value.clone();
+            let err = FlattenedJwe::from_json(&obj.to_string())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("must be a string") || err.contains("base64"),
+                "{value}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -179,22 +179,26 @@ async function decryptCompact(alg, enc) {
 async function encryptFlattened(alg, enc) {
   if (!alg) throw new Error('--alg is required')
   if (!enc) throw new Error('--enc is required')
-  const { jwk, plaintext_b64u, header } = JSON.parse(readStdin())
+  const { jwk, plaintext_b64u, header, aad_b64u } = JSON.parse(readStdin())
   if (header && ('alg' in header || 'enc' in header)) {
     throw new Error('header input must not override `alg` / `enc`')
   }
   if (jwk.alg !== alg) throw new Error(`JWK alg ${jwk.alg} does not match expected ${alg}`)
   const key = await importJWK(jwk, alg)
-  const jwe = await new FlattenedEncrypt(b64uDecode(plaintext_b64u))
+  const enc_ = new FlattenedEncrypt(b64uDecode(plaintext_b64u))
     .setProtectedHeader({ ...(header ?? {}), alg, enc })
-    .encrypt(key)
+  // External AAD (RFC 7516 §7.2.1): panva encodes it into the `aad` member and
+  // folds the encoded text into the content AAD input, exactly as RFC 7516
+  // §5.1 step 14 requires — which is what makes this cell meaningful.
+  if (aad_b64u) enc_.setAdditionalAuthenticatedData(b64uDecode(aad_b64u))
+  const jwe = await enc_.encrypt(key)
   emit({ jwe: JSON.stringify(jwe) })
 }
 
 async function decryptFlattened(alg, enc) {
   if (!alg) throw new Error('--alg is required')
   if (!enc) throw new Error('--enc is required')
-  const { jwk, jwe } = JSON.parse(readStdin())
+  const { jwk, jwe, aad_b64u } = JSON.parse(readStdin())
   const parsed = typeof jwe === 'string' ? JSON.parse(jwe) : jwe
   const hdr = decodeProtectedHeader(parsed)
   if (hdr.alg !== alg) throw new Error(`token alg ${hdr.alg} does not match expected ${alg}`)
@@ -203,6 +207,7 @@ async function decryptFlattened(alg, enc) {
   const { plaintext, protectedHeader } = await flattenedDecrypt(parsed, key, {
     keyManagementAlgorithms: [alg],
     contentEncryptionAlgorithms: [enc],
+    ...(aad_b64u ? { additionalAuthenticatedData: b64uDecode(aad_b64u) } : {}),
   })
   emit({ ok: true, plaintext_b64u: b64uEncode(plaintext), protected_header: protectedHeader })
 }

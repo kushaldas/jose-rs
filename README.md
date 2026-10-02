@@ -234,15 +234,22 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 - **JWE JSON Serialization is protected-header-only.**
   `jwe::json::FlattenedJwe` (RFC 7516 §7.2.2) requires a `protected` member,
   because `alg` must be integrity protected, and refuses `unprotected`,
-  `header`, `recipients` and `aad` by name rather than ignoring them — they
-  are registered members whose presence changes what a recipient must believe.
+  `header` and `recipients` by name rather than ignoring them — they are
+  registered members whose presence changes what a recipient must believe.
+  External additional authenticated data (`aad`) **is** supported:
+  `JweEncryptOptions::with_external_aad` /
+  `JweDecryptOptions::with_external_aad` bind out-of-band bytes to the
+  ciphertext. They are authenticated, **not** confidential — do not put
+  secrets there — and the compact serialization refuses the option rather than
+  silently dropping it (ADR 0012).
   Unrecognized *private* members are ignored while processing but retained, so
   re-serializing does not drop them and `to_compact()` refuses rather than
   silently discarding them. The parser rejects duplicate JSON member names
   (which `serde_json` would otherwise resolve last-key-wins), non-string member
   values, non-canonical base64url and oversized input; the parsed protected
   header is available through `peek_protected_header()` for inspection only,
-  and no return value attests to it until decryption succeeds. See ADR 0011.
+  and no return value attests to it until decryption succeeds. See ADR 0011,
+  and ADR 0012 for external AAD.
 - **RSA minimum key size.** Keys below 2048 bits are rejected at parse
   and at generation time (RFC 7518 §3.3 / §4.2).
 - **AES-GCM nonce collision bound.** Content encryption with A128GCM /

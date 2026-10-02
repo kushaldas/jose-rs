@@ -15,3 +15,4 @@ history.
 | [0009](0009-unambiguous-jwks-key-selection.md) | Reject ambiguous JWT key identifiers | Accepted |
 | [0010](0010-jwe-plaintext-size-limit.md) | Configurable JWE plaintext-size limit | Accepted |
 | [0011](0011-jwe-flattened-json-serialization.md) | Flattened JWE JSON Serialization requires a protected header | Accepted |
+| [0012](0012-jwe-external-aad.md) | External additional authenticated data is authenticated, never confidential | Accepted |

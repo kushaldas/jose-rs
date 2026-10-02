@@ -13,9 +13,16 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   content algorithm already supported by `jose_rs::jwe` works, and messages
   produced by either serialization are readable by the other.
   `protected` is required (so `alg` is always integrity protected) and
-  `unprotected`, `header`, `recipients` and `aad` are refused by name rather
-  than ignored; the parser also rejects duplicate JSON member names, non-string
+  `unprotected`, `header` and `recipients` are refused by name rather than
+  ignored; the parser also rejects duplicate JSON member names, non-string
   member values and non-canonical base64url. See ADR 0011.
+- External additional authenticated data for the JSON serializations:
+  `JweEncryptOptions::with_external_aad` / `JweDecryptOptions::with_external_aad`
+  bind out-of-band bytes to the ciphertext through the `aad` member (RFC 7516
+  §7.2.1). The data is authenticated but not encrypted, message/caller
+  disagreement is reported by name instead of as a generic authentication
+  failure, an empty value is refused, and the compact serialization refuses the
+  option because it cannot represent it. See ADR 0012.
 
 ### Internal
 

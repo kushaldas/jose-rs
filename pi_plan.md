@@ -105,3 +105,4 @@ Node/panva matrix (`interop/tests/matrix.sh`), extended per feature.
 | 1 | refactor(jwe): shared internals | J0 | `src/jwe/internal.rs` + `src/jwe/content.rs`; compact API/wire unchanged |
 | 2 | docs: RFC texts + contributor guidelines | Q1 | `rfcs/rfc{7515,7516,7517,7518,7519,7797,8037,9278,9864}.txt` (IETF-sourced, checksums recorded), `AGENTS.md` |
 | 3 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, `src/member_map.rs` (strict duplicate-rejecting JSON objects), ADR 0011, `tests/jwe_json.rs`, `jwe-json` matrix family (8 cells) + `interop/tests/jwe_json_jwcrypto.py` (9 alg/enc combos, both directions, pinned ADR-0011 divergence) |
+| 4 | `feat(jwe): external AAD for JSON serializations` | J2 | `Jwe{Encrypt,Decrypt}Options::with_external_aad`, `FlattenedJwe::aad`, ADR 0012, `tests/jwe_aad.rs`, `jwe-json-aad` matrix family (8 cells) + jwcrypto external-AAD checks; compact refuses the option |
