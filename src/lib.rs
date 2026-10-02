@@ -14,6 +14,7 @@
 
 pub mod algorithm;
 pub mod base64url;
+pub mod capability;
 /// Error and result types returned by JOSE operations.
 pub mod error;
 pub mod header;
