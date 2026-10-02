@@ -380,7 +380,7 @@ pub fn verify_flattened_opts(
     let valid = verifier.verify(&input, &sig).map_err(JoseError::Crypto)?;
     if !valid {
         return Err(JoseError::InvalidToken(
-            "signature verification failed".into(),
+            crate::SIGNATURE_VERIFICATION_FAILED.into(),
         ));
     }
     payload_source.decode(b64)
@@ -682,7 +682,7 @@ fn verify_general_inner(
                 any_verified = true;
             }
             Ok(false) => {
-                result.error = Some("signature verification failed".into());
+                result.error = Some(crate::SIGNATURE_VERIFICATION_FAILED.into());
             }
             Err(e) => {
                 result.error = Some(format!("verifier error: {e}"));
@@ -753,7 +753,24 @@ pub fn sign_flattened_with_jwk(
     sign_flattened_with_jwk_opts(jwk, payload, header, None, &SignOptions::new())
 }
 
-/// [`sign_flattened_with_jwk`] with the per-signature unprotected header and
+/// Verify a flattened JWS with a JWK, returning the payload with the header the
+/// signature authenticated and the unprotected metadata kept separate.
+///
+/// [`Authenticated::protected`](crate::Authenticated::protected) is the header that was covered by this signature;
+/// [`Authenticated::unprotected`](crate::Authenticated::unprotected) is the per-signature `header` member, verbatim and
+/// clearly labelled as not covered. They are not merged: a caller that reads `alg` or
+/// `kid` from the merged view cannot tell a forged value from an authenticated one.
+pub fn verify_flattened_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    jws: &FlattenedJws,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify_flattened_with_jwk(jwk, jws)?;
+    let protected = decode_protected(&jws.protected)?;
+    let unprotected: Vec<serde_json::Value> = jws.header.clone().into_iter().collect();
+    Ok(crate::Authenticated::new(payload, protected, unprotected))
+}
+
+/// [`sign_flattened_with_jwk`] with the per-signature unprotected header and/// [`sign_flattened_with_jwk`] with the per-signature unprotected header and
 /// RFC 7797 / `crit` options.
 pub fn sign_flattened_with_jwk_opts(
     jwk: &crate::jwk::Jwk,

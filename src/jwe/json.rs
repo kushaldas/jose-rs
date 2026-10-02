@@ -1103,6 +1103,56 @@ pub(crate) fn decrypt_flattened_with_jwk_impl(
     decrypt_flattened_with_jwk_options(jwk, jwe, &options)
 }
 
+/// Decrypt a flattened JWE, returning the plaintext with the authenticated protected
+/// header and the unauthenticated metadata kept **separate**.
+///
+/// A flattened JWE can carry two unprotected objects: the shared `unprotected` member and
+/// the per-recipient `header` member. Neither is integrity-protected, and both are
+/// returned verbatim in [`Authenticated::unprotected`](crate::Authenticated::unprotected) (shared first, then per-recipient)
+/// so a caller can log or display them. They are *not* merged into
+/// [`Authenticated::protected`](crate::Authenticated::protected), because a merged view is exactly what makes a forged
+/// `alg` or `kid` indistinguishable from an authenticated one — the mistake this type
+/// exists to make impossible to make by accident.
+pub fn decrypt_flattened_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    jwe: &FlattenedJwe,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let plaintext = decrypt_flattened_with_jwk(jwk, jwe)?;
+    let (protected, unprotected) = split_flattened_metadata(jwe)?;
+    Ok(crate::Authenticated::new(plaintext, protected, unprotected))
+}
+
+/// Collect the authenticated protected header and the unauthenticated metadata of a
+/// flattened JWE, in that order and without merging them.
+///
+/// After a successful decryption the protected header is authenticated by the content
+/// tag (it is covered as additional data), which is why this may be reported as such.
+fn split_flattened_metadata(jwe: &FlattenedJwe) -> Result<(JoseHeader, Vec<serde_json::Value>)> {
+    let protected = decode_flattened_protected(jwe)?;
+    let mut unprotected = Vec::new();
+    if let Some(shared) = &jwe.unprotected {
+        unprotected.push(serde_json::Value::Object(shared.clone()));
+    }
+    if let Some(per_recipient) = &jwe.header {
+        unprotected.push(serde_json::Value::Object(per_recipient.clone()));
+    }
+    Ok((protected, unprotected))
+}
+
+/// [`split_flattened_metadata`] for sibling modules.
+pub(crate) fn split_flattened_metadata_public(
+    jwe: &FlattenedJwe,
+) -> Result<(JoseHeader, Vec<serde_json::Value>)> {
+    split_flattened_metadata(jwe)
+}
+
+/// Parse the protected header of a flattened JWE, requiring it to be present.
+fn decode_flattened_protected(jwe: &FlattenedJwe) -> Result<JoseHeader> {
+    let segment = jwe.protected.as_deref().unwrap_or("");
+    let bytes = base64url::decode(segment)?;
+    serde_json::from_slice(&bytes).map_err(Into::into)
+}
+
 /// [`decrypt_flattened_with_jwk`] with the caller's full
 /// [`JweDecryptOptions`] — plaintext size limit, external AAD, and
 /// caller-understood `crit` extensions (ADR 0015).

@@ -538,7 +538,7 @@ pub fn verify_with_options(
         .map_err(JoseError::Crypto)?;
     if !valid {
         return Err(JoseError::InvalidToken(
-            "signature verification failed".into(),
+            crate::SIGNATURE_VERIFICATION_FAILED.into(),
         ));
     }
     // Decode the payload only after the signature verifies; still rejects an
@@ -672,6 +672,47 @@ pub(crate) fn verifier_from_jwk(
 
     let sw_key = crate::jwk::jwk_to_signature_key(jwk, parsed, crate::jwk::JwkOp::Verify)?;
     kryptering::SoftwareVerifier::new(sig_alg, sw_key).map_err(JoseError::Crypto)
+}
+
+/// Verify a JWS and return the payload *with the header that authenticated it*.
+///
+/// Same verification as [`verify_with_jwk`]; the difference is what comes back.
+/// [`Authenticated`](crate::Authenticated) carries the protected header the signature actually covered, so a
+/// caller does not re-parse (and cannot accidentally read an unauthenticated copy).
+/// A compact JWS carries no unprotected metadata, so `unprotected` is empty here by
+/// construction rather than by luck.
+///
+/// ```
+/// use jose_rs::jwk;
+/// use jose_rs::jws::compact;
+/// use jose_rs::JoseHeader;
+///
+/// let mut jwk = jwk::generate_ec("P-256")?;
+/// jwk.alg = Some("ES256".into());
+/// let token = compact::sign_with_jwk(&jwk, b"data", &JoseHeader::new("ES256"))?;
+/// let outcome = compact::verify_with_jwk_authenticated(&jwk, &token)?;
+/// assert_eq!(outcome.value, b"data");
+/// assert_eq!(outcome.algorithm(), "ES256");
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn verify_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify_with_jwk(jwk, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(payload, protected, Vec::new()))
+}
+
+/// [`verify_with_jwk_authenticated`] for the low-level verifier boundary (HSM-backed
+/// verifiers and the like).
+pub fn verify_authenticated(
+    verifier: &dyn kryptering::Verifier,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify(verifier, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(payload, protected, Vec::new()))
 }
 
 /// Decode the header from a JWS Compact Serialization without verifying.

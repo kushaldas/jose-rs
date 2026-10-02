@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod algorithm;
+pub mod authenticated;
 pub mod base64url;
 pub mod capability;
 /// Error and result types returned by JOSE operations.
@@ -31,7 +32,8 @@ pub mod password;
 mod security_tests;
 
 pub use algorithm::{JweAlgorithm, JweEncryption, JwsAlgorithm};
-pub use error::{JoseError, Result};
+pub use authenticated::Authenticated;
+pub use error::{ErrorCategory, JoseError, Result};
 pub use header::JoseHeader;
 pub use jwk::JwkOp;
 pub use password::Password;
@@ -47,6 +49,13 @@ pub const MIN_RSA_BITS: usize = 2048;
 /// realistic JOSE token (RFC 7519 §2 notes that JWTs are compact
 /// precisely to fit HTTP Authorization headers, URLs, and POST bodies).
 pub const MAX_TOKEN_BYTES: usize = 1024 * 1024;
+
+/// The exact message raised when a signature fails to verify.
+///
+/// A constant rather than an inline literal because [`JoseError::category`]
+/// classifies it by equality: substring matching over error text would classify any
+/// message that *mentions* a verification failure as one.
+pub const SIGNATURE_VERIFICATION_FAILED: &str = "signature verification failed";
 
 /// Refuse to emit a serialized token (or JWS JSON member) of `len` bytes
 /// that this crate's own decoders would reject under [`MAX_TOKEN_BYTES`].

@@ -19,6 +19,26 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- Authenticated results (L4): `jose_rs::Authenticated<T>` returns the verified
+  payload/claims together with the protected header the signature or AEAD tag
+  actually covered, and keeps unauthenticated metadata in a separately named
+  field (`unprotected`) that is never merged into the authenticated view.
+  Available from `jws::compact::{verify_authenticated, verify_with_jwk_authenticated}`,
+  `jws::json::verify_flattened_with_jwk_authenticated`,
+  `jwt::decode_with_jwk_authenticated`,
+  `jwe::compact::decrypt_with_jwk_authenticated`,
+  `jwe::json::decrypt_flattened_with_jwk_authenticated` and
+  `jwe::general::decrypt_general_with_jwk_authenticated`. No existing signature
+  changed. See ADR 0032 and `cargo run --example trust_boundary`.
+- Stable error categories: `ErrorCategory` (`#[non_exhaustive]`) via
+  `JoseError::category()`, plus `JoseError::is_authentication_failure()` and the
+  `SIGNATURE_VERIFICATION_FAILED` constant. The split between "the integrity check
+  failed" and "the backend refused the input on the way there" is deliberately
+  *not* exposed — it is a probeable oracle — and `is_authentication_failure()`
+  answers the merged question instead.
+
+### Added
+
 - Explicit bounded JWK Set selection (L3): `jwk::selection` with
   `SelectionPolicy` (attempt budget, `Fallback::{Refuse,
   TryWhenUnaddressable, TryAll}`, `require_kid`), `select`/`JwkSet::select`

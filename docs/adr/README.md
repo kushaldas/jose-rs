@@ -35,3 +35,4 @@ history.
 | [0029](0029-one-token-one-reading.md) | One token, one reading: duplicate claim members are refused | Accepted |
 | [0030](0030-json-jws-uses-the-compact-key-rules.md) | The JSON serialization uses the compact path's key rules, literally | Accepted |
 | [0031](0031-selection-refuses-it-does-not-guess.md) | Selection refuses; it does not guess, and it does not filter | Accepted |
+| [0032](0032-authenticated-results-and-coarse-errors.md) | Authenticated results, and errors coarse enough not to lie | Accepted |

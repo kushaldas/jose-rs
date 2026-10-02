@@ -738,6 +738,25 @@ pub fn decrypt_general_with_jwk(
     json_mod::decrypt_flattened_with_jwk_impl(jwk, &jwe.flatten_for(recipient)?, None)
 }
 
+/// Decrypt one recipient of a general JWE, returning the plaintext with the
+/// authenticated protected header and the unauthenticated metadata kept separate.
+///
+/// A general JWE has three places metadata can live: the shared protected header
+/// (authenticated), the shared `unprotected` member (not), and the chosen recipient's
+/// `header` member (not). All three are reported, the last two as distinct entries in
+/// [`crate::Authenticated::unprotected`] and never merged into the protected header —
+/// `alg`/`kid`/`epk` choices must be traceable to the bytes the tag covered.
+pub fn decrypt_general_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    jwe: &GeneralJwe,
+    recipient: usize,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let plaintext = decrypt_general_with_jwk(jwk, jwe, recipient)?;
+    let flattened = jwe.flatten_for(recipient)?;
+    let (protected, unprotected) = json_mod::split_flattened_metadata_public(&flattened)?;
+    Ok(crate::Authenticated::new(plaintext, protected, unprotected))
+}
+
 /// [`decrypt_general_with_jwk`] with the caller's [`JweDecryptOptions`] —
 /// plaintext size limit, external AAD, and caller-understood `crit` extensions
 /// (ADR 0015) — for a recipient of a general message.

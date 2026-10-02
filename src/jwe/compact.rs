@@ -442,6 +442,21 @@ pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
     decrypt_with_options_material(&key, token, &options)
 }
 
+/// Decrypt a JWE and return the plaintext with the header the AEAD tag authenticated.
+///
+/// The protected header is included in the AEAD additional-authenticated-data, so the
+/// copy returned here is the one the tag covered — the distinction matters most when a
+/// caller is deciding *what the plaintext may be used for* from `zip`, `cty` or a
+/// private member, and a forged unprotected value would otherwise steer that decision.
+pub fn decrypt_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let plaintext = decrypt_with_jwk(jwk, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(plaintext, protected, Vec::new()))
+}
+
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
 ///
 /// Accepts any key-management / content-encryption algorithm the library

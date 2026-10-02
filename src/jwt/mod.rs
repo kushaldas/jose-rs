@@ -438,6 +438,23 @@ pub fn decode_with_jwkset_policy(
     )))
 }
 
+/// Decode and validate a JWT, returning the claims *with* the protected header the
+/// signature authenticated.
+///
+/// Same checks as [`decode_with_jwk`]. The returned [`Authenticated`](crate::Authenticated)(crate::Authenticated)
+/// carries the verified header and the (clearly labelled) unauthenticated metadata, so a
+/// caller that needs `kid`, `typ`, `cty` or a `crit` parameter reads the copy the signature
+/// covered instead of re-parsing and hoping it picked the right object.
+pub fn decode_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+    validation: &Validation,
+) -> Result<crate::Authenticated<Claims>> {
+    let claims = decode_with_jwk(jwk, token, validation)?;
+    let protected = crate::jws::compact::decode_header(token)?;
+    Ok(crate::Authenticated::new(claims, protected, Vec::new()))
+}
+
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).
 ///
 /// Emits a deprecation warning at every call site. The function is kept
