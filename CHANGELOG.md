@@ -49,6 +49,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- **AES-GCM key management (`A128GCMKW`, `A192GCMKW`, `A256GCMKW`, RFC 7518
+  §4.7)** in the compact and flattened serializations: the content key is carried,
+  encrypted with the algorithm's own key, and the wrap's IV and authentication tag
+  travel as `iv` and `tag` **header members** (§4.7.1) — the same two names the
+  envelope uses for the content encryption's own values, which is why both pairs are
+  asserted to exist and to differ. Both members are generated here and placed in the
+  integrity-protected header, a caller cannot supply either one for any algorithm, and
+  both are mandatory with their RFC sizes on receipt. The key length follows `alg` and
+  the content key length follows `enc`, and because AES-GCM does not expand, a
+  delivered key is exactly the CEK's length. Several recipients stay refused:
+  per-recipient `iv`/`tag` have no authenticated home. Interoperates with panva and
+  jwcrypto in both directions, including unwrapping the header's key wrap in Python and
+  decrypting the content with the result. See ADR 0020.
 - **X25519 agreement keys** (`kty: OKP`, `crv: X25519`, RFC 8037 §2) for all four
   ECDH key-management modes, plus a public `generate_x25519()` key generator. An
   X25519 public value is a bare 32-octet u-coordinate rather than a SEC1 point, so

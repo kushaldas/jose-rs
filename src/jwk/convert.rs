@@ -113,9 +113,9 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         | "ML-DSA-87-ES384" | "ML-DSA-44-Ed25519" | "ML-DSA-65-Ed25519" | "ML-DSA-87-Ed448" => {
             &["AKP"]
         }
-        // JWE key wrap, direct, PBES2 — all symmetric.
-        "A128KW" | "A192KW" | "A256KW" | "dir" | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW"
-        | "PBES2-HS512+A256KW" => &["oct"],
+        // JWE key wrap (RFC 3394 and AES-GCM), direct, PBES2 — all symmetric.
+        "A128KW" | "A192KW" | "A256KW" | "A128GCMKW" | "A192GCMKW" | "A256GCMKW" | "dir"
+        | "PBES2-HS256+A128KW" | "PBES2-HS384+A192KW" | "PBES2-HS512+A256KW" => &["oct"],
         // JWE RSA key transport.
         "RSA-OAEP" | "RSA-OAEP-256" | "RSA1_5" => &["RSA"],
         // JWE ECDH-ES family.

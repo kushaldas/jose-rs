@@ -262,6 +262,15 @@ pub enum JweAlgorithm {
     A192KW,
     /// AES Key Wrap (256-bit)
     A256KW,
+    /// AES GCM key wrapping with a 128-bit key (RFC 7518 §4.7)
+    #[serde(rename = "A128GCMKW")]
+    A128Gcmkw,
+    /// AES GCM key wrapping with a 192-bit key (RFC 7518 §4.7)
+    #[serde(rename = "A192GCMKW")]
+    A192Gcmkw,
+    /// AES GCM key wrapping with a 256-bit key (RFC 7518 §4.7)
+    #[serde(rename = "A256GCMKW")]
+    A256Gcmkw,
     /// RSAES-OAEP using default parameters (SHA-1 — only available with the `deprecated` feature)
     #[cfg(feature = "deprecated")]
     #[serde(rename = "RSA-OAEP")]
@@ -301,6 +310,9 @@ impl JweAlgorithm {
             "A128KW" => Ok(Self::A128KW),
             "A192KW" => Ok(Self::A192KW),
             "A256KW" => Ok(Self::A256KW),
+            "A128GCMKW" => Ok(Self::A128Gcmkw),
+            "A192GCMKW" => Ok(Self::A192Gcmkw),
+            "A256GCMKW" => Ok(Self::A256Gcmkw),
             #[cfg(feature = "deprecated")]
             "RSA-OAEP" => Ok(Self::RsaOaep),
             "RSA-OAEP-256" => Ok(Self::RsaOaep256),
@@ -322,6 +334,9 @@ impl JweAlgorithm {
             Self::A128KW => "A128KW",
             Self::A192KW => "A192KW",
             Self::A256KW => "A256KW",
+            Self::A128Gcmkw => "A128GCMKW",
+            Self::A192Gcmkw => "A192GCMKW",
+            Self::A256Gcmkw => "A256GCMKW",
             #[cfg(feature = "deprecated")]
             Self::RsaOaep => "RSA-OAEP",
             Self::RsaOaep256 => "RSA-OAEP-256",

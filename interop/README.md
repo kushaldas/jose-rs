@@ -79,6 +79,23 @@ which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
 
+### AES-GCM key management against jwcrypto (`jwe_gcm_kw_jwcrypto.py`)
+
+135 checks over all three `*GCMKW` algorithms and four content algorithms. Beyond the
+two-directional round-trips and the member shape (which matches on both sides — jwcrypto
+and panva both put the wrap's `iv`/`tag` in the protected header, as this crate does),
+the suite unwraps the header's key wrap **in Python**, using only the RFC's parameters,
+requires the recovered key to be exactly the content algorithm's CEK length, and then
+decrypts the content with it. That last step is what makes the check non-circular: the
+header's wrap and the content's key are two stages, and a message that carried *a* key
+would otherwise pass every round-trip.
+
+It also pins the AES-CBC-HMAC content construction independently, since the point of the
+exercise is not to trust either implementation's account of it: the MAC is
+`HMAC(MAC_KEY, A || IV || E || AL)` with the 64-bit bit-count appended **last** and the
+MAC key in the CEK's *first* half — the order RFC 7518 §5.2.2.1's illustration gives,
+which its prose list does not.
+
 ### Direct ECDH agreement against jwcrypto (`jwe_ecdh_es_jwcrypto.py`)
 
 104 checks over P-256/P-384/P-521 and X25519 with GCM and CBC-HMAC content
@@ -127,7 +144,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **97 cells**:
+Full matrix is **103 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -140,6 +157,7 @@ Full matrix is **97 cells**:
 | JWE critical extensions | `jwe-crit` | 4 alg:enc × 2 directions = 8 | RFC 7516 §4.1.13: jose-rs emits `crit` only for a caller-declared parameter, and the parameter must be integrity protected. jwcrypto refuses to read an extension it cannot process and panva refuses to emit one, so the cell asserts the peer's rejection **and** a control message without `crit` that the peer accepts |
 | JWE ECDH agreement with key wrapping | `jwe-ecdh-kw` | 4 alg/curve/enc quadruples × 2 directions = 8 | `ECDH-ES+A128KW`/`+A192KW`/`+A256KW` (RFC 7518 §4.6): one wrapping algorithm per curve, and the cell asserts the compact form's encrypted-key segment is **non-empty** — the converse of the `jwe-ecdh` assertion — so a cell that quietly switched key-management mode fails instead of passing on a tag it no longer proves |
 | JWE direct ECDH agreement | `jwe-ecdh` | 4 curve/enc pairs × 2 directions = 8 | RFC 7518 §4.6 (`ECDH-ES`): the producer encrypts to the recipient's **public** half and the consumer reads it with the private half, so the cell proves the agreement needs no `d` on the send side. The consuming side must report an authenticated `epk` on the recipient's curve with no private part, and the compact form's encrypted-key segment must be empty |
+| JWE AES-GCM key management | `jwe-gcmkw` | 3 alg:enc × 2 directions = 6 | `A128GCMKW`/`A192GCMKW`/`A256GCMKW` (RFC 7518 §4.7), where the key wrap's `iv`/`tag` are **header members** and the envelope has its own members with those same names. The cell requires both pairs, at 12 and 16 octets, holding **different** values — a message that reused them would be readable by nobody — and a non-empty conveyed key |
 | JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |

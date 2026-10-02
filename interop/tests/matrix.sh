@@ -65,6 +65,9 @@ ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A2
 # ECDH with key wrapping: `alg:curve:enc`. One wrapping algorithm per curve, so
 # the three KDF AlgorithmID/keydatalen pairings are each covered once.
 ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM" "ECDH-ES+A128KW:X25519:A128CBC-HS256")
+# AES-GCM key management (RFC 7518 §4.7): `alg:enc`. The key size follows `alg`,
+# so one content algorithm per key size covers the pairings.
+ALGS_GCMKW=("A128GCMKW:A256GCM" "A192GCMKW:A128CBC-HS256" "A256GCMKW:A128GCM")
 # Duplicate-member negative cells (signature alg is ES256 throughout).
 DIRECTIONS_DUP=("dup-kid" "dup-alg" "dup-ext")
 
@@ -527,6 +530,7 @@ run_cell() {
       jwe-ecdh-kw)
         # `alg:curve:enc` — the same cell, with the wrapping algorithm named.
         run_jwe_ecdh_cell "$direction" "${alg#*:}" "${alg%%:*}"; exit 0 ;;
+      jwe-gcmkw) run_jwe_gcmkw_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
         [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
@@ -708,6 +712,67 @@ run_jwe_ecdh_cell() {
   esac
 }
 
+# AES-GCM key management (RFC 7518 §4.7): the CEK is encrypted with the algorithm's
+# key, and the operation's IV and authentication tag travel as **header members**.
+# That is the interesting part of this cell: `iv` and `tag` are also the names of the
+# envelope's own members, which belong to the content encryption, so the cell asserts
+# both pairs exist, in the right places, with the right sizes, and that they hold
+# different values — the confusion this algorithm invites.
+run_jwe_gcmkw_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | "$producer" encrypt-compact --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-compact --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+  assert_header "$out_path"
+
+  # Both mandatory members, at their RFC sizes, in the authenticated header; and
+  # the key is conveyed (unlike direct agreement).
+  "$JQ" -e '
+    .protected_header.iv as $iv | .protected_header.tag as $tag
+    | ($iv != null) and ($tag != null)
+  ' "$out_path" > /dev/null \
+    || { echo "missing iv/tag header members: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  local segments iv_len tag_len
+  segments="$jwe"
+  local header_b64 content_iv content_tag
+  header_b64="$(printf '%s' "$segments" | cut -d. -f1)"
+  content_iv="$(printf '%s' "$segments" | cut -d. -f3)"
+  content_tag="$(printf '%s' "$segments" | cut -d. -f5)"
+  iv_len="$(printf '%s' "$content_iv" | tr -d '\n' | wc -c)"
+  tag_len="$(printf '%s' "$content_tag" | tr -d '\n' | wc -c)"
+  # 12 octets base64url without padding is 16 characters, 16 octets is 22.
+  [ "$iv_len" = 16 ] || { echo "content IV segment is $iv_len chars, expected 16" >&2; return 1; }
+  [ "$tag_len" = 22 ] || { echo "content tag segment is $tag_len chars, expected 22" >&2; return 1; }
+  # And the key wrap's members must be distinct values from the content's.
+  local wrap_iv wrap_tag
+  wrap_iv="$("$JQ" -r .protected_header.iv "$out_path")"
+  wrap_tag="$("$JQ" -r .protected_header.tag "$out_path")"
+  [ -n "$wrap_iv" ] && [ "$wrap_iv" != "$content_iv" ] \
+    || { echo "key-wrap iv must be present and differ from the content iv" >&2; return 1; }
+  [ -n "$wrap_tag" ] && [ "$wrap_tag" != "$content_tag" ] \
+    || { echo "key-wrap tag must be present and differ from the content tag" >&2; return 1; }
+  # The encrypted key is the AES-GCM ciphertext of the CEK — never empty.
+  [ -n "$(printf '%s' "$segments" | cut -d. -f2)" ] \
+    || { echo "AES-GCM key management must convey the wrapped CEK" >&2; return 1; }
+  local _unused; _unused="$header_b64"
+}
+
 if [ "${1:-}" = "--cell" ]; then
   shift
   dir="${1:?direction required}"; alg="${2:?alg required}"; fmt="${3:?format required}"
@@ -794,6 +859,14 @@ done
 for alg in "${ALGS_ECDH_KW[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe-ecdh-kw" || true
+  done
+done
+
+# AES-GCM key management (RFC 7518 §4.7), both directions: asserts the key wrap's
+# iv/tag header members alongside the content's own, which share their names.
+for alg in "${ALGS_GCMKW[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-gcmkw" || true
   done
 done
 

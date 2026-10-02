@@ -853,6 +853,13 @@ pub(crate) fn wrap_cek(
             kryptering::keywrap::wrap(kw_alg, key, cek).map_err(JoseError::Crypto)
         }
 
+        // AES-GCM key management for a *second* recipient would need its own `iv`
+        // and `tag` per recipient, which has no authenticated home (ADR 0020). The
+        // single-recipient path never reaches this function.
+        other if aes_gcm_kw_key_len(other).is_some() => {
+            Err(per_recipient_member_unsupported(alg, "iv and tag"))
+        }
+
         // RSA-OAEP.
         JweAlgorithm::RsaOaep256 => {
             let pub_key = parse_rsa_public_key(key)?;
@@ -1039,11 +1046,37 @@ pub(crate) fn agreement_kek_len(alg: JweAlgorithm) -> Option<usize> {
 /// or write an unauthenticated key contribution until that trade-off is decided
 /// (ADR 0018, which records the argument and the alternatives).
 pub(crate) fn per_recipient_epk_unsupported(alg: JweAlgorithm) -> JoseError {
+    per_recipient_member_unsupported(alg, "epk")
+}
+
+/// The key length an AES-GCM key-management algorithm names.
+///
+/// `None` for every other algorithm. As with [`agreement_kek_len`], this answers
+/// "how long is the key that wraps the CEK", and the answer comes from `alg` —
+/// `A128GCMKW` uses a 128-bit key whatever `enc` needs the CEK to be.
+pub(crate) fn aes_gcm_kw_key_len(alg: JweAlgorithm) -> Option<usize> {
+    match alg {
+        JweAlgorithm::A128Gcmkw => Some(16),
+        JweAlgorithm::A192Gcmkw => Some(24),
+        JweAlgorithm::A256Gcmkw => Some(32),
+        _ => None,
+    }
+}
+
+/// The refusal when a key-management algorithm's per-message values would have to
+/// be published once per recipient.
+///
+/// `epk` (agreement) and `iv`/`tag` (AES-GCM key management) both describe *one*
+/// recipient's key operation, and RFC 7516 §7.2.1 gives a recipient element exactly
+/// two members — `header` (unprotected) and `encrypted_key`. There is no
+/// per-recipient protected header, so the values can only be published
+/// unauthenticated; this crate refuses rather than doing that, on emit and on
+/// receive alike (ADR 0018, ADR 0020).
+pub(crate) fn per_recipient_member_unsupported(alg: JweAlgorithm, members: &str) -> JoseError {
     JoseError::UnsupportedAlgorithm(format!(
-        "{} addresses several recipients by agreeing a separate key-encryption key with each, \
-         which needs one epk per recipient; RFC 7516 gives a recipient element no protected \
-         header of its own to carry it in, so only the single-recipient (flattened and compact) \
-         forms are supported for this algorithm",
+        "{} needs one {members} value per recipient, and RFC 7516 gives a recipient element no \
+         protected header of its own to carry it in, so only the single-recipient (flattened and \
+         compact) forms are supported for this algorithm",
         alg.as_str()
     ))
 }
@@ -1277,6 +1310,249 @@ fn agree_wrap_recover(
     Ok(Zeroizing::new(cek))
 }
 
+/// What AES-GCM key management produces: the wrapped CEK, plus the two values the
+/// protected header must carry.
+struct GcmKeyWrap {
+    /// `JWE Encrypted Key` — the AES-GCM ciphertext (RFC 7518 §4.7).
+    encrypted_key: Vec<u8>,
+    /// The 96-bit IV, published as the `iv` header member.
+    iv: Vec<u8>,
+    /// The 128-bit authentication tag, published as the `tag` header member.
+    tag: Vec<u8>,
+}
+
+/// Run AES-GCM at the key-wrap sizes, with the parameters RFC 7518 §4.7 fixes.
+///
+/// One macro for both directions because the only per-direction difference is
+/// which of the tag/iv values is input and which is output; the three key sizes,
+/// the empty AAD and the 96-bit nonce are identical, and having them spelled once
+/// is what keeps the wrap and the unwrap from disagreeing about the AAD — the
+/// single way to get this algorithm wrong without the tag catching it.
+///
+/// The sizes are checked before the primitive is called rather than left to
+/// `Nonce::from_slice`/`Tag::from_slice`, which **panic** on a wrong length. The
+/// message path cannot reach that (both members are read through
+/// `required_header_bytes`, which enforces 12 and 16), but a length check belongs
+/// in the function that has the lengths, so the panic is not reachable at all and a
+/// future caller cannot introduce it.
+macro_rules! gcm_kw_aead {
+    (encrypt $kek:expr, $iv:expr, $buffer:expr) => {{
+        use aes_gcm::aead::{AeadInPlace, KeyInit, Nonce};
+        let gcm_err = |e: aes_gcm::Error| {
+            JoseError::Crypto(kryptering::Error::Crypto(format!("AES-GCM: {e}")))
+        };
+        let key_err = |e| JoseError::Key(format!("AES-GCM key init: {e}"));
+        let (kek, iv, buffer) = ($kek, $iv, $buffer);
+        if iv.len() != 12 {
+            return Err(JoseError::Key(format!(
+                "internal error: AES-GCM key wrap called with a {}-octet IV, not 12",
+                iv.len()
+            )));
+        }
+        match kek.len() {
+            16 => {
+                type Cipher = aes_gcm::Aes128Gcm;
+                let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
+                cipher
+                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .map_err(gcm_err)?
+            }
+            24 => {
+                use aes_gcm::aead::consts::U12;
+                type Cipher = aes_gcm::AesGcm<aes::Aes192, U12>;
+                let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
+                cipher
+                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .map_err(gcm_err)?
+            }
+            32 => {
+                type Cipher = aes_gcm::Aes256Gcm;
+                let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
+                cipher
+                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .map_err(gcm_err)?
+            }
+            other => {
+                // `check_kek_size` has already refused this; getting here means a
+                // call site skipped it, which is an internal error, not bad input.
+                return Err(JoseError::Key(format!(
+                    "internal error: AES-GCM key wrap called with a {other}-byte key"
+                )));
+            }
+        }
+    }};
+    (decrypt $kek:expr, $iv:expr, $buffer:expr, $tag:expr) => {{
+        use aes_gcm::aead::{AeadInPlace, KeyInit, Nonce, Tag};
+        let gcm_err = |e: aes_gcm::Error| {
+            JoseError::Crypto(kryptering::Error::Crypto(format!("AES-GCM: {e}")))
+        };
+        let key_err = |e| JoseError::Key(format!("AES-GCM key init: {e}"));
+        let (kek, iv, buffer, tag) = ($kek, $iv, $buffer, $tag);
+        // Same reason as on the encrypt side: the primitive's constructors assert
+        // rather than report, and a message-supplied length must never reach one.
+        if iv.len() != 12 {
+            return Err(JoseError::Key(format!(
+                "AES-GCM key unwrap: `iv` must be 12 octets, got {}",
+                iv.len()
+            )));
+        }
+        if tag.len() != 16 {
+            return Err(JoseError::Key(format!(
+                "AES-GCM key unwrap: `tag` must be 16 octets, got {}",
+                tag.len()
+            )));
+        }
+        match kek.len() {
+            16 => {
+                type Cipher = aes_gcm::Aes128Gcm;
+                Cipher::new_from_slice(kek)
+                    .map_err(key_err)?
+                    .decrypt_in_place_detached(
+                        Nonce::<Cipher>::from_slice(iv),
+                        b"",
+                        buffer,
+                        Tag::<Cipher>::from_slice(tag),
+                    )
+                    .map_err(gcm_err)?
+            }
+            24 => {
+                use aes_gcm::aead::consts::U12;
+                type Cipher = aes_gcm::AesGcm<aes::Aes192, U12>;
+                Cipher::new_from_slice(kek)
+                    .map_err(key_err)?
+                    .decrypt_in_place_detached(
+                        Nonce::<Cipher>::from_slice(iv),
+                        b"",
+                        buffer,
+                        Tag::<Cipher>::from_slice(tag),
+                    )
+                    .map_err(gcm_err)?
+            }
+            32 => {
+                type Cipher = aes_gcm::Aes256Gcm;
+                Cipher::new_from_slice(kek)
+                    .map_err(key_err)?
+                    .decrypt_in_place_detached(
+                        Nonce::<Cipher>::from_slice(iv),
+                        b"",
+                        buffer,
+                        Tag::<Cipher>::from_slice(tag),
+                    )
+                    .map_err(gcm_err)?
+            }
+            other => {
+                return Err(JoseError::Key(format!(
+                    "internal error: AES-GCM key unwrap called with a {other}-byte key"
+                )))
+            }
+        }
+    }};
+}
+
+/// Encrypt the CEK with AES-GCM (RFC 7518 §4.7).
+///
+/// The RFC fixes every parameter that an implementation might otherwise be
+/// tempted to choose: a 96-bit IV (which is also what makes a random IV safe for
+/// GCM), a 128-bit tag regardless of key size, and the **empty octet string** as
+/// additional authenticated data. That last point is why the wrap is what it is:
+/// the header values that carry the IV and tag are authenticated by the *content*
+/// tag as AAD, not by anything the key wrap authenticates itself.
+fn gcm_kw_wrap(kek: &[u8], cek: &[u8]) -> Result<GcmKeyWrap> {
+    let mut iv = [0u8; 12];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut iv);
+    let mut buffer = cek.to_vec();
+    let tag = gcm_kw_aead!(encrypt kek, &iv, &mut buffer);
+    Ok(GcmKeyWrap {
+        encrypted_key: buffer,
+        iv: iv.to_vec(),
+        tag: tag.to_vec(),
+    })
+}
+
+/// Recover the CEK from an AES-GCM wrapped key.
+///
+/// A failed authentication is reported as a `JoseError::Crypto` rather than
+/// silently substituting a random CEK (contrast RSA-OAEP's implicit rejection):
+/// here the recipient's key only unwraps a key the message carries, and the
+/// content tag would fail regardless, so the extra indirection would hide nothing.
+fn gcm_kw_unwrap(kek: &[u8], iv: &[u8], tag: &[u8], encrypted_key: &[u8]) -> Result<Vec<u8>> {
+    let mut buffer = encrypted_key.to_vec();
+    gcm_kw_aead!(decrypt kek, iv, &mut buffer, tag);
+    Ok(buffer)
+}
+
+/// Publish AES-GCM key management's `iv` and `tag` in the protected header.
+///
+/// Both members are mandatory for these algorithms (RFC 7518 §4.7.1) and they are
+/// **this crate's to generate**: a caller that supplied them would be choosing the
+/// IV of a key wrap, so `validate_encrypt_header` refuses them from a caller for
+/// every algorithm and they are inserted here instead — before serialization, so
+/// they are authenticated as part of the AAD rather than merely present.
+fn with_gcm_members(
+    header: &JoseHeader,
+    wrap: &GcmKeyWrap,
+    alg: JweAlgorithm,
+) -> Result<JoseHeader> {
+    let mut header = header.clone();
+    // Checked here as well as in `validate_encrypt_header`, because this is the
+    // function that publishes the members: inserting over a caller's value would
+    // silently discard a supplied IV, which is the thing the rule exists to prevent.
+    for member in ["iv", "tag"] {
+        if header.extra.contains_key(member) {
+            return Err(JoseError::InvalidHeader(format!(
+                "{}: `{member}` is generated by this crate for AES-GCM key management \
+                 (RFC 7518 §4.7.1) and cannot be supplied by the caller",
+                alg.as_str()
+            )));
+        }
+    }
+    header.extra.insert(
+        "iv".into(),
+        serde_json::json!(crate::base64url::encode(&wrap.iv)),
+    );
+    header.extra.insert(
+        "tag".into(),
+        serde_json::json!(crate::base64url::encode(&wrap.tag)),
+    );
+    Ok(header)
+}
+
+/// A mandatory base64url header member of a fixed length, read from the
+/// authenticated protected header.
+///
+/// `iv` and `tag` for AES-GCM key management are the same values as the header
+/// members of those names — and they are *not* the envelope's own
+/// `iv`/`tag` members, which belong to the content encryption (RFC 7516 §7.2). A
+/// message that puts them in an unprotected position is refused at parse time
+/// (ADR 0013), so by the time a key-management step runs they are authenticated.
+fn required_header_bytes(
+    header: &JoseHeader,
+    name: &str,
+    len: usize,
+    alg: JweAlgorithm,
+) -> Result<Vec<u8>> {
+    let value = header.extra.get(name).ok_or_else(|| {
+        JoseError::InvalidHeader(format!(
+            "{alg} requires a {name} header member (RFC 7518 §4.7.1), which is absent",
+            alg = alg.as_str()
+        ))
+    })?;
+    let text = value.as_str().ok_or_else(|| {
+        JoseError::InvalidHeader(format!(
+            "{name} must be a base64url string (RFC 7518 §4.7.1)"
+        ))
+    })?;
+    let bytes = crate::base64url::decode(text)?;
+    if bytes.len() != len {
+        return Err(JoseError::InvalidHeader(format!(
+            "{name} must be {len} octets for {}, got {}",
+            alg.as_str(),
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Check a `dir` key against the CEK size the content algorithm requires.
 fn check_dir_key(key: &[u8], enc: JweEncryption) -> Result<()> {
     let cek_len = enc.cek_size();
@@ -1370,6 +1646,29 @@ pub(crate) fn recover_cek(
             Ok(cek)
         }
 
+        // AES-GCM key management (RFC 7518 §4.7): the CEK is carried, encrypted
+        // under the algorithm's key, with the IV and authentication tag as header
+        // members rather than envelope members. They are read from the protected
+        // header — an unprotected `iv`/`tag` was already refused at parse time
+        // (ADR 0013) — and they are the *key wrap's*, not the content encryption's,
+        // which is why the envelope's own `iv`/`tag` never come through here.
+        other if aes_gcm_kw_key_len(other).is_some() => {
+            check_kek_size(alg, key)?;
+            let iv = required_header_bytes(header, "iv", 12, alg)?;
+            let tag = required_header_bytes(header, "tag", 16, alg)?;
+            let cek = Zeroizing::new(gcm_kw_unwrap(key, &iv, &tag, encrypted_key)?);
+            if cek.len() != cek_len {
+                return Err(JoseError::Key(format!(
+                    "{}: unwrapped CEK length {} does not match the {} bytes {} requires",
+                    alg.as_str(),
+                    cek.len(),
+                    cek_len,
+                    enc.as_str()
+                )));
+            }
+            Ok(cek)
+        }
+
         JweAlgorithm::RsaOaep256 => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
 
         #[cfg(feature = "deprecated")]
@@ -1429,6 +1728,9 @@ pub(crate) fn check_kek_size(alg: JweAlgorithm, key: &[u8]) -> Result<()> {
         JweAlgorithm::A128KW => 16,
         JweAlgorithm::A192KW => 24,
         JweAlgorithm::A256KW => 32,
+        JweAlgorithm::A128Gcmkw => 16,
+        JweAlgorithm::A192Gcmkw => 24,
+        JweAlgorithm::A256Gcmkw => 32,
         _ => return Ok(()),
     };
     if key.len() != expected {
@@ -1618,7 +1920,13 @@ pub(crate) fn jwk_to_jwe_key_bytes(
     for_decrypt: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
     match alg {
-        JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
+        JweAlgorithm::Dir
+        | JweAlgorithm::A128KW
+        | JweAlgorithm::A192KW
+        | JweAlgorithm::A256KW
+        | JweAlgorithm::A128Gcmkw
+        | JweAlgorithm::A192Gcmkw
+        | JweAlgorithm::A256Gcmkw => {
             if jwk.kty.as_str() != "oct" {
                 return Err(JoseError::Key(format!(
                     "JWE alg {} requires kty oct, got {}",
@@ -1677,6 +1985,35 @@ pub(crate) struct EncryptedCore {
     pub ciphertext: Vec<u8>,
     /// Content authentication tag.
     pub tag: Vec<u8>,
+}
+
+/// Key management that had to happen **before** the protected header was serialized.
+///
+/// Three of the four shapes exist because a mode's key-material output is also
+/// header content: the ephemeral public key (`epk`) and the AES-GCM wrap's `iv`/
+/// `tag` have to be inside the protected header, and that serialized header *is*
+/// the AEAD's additional authenticated data. Doing the key work afterwards would
+/// either leave those members unauthenticated or produce a header whose bytes no
+/// longer match what was authenticated — so the enum records not just what the CEK
+/// is, but what the header now says.
+enum Prepared {
+    /// Direct agreement: the CEK **is** the agreed key, and nothing is conveyed as
+    /// the encrypted key (RFC 7518 §4.6).
+    Agreed { cek: Zeroizing<Vec<u8>> },
+    /// Agreement with key wrapping: the ephemeral key is already published; the
+    /// CEK is generated normally and wrapped with the agreed KEK. Boxed because
+    /// the sender holds both halves of the pair and a whole header, which would
+    /// otherwise size up every other variant of this enum.
+    AgreementWrap { sender: Box<AgreementSender> },
+    /// AES-GCM key management: already wrapped, because the IV and tag it produced
+    /// are in the header.
+    GcmWrapped {
+        cek: Zeroizing<Vec<u8>>,
+        encrypted_key: Vec<u8>,
+    },
+    /// `dir`, RFC 3394 AES-KW and RSA-OAEP: key bytes in, wrapped after the header
+    /// is serialized, since none of them publishes anything in the header.
+    ByteKey,
 }
 
 /// Build the content-authentication input (RFC 7516 §5.1 step 14).
@@ -1820,11 +2157,7 @@ pub(crate) fn encrypt_core_multi(
     // because publishing the ephemeral public key *changes* the protected header
     // that is then used as the AAD input. `Cow` so that every other algorithm
     // keeps borrowing the caller's header.
-    let (header, agreed, sender): (
-        std::borrow::Cow<'_, JoseHeader>,
-        Option<Zeroizing<Vec<u8>>>,
-        Option<AgreementSender>,
-    ) = match (first, alg) {
+    let (header, prepared): (std::borrow::Cow<'_, JoseHeader>, Prepared) = match (first, alg) {
         (KeyMaterial::Jwk(recipient), JweAlgorithm::EcdhEs) => {
             if !rest.is_empty() {
                 // The agreed key *is* the CEK, and it is agreed with exactly
@@ -1833,7 +2166,7 @@ pub(crate) fn encrypt_core_multi(
                 return Err(direct_agreement_not_multi(alg));
             }
             let (header, cek) = agree_direct(header, recipient, enc)?;
-            (std::borrow::Cow::Owned(header), Some(cek), None)
+            (std::borrow::Cow::Owned(header), Prepared::Agreed { cek })
         }
         // Agreement with key wrapping: the CEK is generated normally and wrapped
         // per recipient, so all this mode needs up front is the ephemeral key to
@@ -1845,8 +2178,29 @@ pub(crate) fn encrypt_core_multi(
             let sender = agreement_sender(header, recipient)?;
             (
                 std::borrow::Cow::Owned(sender.header.clone()),
-                None,
-                Some(sender),
+                Prepared::AgreementWrap {
+                    sender: Box::new(sender),
+                },
+            )
+        }
+        // AES-GCM key management: the wrap happens here rather than below because
+        // its IV and authentication tag are *header members* (RFC 7518 §4.7.1), so
+        // they have to exist before the header is serialized — and being in the
+        // header, they are then authenticated as AAD.
+        (KeyMaterial::Bytes(kek), other) if aes_gcm_kw_key_len(other).is_some() => {
+            if !rest.is_empty() {
+                return Err(per_recipient_member_unsupported(other, "iv and tag"));
+            }
+            check_kek_size(alg, kek)?;
+            let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
+            let wrapped = gcm_kw_wrap(kek, &cek)?;
+            let header = with_gcm_members(header, &wrapped, alg)?;
+            (
+                std::borrow::Cow::Owned(header),
+                Prepared::GcmWrapped {
+                    cek,
+                    encrypted_key: wrapped.encrypted_key,
+                },
             )
         }
         (KeyMaterial::Jwk(_), other) => {
@@ -1861,7 +2215,7 @@ pub(crate) fn encrypt_core_multi(
                 other.as_str()
             )))
         }
-        _ => (std::borrow::Cow::Borrowed(header), None, None),
+        _ => (std::borrow::Cow::Borrowed(header), Prepared::ByteKey),
     };
     let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
@@ -1878,15 +2232,17 @@ pub(crate) fn encrypt_core_multi(
 
     // 1. Generate or use the CEK, wrap it for the first recipient. Direct key
     // agreement has already agreed it, and conveys nothing; agreement with
-    // wrapping generates it normally and wraps it with the agreed KEK.
-    let (cek, first_wrapped) = match (agreed, sender) {
-        (Some(cek), _) => (cek, Vec::new()),
-        (None, Some(sender)) => {
+    // wrapping and AES-GCM key management both generated the CEK normally, the
+    // latter already having wrapped it so its header members could be published.
+    let (cek, first_wrapped) = match prepared {
+        Prepared::Agreed { cek } => (cek, Vec::new()),
+        Prepared::GcmWrapped { cek, encrypted_key } => (cek, encrypted_key),
+        Prepared::AgreementWrap { sender } => {
             let cek = Zeroizing::new(content::random_bytes(enc.cek_size()));
             let wrapped = sender.wrap(alg, &cek)?;
             (cek, wrapped)
         }
-        (None, None) => produce_cek(first.bytes()?, alg, enc)?,
+        Prepared::ByteKey => produce_cek(first.bytes()?, alg, enc)?,
     };
 
     // 2. Content encryption — once, over the shared AAD input.
@@ -1914,7 +2270,196 @@ pub(crate) fn encrypt_core_multi(
 
 #[cfg(test)]
 mod tests {
-    use super::other_info;
+    use super::{
+        aes_gcm_kw_key_len, agreement_kek_len, gcm_kw_unwrap, gcm_kw_wrap, jwe_alg_to_keywrap,
+        other_info, per_recipient_member_unsupported, required_header_bytes, with_gcm_members,
+        GcmKeyWrap,
+    };
+    use crate::algorithm::{JweAlgorithm, JweEncryption};
+    use crate::header::JoseHeader;
+
+    /// A header for a key-management mode that publishes wrap members, so the
+    /// member-reading rules can be tested without a whole message.
+    fn gcm_header(alg: JweAlgorithm) -> JoseHeader {
+        JoseHeader::for_jwe(alg, JweEncryption::A128GCM)
+    }
+
+    #[test]
+    fn the_gcm_key_management_algorithms_name_their_key_length() {
+        // `alg` fixes the key-encryption key, `enc` the content key. Nothing else
+        // decides these, and reading either off the wrong field would still decrypt
+        // in the single case where the two lengths coincide (A128GCMKW + A128GCM),
+        // which is exactly why the pairing is asserted separately.
+        assert_eq!(aes_gcm_kw_key_len(JweAlgorithm::A128Gcmkw), Some(16));
+        assert_eq!(aes_gcm_kw_key_len(JweAlgorithm::A192Gcmkw), Some(24));
+        assert_eq!(aes_gcm_kw_key_len(JweAlgorithm::A256Gcmkw), Some(32));
+        // Not key-management modes at all, so no length to report.
+        for alg in [
+            JweAlgorithm::Dir,
+            JweAlgorithm::A128KW,
+            JweAlgorithm::EcdhEs,
+            JweAlgorithm::EcdhEsA128kw,
+            JweAlgorithm::RsaOaep256,
+            JweAlgorithm::Pbes2Hs256A128kw,
+        ] {
+            assert_eq!(aes_gcm_kw_key_len(alg), None, "{alg:?}");
+        }
+    }
+
+    #[test]
+    fn the_rfc_3394_and_agreement_algorithms_share_one_key_wrap_mapping() {
+        // There is one spelling of "wrap with AES-KW" in this crate, so agreement
+        // modes cannot acquire a second, incompatible one. `ECDH-ES` itself is
+        // refused: its agreed key is the content key, and wrapping it would be a
+        // different key-management mode wearing the same name.
+        for alg in [
+            JweAlgorithm::A128KW,
+            JweAlgorithm::A192KW,
+            JweAlgorithm::A256KW,
+            JweAlgorithm::EcdhEsA128kw,
+            JweAlgorithm::EcdhEsA192kw,
+            JweAlgorithm::EcdhEsA256kw,
+        ] {
+            assert!(jwe_alg_to_keywrap(alg).is_ok(), "{alg:?}");
+        }
+        assert!(jwe_alg_to_keywrap(JweAlgorithm::EcdhEs).is_err());
+        assert!(jwe_alg_to_keywrap(JweAlgorithm::Dir).is_err());
+
+        // And the wrapping agreement modes are recognised as such, by the length
+        // of the key they agree — not by the content algorithm.
+        assert_eq!(agreement_kek_len(JweAlgorithm::EcdhEsA128kw), Some(16));
+        assert_eq!(agreement_kek_len(JweAlgorithm::EcdhEsA192kw), Some(24));
+        assert_eq!(agreement_kek_len(JweAlgorithm::EcdhEsA256kw), Some(32));
+        assert_eq!(agreement_kek_len(JweAlgorithm::EcdhEs), None);
+        assert_eq!(agreement_kek_len(JweAlgorithm::A128Gcmkw), None);
+    }
+
+    #[test]
+    fn a_gcm_wrap_round_trips_and_refuses_every_edit() {
+        for key_len in [16, 24, 32] {
+            let kek = vec![0x42u8; key_len];
+            // Any bytes will do as a stand-in CEK; only the framing matters here.
+            let cek = (0u8..40).collect::<Vec<u8>>();
+            let wrapped = gcm_kw_wrap(&kek, &cek).unwrap();
+            assert_eq!(
+                wrapped.encrypted_key.len(),
+                cek.len(),
+                "GCM does not expand"
+            );
+            assert_eq!(wrapped.iv.len(), 12, "RFC 7518 §4.7 requires a 96-bit IV");
+            assert_eq!(
+                wrapped.tag.len(),
+                16,
+                "RFC 7518 §4.7 requires a 128-bit tag"
+            );
+            assert_eq!(
+                gcm_kw_unwrap(&kek, &wrapped.iv, &wrapped.tag, &wrapped.encrypted_key).unwrap(),
+                cek
+            );
+
+            // Two wraps of the same CEK share no prefix, because the IV is fresh.
+            let again = gcm_kw_wrap(&kek, &cek).unwrap();
+            assert_ne!(again.iv, wrapped.iv);
+            assert_ne!(again.encrypted_key, wrapped.encrypted_key);
+
+            // Each of the three parts is load-bearing.
+            let mut bad_key = kek.clone();
+            bad_key[0] ^= 1;
+            assert!(
+                gcm_kw_unwrap(&bad_key, &wrapped.iv, &wrapped.tag, &wrapped.encrypted_key).is_err()
+            );
+            let mut bad_iv = wrapped.iv.clone();
+            bad_iv[0] ^= 1;
+            assert!(gcm_kw_unwrap(&kek, &bad_iv, &wrapped.tag, &wrapped.encrypted_key).is_err());
+            let mut bad_tag = wrapped.tag.clone();
+            bad_tag[0] ^= 1;
+            assert!(gcm_kw_unwrap(&kek, &wrapped.iv, &bad_tag, &wrapped.encrypted_key).is_err());
+            let mut bad_ct = wrapped.encrypted_key.clone();
+            bad_ct[0] ^= 1;
+            assert!(
+                gcm_kw_unwrap(&kek, &wrapped.iv, &wrapped.tag, &bad_ct).is_err(),
+                "AES-GCM authenticates, so an edited ciphertext cannot pass"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrap_rejects_keys_and_parts_of_the_wrong_shape() {
+        // Not a truncated hash or a padded block: AES-GCM wants exact sizes, and
+        // guessing here would be guessing at a key.
+        assert!(gcm_kw_wrap(&[0u8; 15], b"cek").is_err());
+        assert!(gcm_kw_wrap(&[0u8; 33], b"cek").is_err());
+        assert!(gcm_kw_unwrap(&[0u8; 15], &[0u8; 12], &[0u8; 16], b"cek").is_err());
+        assert!(gcm_kw_unwrap(&[0u8; 16], &[0u8; 11], &[0u8; 16], b"cek").is_err());
+        assert!(gcm_kw_unwrap(&[0u8; 16], &[0u8; 12], &[0u8; 15], b"cek").is_err());
+    }
+
+    #[test]
+    fn the_mandatory_members_are_read_or_refused_by_name() {
+        let alg = JweAlgorithm::A128Gcmkw;
+        let mut header = gcm_header(alg);
+        let missing = required_header_bytes(&header, "iv", 12, alg)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("iv"), "{missing}");
+        assert!(missing.contains("requires"), "{missing}");
+
+        header.extra.insert("iv".into(), serde_json::json!(12));
+        let wrong_type = required_header_bytes(&header, "iv", 12, alg)
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_type.contains("base64url string"), "{wrong_type}");
+
+        header.extra.insert("iv".into(), serde_json::json!("AAAA"));
+        let wrong_len = required_header_bytes(&header, "iv", 12, alg)
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_len.contains("iv must be 12 octets"), "{wrong_len}");
+
+        header.extra.insert(
+            "iv".into(),
+            serde_json::json!(crate::base64url::encode(&[7u8; 12])),
+        );
+        assert_eq!(
+            required_header_bytes(&header, "iv", 12, alg).unwrap(),
+            vec![7u8; 12]
+        );
+    }
+
+    #[test]
+    fn wrap_members_are_generated_here_and_cannot_be_supplied() {
+        let alg = JweAlgorithm::A128Gcmkw;
+        let wrapped = GcmKeyWrap {
+            encrypted_key: vec![1u8; 40],
+            iv: vec![2u8; 12],
+            tag: vec![3u8; 16],
+        };
+        let header = with_gcm_members(&gcm_header(alg), &wrapped, alg).unwrap();
+        assert!(header.extra.contains_key("iv"));
+        assert!(header.extra.contains_key("tag"));
+
+        for member in ["iv", "tag"] {
+            let mut caller = gcm_header(alg);
+            caller
+                .extra
+                .insert(member.into(), serde_json::json!("AAAA"));
+            let err = with_gcm_members(&caller, &wrapped, alg)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(member), "{member}: {err}");
+        }
+    }
+
+    #[test]
+    fn several_recipients_are_refused_naming_the_member_at_issue() {
+        // The same refusal serves `epk` and `iv`/`tag`, so a caller gets a reason
+        // rather than a generic "unsupported".
+        let err =
+            per_recipient_member_unsupported(JweAlgorithm::A128Gcmkw, "iv and tag").to_string();
+        assert!(err.contains("iv and tag"), "{err}");
+        assert!(err.contains("no protected header of its own"), "{err}");
+        assert!(err.contains("single-recipient"), "{err}");
+    }
 
     #[test]
     fn other_info_matches_the_rfc_7518_appendix_c_bytes() {

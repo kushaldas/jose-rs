@@ -5,7 +5,7 @@
 //!
 //! Subcommands:
 //!   gen-key        --alg <ALG> [--enc <ENC>] (stdin: -)      -> private JWK
-//!       (JWE: --alg A128KW|A192KW|A256KW, or --alg dir --enc <ENC>)
+//!       (JWE: --alg A128KW|A192KW|A256KW|A128GCMKW|..., or --alg dir --enc <ENC>)
 //!   export-pub                             (stdin: private JWK) -> public JWK
 //!   sign-compact   --alg <ALG>            (stdin: {jwk, payload_b64u, header?}) -> {jws}
 //!   verify-compact --alg <ALG>            (stdin: {jwk, jws}) -> {ok, payload_b64u, protected_header}
@@ -137,7 +137,9 @@ fn emit<T: Serialize>(v: &T) -> Result<()> {
 
 fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
     let jwk: Jwk = match alg {
-        "A128KW" | "A192KW" | "A256KW" => jose_rs::jwk::generate_symmetric_for_alg(alg)?,
+        "A128KW" | "A192KW" | "A256KW" | "A128GCMKW" | "A192GCMKW" | "A256GCMKW" => {
+            jose_rs::jwk::generate_symmetric_for_alg(alg)?
+        }
         "dir" => {
             let enc = enc.ok_or_else(|| anyhow!("gen-key --alg dir requires --enc"))?;
             // generate_direct_symmetric pins alg="dir" and sizes k to the CEK.

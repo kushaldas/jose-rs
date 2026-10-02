@@ -62,7 +62,11 @@ function b64uDecode(s) {
   return new Uint8Array(Buffer.from(s, 'base64url'))
 }
 
-const JWE_KW_ALGS = new Set(['A128KW', 'A192KW', 'A256KW'])
+// Symmetric JWE key-management algorithms whose key size follows the `alg`.
+const JWE_KW_ALGS = new Set([
+  'A128KW', 'A192KW', 'A256KW',
+  'A128GCMKW', 'A192GCMKW', 'A256GCMKW',
+])
 
 async function genKey(alg, enc, crv) {
   if (!alg) throw new Error('--alg is required')
