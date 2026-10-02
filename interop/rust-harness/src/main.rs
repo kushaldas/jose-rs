@@ -147,6 +147,10 @@ fn run() -> Result<()> {
         }
         "export-pem" => export_pem(&require_pem_kind(pem_kind)?),
         "sign-pem" => sign_pem(&require_alg(alg)?),
+        "sign-flattened-jwk" => sign_flattened_jwk(&require_alg(alg)?),
+        "verify-flattened-jwk" => verify_flattened_jwk(),
+        "sign-general-jwk" => sign_general_jwk(),
+        "verify-general-jwk" => verify_general_jwk(),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -429,6 +433,225 @@ fn verify_compact(alg: &str) -> Result<()> {
         protected_header: header,
     })
 }
+
+// ---------------------------------------------------------------------------
+// JWK-aware JSON serializations (flattened / general JWS)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SignFlattenedJwkInput {
+    jwk: Jwk,
+    payload_b64u: String,
+    /// Extra protected-header members (`kid`, `typ`, ...). `alg` comes from `--alg`.
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+    /// Per-signature unprotected `header` member. Not integrity-protected.
+    #[serde(default)]
+    unprotected: Option<Value>,
+    /// RFC 7797 unencoded payload: the caller supplies `b64: false` in `header`
+    /// and sets this flag so the option and the header cannot disagree.
+    #[serde(default)]
+    b64_false: bool,
+    /// Emit a detached JWS (no `payload` member).
+    #[serde(default)]
+    detach: bool,
+}
+
+#[derive(Serialize)]
+struct SignFlattenedOutput {
+    jws: jose_rs::jws::json::FlattenedJws,
+}
+
+fn sign_flattened_jwk(alg: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: SignFlattenedJwkInput = serde_json::from_str(&raw)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(input.payload_b64u.as_bytes())
+        .context("decoding payload_b64u")?;
+    let header = build_header(JoseHeader::new(alg), input.header)?;
+    let mut opts = jose_rs::jws::SignOptions::new();
+    if input.b64_false {
+        opts = opts.with_b64(false);
+    }
+    let jws = if input.detach {
+        jose_rs::jws::json::sign_flattened_detached_with_jwk_opts(
+            &input.jwk,
+            &payload,
+            &header,
+            input.unprotected,
+            &opts,
+        )?
+    } else {
+        jose_rs::jws::json::sign_flattened_with_jwk_opts(
+            &input.jwk,
+            &payload,
+            &header,
+            input.unprotected,
+            &opts,
+        )?
+    };
+    emit(&SignFlattenedOutput { jws })
+}
+
+#[derive(Deserialize)]
+struct VerifyFlattenedJwkInput {
+    jwk: Jwk,
+    jws: jose_rs::jws::json::FlattenedJws,
+    /// Out-of-band payload for a detached JWS.
+    #[serde(default)]
+    detached_payload_b64u: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VerifyPayloadOutput {
+    payload_b64u: String,
+}
+
+fn verify_flattened_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: VerifyFlattenedJwkInput = serde_json::from_str(&raw)?;
+    let detached = match &input.detached_payload_b64u {
+        Some(text) => Some(
+            URL_SAFE_NO_PAD
+                .decode(text.as_bytes())
+                .context("decoding detached_payload_b64u")?,
+        ),
+        None => None,
+    };
+    let payload = match detached {
+        Some(bytes) => jose_rs::jws::json::verify_flattened_detached_with_jwk(
+            &input.jwk,
+            &input.jws,
+            &bytes,
+        )?,
+        None => jose_rs::jws::json::verify_flattened_with_jwk(&input.jwk, &input.jws)?,
+    };
+    emit(&VerifyPayloadOutput {
+        payload_b64u: URL_SAFE_NO_PAD.encode(&payload),
+    })
+}
+
+#[derive(Deserialize)]
+struct GeneralJwkEntry {
+    jwk: Jwk,
+    /// The `alg` this signature's protected header carries; must match `jwk.alg`.
+    alg: String,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    unprotected: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct SignGeneralJwkInput {
+    entries: Vec<GeneralJwkEntry>,
+    payload_b64u: String,
+    #[serde(default)]
+    detach: bool,
+}
+
+#[derive(Serialize)]
+struct SignGeneralOutput {
+    jws: jose_rs::jws::json::GeneralJws,
+}
+
+fn sign_general_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: SignGeneralJwkInput = serde_json::from_str(&raw)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(input.payload_b64u.as_bytes())
+        .context("decoding payload_b64u")?;
+    // Headers must outlive the signer entries, so build them first and borrow.
+    let headers: Vec<JoseHeader> = input
+        .entries
+        .iter()
+        .map(|entry| build_header(JoseHeader::new(&entry.alg), entry.header.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    let entries: Vec<jose_rs::jws::json::GeneralJwkSigner<'_>> = input
+        .entries
+        .iter()
+        .zip(headers.iter())
+        .map(|(entry, header)| jose_rs::jws::json::GeneralJwkSigner {
+            jwk: &entry.jwk,
+            protected: header,
+            unprotected: entry.unprotected.clone(),
+            options: jose_rs::jws::SignOptions::new(),
+        })
+        .collect();
+    let jws = jose_rs::jws::json::sign_general_with_jwks(&entries, &payload, !input.detach)?;
+    emit(&SignGeneralOutput { jws })
+}
+
+#[derive(Deserialize)]
+struct VerifyGeneralJwkInput {
+    jwks: Vec<Jwk>,
+    jws: jose_rs::jws::json::GeneralJws,
+    #[serde(default)]
+    detached_payload_b64u: Option<String>,
+    /// "any" or "all" — the caller states the success policy, the library does not guess.
+    #[serde(default = "default_policy")]
+    policy: String,
+}
+
+fn default_policy() -> String {
+    "any".into()
+}
+
+#[derive(Serialize)]
+struct GeneralSignatureReport {
+    index: usize,
+    verified: bool,
+    attempted: bool,
+    key_index: Option<usize>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VerifyGeneralOutput {
+    payload_b64u: Option<String>,
+    results: Vec<GeneralSignatureReport>,
+}
+
+fn verify_general_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: VerifyGeneralJwkInput = serde_json::from_str(&raw)?;
+    let policy = match input.policy.as_str() {
+        "any" => jose_rs::jws::json::SignaturePolicy::Any,
+        "all" => jose_rs::jws::json::SignaturePolicy::All,
+        other => bail!("policy must be any or all, got {other:?}"),
+    };
+    let detached = match &input.detached_payload_b64u {
+        Some(text) => Some(
+            URL_SAFE_NO_PAD
+                .decode(text.as_bytes())
+                .context("decoding detached_payload_b64u")?,
+        ),
+        None => None,
+    };
+    let refs: Vec<&Jwk> = input.jwks.iter().collect();
+    let report = jose_rs::jws::json::verify_general_with_jwks(
+        &refs,
+        &input.jws,
+        detached.as_deref(),
+        &jose_rs::jws::VerifyOptions::new(),
+        policy,
+    )?;
+    emit(&VerifyGeneralOutput {
+        payload_b64u: report.payload.as_ref().map(|p| URL_SAFE_NO_PAD.encode(p)),
+        results: report
+            .results
+            .iter()
+            .map(|result| GeneralSignatureReport {
+                index: result.index,
+                verified: result.verified,
+                attempted: result.attempted,
+                key_index: result.key_index,
+                error: result.error.clone(),
+            })
+            .collect(),
+    })
+}
+
 
 #[derive(Deserialize)]
 struct SignJwtInput {

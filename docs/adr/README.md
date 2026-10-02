@@ -33,3 +33,4 @@ history.
 | [0027](0027-thumbprint-uri-format-is-the-test.md) | A thumbprint URI is a format, so the RFC's example is the test | Accepted |
 | [0028](0028-capability-tables-are-checked-by-doing.md) | A capability table nobody runs is a rumour | Accepted |
 | [0029](0029-one-token-one-reading.md) | One token, one reading: duplicate claim members are refused | Accepted |
+| [0030](0030-json-jws-uses-the-compact-key-rules.md) | The JSON serialization uses the compact path's key rules, literally | Accepted |

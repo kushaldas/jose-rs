@@ -19,6 +19,23 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Added
 
+- JWK-aware JSON JWS APIs (L2): `jws::json::{sign_flattened_with_jwk,
+  sign_flattened_with_jwk_opts, sign_flattened_detached_with_jwk,
+  sign_flattened_detached_with_jwk_opts, verify_flattened_with_jwk,
+  verify_flattened_detached_with_jwk, verify_flattened_with_jwk_opts,
+  sign_general_with_jwk_pairs, sign_general_with_jwks, verify_general_with_jwks,
+  verify_general_with_jwk_any, verify_general_with_jwk_all}` plus
+  `SignaturePolicy`, `GeneralJwkSigner`, `JwkSignatureResult`,
+  `GeneralVerifyReport` and `MAX_CANDIDATE_KEYS`. These share the compact
+  path's key rule set *by calling the same function*, so `use`/`key_ops`,
+  pinned-`alg` matching and per-algorithm strength checks cannot drift
+  between serializations. Multi-signature success is now an explicit
+  `SignaturePolicy::Any`/`All` choice, and the per-signature report
+  distinguishes "rejected" from "not attempted". The low-level
+  `&dyn Signer`/`&dyn Verifier` APIs are unchanged. See ADR 0030.
+
+### Added
+
 - Executable capability reporting (L0): `jose_rs::capability` reports, for this build,
   what each identifier can do — `Supported`, `RequiresFeature`, `RecognizedNotSupported`
   and `RefusedByPolicy(reason)` — across JWS algorithms, JWE key management and content

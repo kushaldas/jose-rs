@@ -84,6 +84,22 @@ which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
 
+### JSON JWS against jwcrypto (`jws_json_jwcrypto.py`)
+
+Flattened and General JWS through the JWK-aware APIs, in both directions, including
+detached payloads and per-signature unprotected headers (`etsiU`). Two peer
+behaviours are asserted rather than worked around, because both would otherwise
+be rediscovered as a bug report:
+
+* **jwcrypto's `JWS.verify(key)` is any-of** — a two-signature document whose
+  second signature is corrupted still verifies given the key that made the intact
+  one. That is why `SignaturePolicy` exists and why `Any` is the compatible choice.
+* **jwcrypto's `JWKSet` selection cannot drive a multi-`kid` General JWS** ("No
+  working key found in key set" even with both signing keys present).
+
+jwcrypto cannot emit a detached *JSON* JWS at all in 1.6.1, so that direction is
+asserted as a peer limitation instead of being silently untested.
+
 ### JWT claim ambiguity against jwcrypto (`jwt_claims_jwcrypto.py`)
 
 The point of this suite is a payload shape no honest serializer produces:
