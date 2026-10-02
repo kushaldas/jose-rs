@@ -343,6 +343,10 @@ struct EncryptCompactInput {
     /// Optional external AAD (base64url), JSON serialization only.
     #[serde(default)]
     aad_b64u: Option<String>,
+    /// Private header parameters the caller implements, licensed to appear in
+    /// `crit` (ADR 0015).
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
     /// Optional extra protected-header members (e.g. `kid`, `tenant`).
     /// `alg` / `enc` are always taken from `--alg` / `--enc`.
     #[serde(default)]
@@ -401,6 +405,9 @@ fn encrypt_flattened(alg: &str, enc: &str) -> Result<()> {
             .context("decoding aad_b64u")?;
         opts = opts.with_external_aad(aad);
     }
+    if let Some(crit) = &input.understood_crit {
+        opts = opts.with_understood_crit(crit.iter().cloned());
+    }
     let jwe = jose_rs::jwe::json::encrypt_flattened_with_jwk_header_options(
         &input.jwk, header, &plaintext, enc_v, &opts,
     )?;
@@ -430,15 +437,30 @@ fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
     if header.enc.as_deref() != Some(enc) {
         bail!("token enc {:?} does not match expected {enc}", header.enc);
     }
-    let plaintext = match &input.aad_b64u {
-        Some(aad_b64u) => jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(
+    // With a caller-declared extension list the options API is the only one
+    // that can express it; without one, the plain entry point is used, so the
+    // harness exercises the same default policy a new caller would hit.
+    let plaintext = if let Some(crit) = &input.understood_crit {
+        let mut options = jose_rs::jwe::JweDecryptOptions::pinned_to_jwk(&input.jwk)?
+            .with_understood_crit(crit.iter().cloned());
+        if let Some(aad_b64u) = &input.aad_b64u {
+            options = options.with_external_aad(
+                URL_SAFE_NO_PAD
+                    .decode(aad_b64u.as_bytes())
+                    .context("decoding aad_b64u")?,
+            );
+        }
+        jose_rs::jwe::json::decrypt_flattened_with_jwk_options(&input.jwk, &jwe, &options)?
+    } else if let Some(aad_b64u) = &input.aad_b64u {
+        jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(
             &input.jwk,
             &jwe,
             &URL_SAFE_NO_PAD
                 .decode(aad_b64u.as_bytes())
                 .context("decoding aad_b64u")?,
-        )?,
-        None => jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?,
+        )?
+    } else {
+        jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?
     };
     let mut unprotected_header = serde_json::Map::new();
     for location in [&jwe.unprotected, &jwe.header] {
@@ -461,6 +483,10 @@ struct DecryptCompactInput {
     /// Optional external AAD (base64u), JSON serialization only.
     #[serde(default)]
     aad_b64u: Option<String>,
+    /// Private header parameters the caller implements, which `crit` may then
+    /// name (ADR 0015).
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -508,6 +534,8 @@ struct EncryptGeneralInput {
     #[serde(default)]
     aad_b64u: Option<String>,
     #[serde(default)]
+    understood_crit: Option<Vec<String>>,
+    #[serde(default)]
     header: Option<serde_json::Map<String, Value>>,
 }
 
@@ -521,6 +549,8 @@ struct DecryptGeneralInput {
     recipient: Option<usize>,
     #[serde(default)]
     aad_b64u: Option<String>,
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -561,6 +591,9 @@ fn encrypt_general(alg: &str, enc: &str) -> Result<()> {
             .decode(aad_b64u.as_bytes())
             .context("decoding aad_b64u")?;
         opts = opts.with_external_aad(aad);
+    }
+    if let Some(crit) = &input.understood_crit {
+        opts = opts.with_understood_crit(crit.iter().cloned());
     }
     let refs: Vec<&Jwk> = input.jwks.iter().collect();
     let jwe = jose_rs::jwe::general::encrypt_general_with_jwks_options(
@@ -608,16 +641,28 @@ fn decrypt_general(alg: &str, enc: &str) -> Result<()> {
         bail!("recipient {index} enc {reported_enc} does not match expected {enc}");
     }
 
-    let plaintext = match &input.aad_b64u {
-        Some(aad_b64u) => jose_rs::jwe::general::decrypt_general_with_jwk_and_aad(
+    let plaintext = if let Some(crit) = &input.understood_crit {
+        let mut options = jose_rs::jwe::JweDecryptOptions::pinned_to_jwk(&input.jwk)?
+            .with_understood_crit(crit.iter().cloned());
+        if let Some(aad_b64u) = &input.aad_b64u {
+            options = options.with_external_aad(
+                URL_SAFE_NO_PAD
+                    .decode(aad_b64u.as_bytes())
+                    .context("decoding aad_b64u")?,
+            );
+        }
+        jose_rs::jwe::general::decrypt_general_with_jwk_options(&input.jwk, &jwe, index, &options)?
+    } else if let Some(aad_b64u) = &input.aad_b64u {
+        jose_rs::jwe::general::decrypt_general_with_jwk_and_aad(
             &input.jwk,
             &jwe,
             index,
             &URL_SAFE_NO_PAD
                 .decode(aad_b64u.as_bytes())
                 .context("decoding aad_b64u")?,
-        )?,
-        None => jose_rs::jwe::general::decrypt_general_with_jwk(&input.jwk, &jwe, index)?,
+        )?
+    } else {
+        jose_rs::jwe::general::decrypt_general_with_jwk(&input.jwk, &jwe, index)?
     };
 
     let protected = jose_rs::jwe::general::decode_header(&jwe)?

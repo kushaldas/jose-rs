@@ -39,6 +39,16 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   the content tag is validated under is per-recipient. Recipient arrays are
   bounded at `MAX_RECIPIENTS = 32`, per-recipient header names must be disjoint
   from the shared ones, and `dir` cannot address two recipients. See ADR 0014.
+- JWE callers can now declare critical header extensions:
+  `Jwe{Encrypt,Decrypt}Options::with_understood_crit`. The default remains "no
+  extension is understood", so a message carrying `crit` is still refused unless
+  the caller names the parameter; when it does, the RFC 7515 §4.1.11 structure is
+  enforced identically on emit and receive, and both `crit` and the parameter it
+  names are required to be integrity protected. Added
+  `JweDecryptOptions::pinned_to_jwk`,
+  `json::decrypt_flattened_with_jwk_options` and
+  `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
+  path. See ADR 0015.
 
 ### Internal
 

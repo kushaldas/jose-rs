@@ -13,9 +13,12 @@ Three things are checked per (alg, enc) combination:
 2b. the same pair with **external additional authenticated data** (RFC 7516
    §7.2.1) in play, including the requirement that jose-rs refuses the message
    when the out-of-band bytes are withheld.
-3. the **general** serialization (RFC 7516 §7.2.1) with two recipients, both
+3. **critical header extensions** (`crit`, RFC 7516 §4.1.13), where jwcrypto
+   refuses to read what it cannot process and jose-rs reads it only for a
+   caller that declared the parameter;
+4. the **general** serialization (RFC 7516 §7.2.1) with two recipients, both
    directions, including that a recipient element may not carry `enc`;
-4. the shape jwcrypto produces by default — ``alg``/``kid`` in the
+5. the shape jwcrypto produces by default — ``alg``/``kid`` in the
    per-recipient unprotected ``header`` member, as RFC 7516 §A.5 does — is read
    *and* policed: a key that pins the algorithm accepts it, a message whose
    unauthenticated ``alg`` has been tampered with is refused
@@ -341,6 +344,84 @@ def check_general_serialization(binary: str, alg: str, enc: str) -> None:
     assert "integrity protected" in stderr, stderr
 
 
+CRIT_PARAM = "etsiU"
+CRIT_VALUE = "policy-42"
+
+
+def check_crit_extension(binary: str, alg: str, enc: str) -> None:
+    """Critical header extensions (RFC 7516 §4.1.13 / RFC 7515 §4.1.11).
+
+    jwcrypto implements no JWE critical extensions and offers no caller-side
+    opt-in, so the interesting assertions are: it *refuses to read* a message
+    listing one (the marker working as intended), and jose-rs reads the same
+    message only when its caller has declared the parameter.
+    """
+    key = rust(binary, "gen-key", alg, enc, {})
+
+    # jwcrypto will produce a crit-carrying message…
+    produced = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({
+            "alg": alg,
+            "enc": enc,
+            "crit": [CRIT_PARAM],
+            CRIT_PARAM: CRIT_VALUE,
+        }),
+        recipient=jwk.JWK(**key),
+    ).serialize()
+    assert json.loads(produced)["protected"]
+
+    # …jose-rs refuses it by default…
+    stderr = rust_expect_failure(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": produced,
+    })
+    assert f"unsupported crit extension: {CRIT_PARAM}" in stderr, stderr
+
+    # …and reads it when the caller declares the extension, reporting the value
+    # in the protected header rather than acting on it.
+    decrypted = rust(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": produced,
+        "understood_crit": [CRIT_PARAM],
+    })
+    assert base64.urlsafe_b64decode(decrypted["plaintext_b64u"] + "==") == PLAINTEXT
+    header = decrypted["protected_header"]
+    assert header.get("crit") == [CRIT_PARAM], header
+    assert header.get(CRIT_PARAM) == CRIT_VALUE, header
+
+    # Understanding the extension must not become permission to ignore a
+    # structural violation: `crit` naming a *registered* member is refused even
+    # with a permissive list.
+    bogus = jwe.JWE(
+        PLAINTEXT,
+        protected=json.dumps({"alg": alg, "enc": enc, "crit": ["enc"], "enc": enc}),
+        recipient=jwk.JWK(**key),
+    ).serialize()
+    stderr = rust_expect_failure(binary, "decrypt-flattened", alg, enc, {
+        "jwk": key,
+        "jwe": bogus,
+        "understood_crit": ["enc"],
+    })
+    assert "registered header parameter" in stderr, stderr
+
+    # jose-rs -> jwcrypto: jwcrypto must refuse, not silently ignore.
+    ours = rust(binary, "encrypt-flattened", alg, enc, {
+        "jwk": key,
+        "plaintext_b64u": b64u(PLAINTEXT),
+        "header": {"crit": [CRIT_PARAM], CRIT_PARAM: CRIT_VALUE},
+        "understood_crit": [CRIT_PARAM],
+    })["jwe"]
+    received = jwe.JWE()
+    try:
+        received.deserialize(ours)
+        received.decrypt(jwk.JWK(**key))
+    except Exception as error:  # noqa: BLE001 - the refusal *is* the result
+        assert "critical" in str(error), error
+        return
+    raise AssertionError("jwcrypto accepted an unknown critical extension")
+
+
 def main(binary: str) -> None:
     """Verify each producer using the other implementation."""
     for alg, enc in COMBOS:
@@ -349,6 +430,7 @@ def main(binary: str) -> None:
         check_external_aad_both_directions(binary, alg, enc)
         check_unprotected_alg_shape(binary, alg, enc)
         check_general_serialization(binary, alg, enc)
+        check_crit_extension(binary, alg, enc)
     print(json.dumps({
         "cell": "jwe-json-jwcrypto",
         "result": "PASS",

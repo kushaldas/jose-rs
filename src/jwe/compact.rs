@@ -305,6 +305,7 @@ pub fn decrypt_with_options(
         iv_b64,
         ciphertext_b64,
         tag_b64,
+        options.understood_crit(),
     )?;
 
     // Enforce caller's allow-list before touching any key material.

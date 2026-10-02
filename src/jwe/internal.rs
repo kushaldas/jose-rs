@@ -100,6 +100,10 @@ pub struct JweEncryptOptions {
     /// [`aad_input`](self::aad_input) unaltered, so only this crate's
     /// serializers may position it.
     external_aad: Option<Vec<u8>>,
+    /// Private header parameters the caller has implemented, which may
+    /// therefore be listed in `crit`. See
+    /// [`JweEncryptOptions::with_understood_crit`].
+    understood_crit: Vec<String>,
 }
 
 impl JweEncryptOptions {
@@ -144,6 +148,35 @@ impl JweEncryptOptions {
     pub fn external_aad(&self) -> Option<&[u8]> {
         self.external_aad.as_deref()
     }
+
+    /// Declare that the caller implements the private header parameters in
+    /// `names`, so they may be listed in the protected header's `crit` member.
+    ///
+    /// This crate implements **no** JWE critical extensions of its own. The
+    /// list is the caller's: a `crit` entry outside it is refused, on both the
+    /// emit and the receive side, which is what keeps an unread extension from
+    /// being silently ignored (RFC 7516 §4.1.13 / RFC 7515 §4.1.11).
+    ///
+    /// ```
+    /// use jose_rs::jwe::JweEncryptOptions;
+    /// let opts = JweEncryptOptions::new().with_understood_crit(["etsiU"]);
+    /// assert_eq!(opts.understood_crit(), ["etsiU"]);
+    /// ```
+    #[must_use]
+    pub fn with_understood_crit<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.understood_crit = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The header parameters the caller declared it understands.
+    #[must_use]
+    pub fn understood_crit(&self) -> &[String] {
+        &self.understood_crit
+    }
 }
 
 /// Registered header members this crate does not implement for JWE compact
@@ -162,6 +195,99 @@ impl JweEncryptOptions {
 pub(crate) const UNIMPLEMENTED_JWE_MEMBERS: &[&str] =
     &["zip", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag"];
 
+/// Header parameters defined by RFC 7516 or RFC 7518 for use with JWE.
+///
+/// RFC 7515 §4.1.11 forbids a producer from listing these in `crit`: they are
+/// not extensions, so declaring them critical says nothing a recipient does not
+/// already have to do, and an implementation that "checked" the marker would be
+/// agreeing to a constraint it had to satisfy anyway.
+pub(crate) const REGISTERED_JWE_MEMBERS: &[&str] = &[
+    "alg", "enc", "zip", "crit", "b64", "kid", "cty", "typ", "jku", "jwk", "x5u", "x5c", "x5t",
+    "x5t#S256", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag",
+];
+
+/// Whether `param` is a header parameter this message actually carries.
+///
+/// RFC 7515 §4.1.11: a producer "MUST NOT ... [list] names that do not occur as
+/// Header Parameter names within the JOSE Header". Registered names live in
+/// typed fields; everything a caller may legitimately list is a private member
+/// in [`JoseHeader::extra`].
+fn header_has_param(header: &JoseHeader, param: &str) -> bool {
+    match param {
+        "alg" => !header.alg.is_empty(),
+        "enc" => header.enc.is_some(),
+        "kid" => header.kid.is_some(),
+        "typ" => header.typ.is_some(),
+        "cty" => header.cty.is_some(),
+        "jku" => header.jku.is_some(),
+        "jwk" => header.jwk.is_some(),
+        "x5u" => header.x5u.is_some(),
+        "x5c" => header.x5c.is_some(),
+        "x5t" => header.x5t.is_some(),
+        "x5t#S256" => header.x5t_s256.is_some(),
+        "crit" => header.crit.is_some(),
+        _ => header.extra.contains_key(param),
+    }
+}
+
+/// Apply the `crit` rules of RFC 7516 §4.1.13 (which adopts RFC 7515 §4.1.11)
+/// to a **protected** header.
+///
+/// Identical on the emit and the receive side on purpose: a message this crate
+/// is willing to write is always one it is willing to read, and the two checks
+/// drifting apart is how implementations end up producing tokens they cannot
+/// themselves decrypt. `understood` is the caller's list — this crate
+/// implements no critical extensions of its own.
+///
+/// Rules:
+/// 1. `crit` must not be empty;
+/// 2. no duplicate names;
+/// 3. no registered JWE/JWA name (those are not extensions);
+/// 4. every name must be in `understood` — this is the rule that makes an
+///    unread extension fail loudly instead of being ignored;
+/// 5. every name must actually occur in the header.
+///
+/// The check runs against the protected header only, which is also where RFC
+/// 7515 §4.1.11 requires `crit` to be: on the JSON serializations an extension
+/// could in principle be carried unprotected, and this crate refuses that — a
+/// parameter whose criticality is asserted by bytes nobody authenticates is not
+/// critical (ADR 0015).
+pub(crate) fn validate_crit(header: &JoseHeader, understood: &[String]) -> Result<()> {
+    let Some(crit) = header.crit.as_ref() else {
+        return Ok(());
+    };
+    if crit.is_empty() {
+        return Err(JoseError::InvalidHeader(
+            "crit header must not be empty (RFC 7515 §4.1.11)".into(),
+        ));
+    }
+    for (index, param) in crit.iter().enumerate() {
+        if crit[..index].contains(param) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit lists {param} more than once (RFC 7515 §4.1.11)"
+            )));
+        }
+        if REGISTERED_JWE_MEMBERS.contains(&param.as_str()) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit must not name the registered header parameter {param}; it is not an \
+                 extension (RFC 7515 §4.1.11)"
+            )));
+        }
+        if !understood.iter().any(|known| known == param) {
+            return Err(JoseError::InvalidHeader(format!(
+                "unsupported crit extension: {param}"
+            )));
+        }
+        if !header_has_param(header, param) {
+            return Err(JoseError::InvalidHeader(format!(
+                "crit names {param} but it is absent from the protected header \
+                 (RFC 7515 §4.1.11)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the JWE-specific content of a caller-supplied protected header
 /// before it is serialized and used as additional authenticated data.
 ///
@@ -173,13 +299,14 @@ pub(crate) const UNIMPLEMENTED_JWE_MEMBERS: &[&str] =
 /// 1. `extra` must not contain an [`UNIMPLEMENTED_JWE_MEMBERS`] entry; for
 ///    `zip` the check and message match the decrypt path, so a token this
 ///    crate emits is always one it can decrypt.
-/// 2. `crit` must be absent. No JWE critical extensions are implemented, and
-///    an empty `crit` array is invalid (RFC 7515 §4.1.11).
+/// 2. `crit` passes [`validate_crit`] against the caller's understood-extension
+///    list. This crate implements no critical extensions itself, so with an
+///    empty list — the default — `crit` must be absent.
 ///
 /// # Errors
 ///
 /// Returns [`JoseError::InvalidHeader`] naming the first rule violated.
-pub(crate) fn validate_encrypt_header(header: &JoseHeader) -> Result<()> {
+pub(crate) fn validate_encrypt_header(header: &JoseHeader, understood: &[String]) -> Result<()> {
     // Rule 1. `extra["crit"]` is not handled here: it duplicates a typed
     // field, which `to_protected_b64` rejects before anything is emitted.
     if header.extra.contains_key("zip") {
@@ -196,17 +323,9 @@ pub(crate) fn validate_encrypt_header(header: &JoseHeader) -> Result<()> {
         )));
     }
 
-    // Rule 2: any `crit` is unsupported; distinguish the empty case so the
-    // error points at the RFC violation rather than an unknown extension.
-    if let Some(crit) = &header.crit {
-        return Err(JoseError::InvalidHeader(if crit.is_empty() {
-            "crit header must not be empty (RFC 7515 §4.1.11)".into()
-        } else {
-            format!("unsupported crit extensions: {crit:?}")
-        }));
-    }
-
-    Ok(())
+    // Rule 2: the caller's list is the only thing that can license a `crit`
+    // entry, and it licenses nothing that this crate does not itself process.
+    validate_crit(header, understood)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +349,10 @@ pub struct JweDecryptOptions {
     /// `aad` member (RFC 7516 §2). See
     /// [`JweDecryptOptions::with_external_aad`].
     external_aad: Option<Vec<u8>>,
+    /// Private header parameters the caller has implemented, and so may accept
+    /// when a message lists them in `crit`. See
+    /// [`JweDecryptOptions::with_understood_crit`].
+    understood_crit: Vec<String>,
 }
 
 impl JweDecryptOptions {
@@ -241,7 +364,33 @@ impl JweDecryptOptions {
             allow_all: false,
             max_plaintext: None,
             external_aad: None,
+            understood_crit: Vec::new(),
         }
+    }
+
+    /// Options pinned to a JWK's own `alg`, accepting every content algorithm
+    /// the library supports.
+    ///
+    /// This is what the JWK decryption APIs use: the algorithm comes from the
+    /// *key*, never from token header data, which is what makes comparing the
+    /// token's claim against it meaningful (ADR 0013). Callers who also need
+    /// external AAD or caller-understood `crit` extensions build on the result.
+    ///
+    /// # Errors
+    ///
+    /// [`JoseError::Key`] when `jwk.alg` is unset, and
+    /// [`JoseError::UnsupportedAlgorithm`] when it names something this crate
+    /// does not implement for JWE.
+    pub fn pinned_to_jwk(jwk: &crate::jwk::Jwk) -> Result<Self> {
+        let alg = jwk
+            .alg
+            .as_deref()
+            .ok_or_else(|| JoseError::Key("JWK alg must be set for the JWE JWK APIs".into()))?;
+        let alg = JweAlgorithm::from_str(alg)?;
+        Ok(Self::new(
+            vec![alg],
+            crate::jwe::internal::all_enc_algorithms(),
+        ))
     }
 
     /// Permit every algorithm the library supports. Used internally by
@@ -254,6 +403,7 @@ impl JweDecryptOptions {
             allow_all: true,
             max_plaintext: None,
             external_aad: None,
+            understood_crit: Vec::new(),
         }
     }
 
@@ -311,6 +461,55 @@ impl JweDecryptOptions {
     #[must_use]
     pub fn external_aad(&self) -> Option<&[u8]> {
         self.external_aad.as_deref()
+    }
+
+    /// Accept a `crit` member listing the private header parameters in `names`.
+    ///
+    /// A message listing anything outside this list is refused, and with the
+    /// default (empty) list a message carrying `crit` at all is refused — the
+    /// behaviour this crate has always had, now expressible as an explicit
+    /// opt-in rather than a hard denial (RFC 7516 §4.1.13, RFC 7515 §4.1.11,
+    /// ADR 0015). Declaring an extension "understood" is a claim about *code the
+    /// caller wrote*: jose-rs reads the member, checks that it is present and
+    /// integrity protected, and hands it over in
+    /// [`JoseHeader::extra`](crate::JoseHeader::extra). It does not act on it.
+    ///
+    /// ```
+    /// use jose_rs::jwe::JweDecryptOptions;
+    /// use jose_rs::JweAlgorithm;
+    /// use jose_rs::JweEncryption;
+    /// let opts = JweDecryptOptions::new(vec![JweAlgorithm::A128KW], vec![JweEncryption::A128GCM])
+    ///     .with_understood_crit(["etsiU"]);
+    /// assert_eq!(opts.understood_crit(), ["etsiU"]);
+    /// ```
+    #[must_use]
+    pub fn with_understood_crit<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.understood_crit = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The header parameters the caller declared it understands.
+    #[must_use]
+    pub fn understood_crit(&self) -> &[String] {
+        &self.understood_crit
+    }
+
+    /// Fill in "every supported content algorithm" when the caller did not
+    /// constrain one (crate-internal: the JWK APIs take the key-management
+    /// algorithm from the key and must not force the caller to enumerate `enc`).
+    pub(crate) fn allow_any_enc_when_unset(self) -> Self {
+        if self.allowed_enc.is_empty() {
+            Self {
+                allowed_enc: all_enc_algorithms(),
+                ..self
+            }
+        } else {
+            self
+        }
     }
 
     /// Resolve a message's `aad` member against the caller's expectation.
@@ -458,6 +657,7 @@ pub(crate) fn parse_envelope<'a>(
     iv_b64: &str,
     ciphertext_b64: &str,
     tag_b64: &str,
+    understood_crit: &[String],
 ) -> Result<(ParsedEnvelope<'a>, JoseHeader)> {
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
@@ -471,18 +671,11 @@ pub(crate) fn parse_envelope<'a>(
         ));
     }
 
-    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: `crit` must be non-empty and may
-    // name only extensions the library understands — none are supported.
-    if let Some(crit) = &header.crit {
-        if crit.is_empty() {
-            return Err(JoseError::InvalidHeader(
-                "crit header must not be empty (RFC 7515 §4.1.11)".into(),
-            ));
-        }
-        return Err(JoseError::InvalidHeader(format!(
-            "unsupported crit extensions: {crit:?}"
-        )));
-    }
+    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: `crit` may name only extensions the
+    // *caller* has declared it implements. With the default (empty) list, any
+    // `crit` is refused — which is the pre-existing behaviour, kept as the
+    // default rather than re-litigated (ADR 0015).
+    validate_crit(&header, understood_crit)?;
 
     // `alg` normally lives in the protected header. The JSON serialization may
     // instead convey it in an unprotected member (`unprotected_alg`), which is
@@ -989,7 +1182,7 @@ pub(crate) fn encrypt_core(
     }
     // alg/enc agree; now the JWE-specific member rules, then the shared
     // duplicate / key-reference / size rules while serializing.
-    validate_encrypt_header(header)?;
+    validate_encrypt_header(header, opts.understood_crit())?;
     let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
     // The ciphertext is at least as long as the plaintext, so refuse before
@@ -1050,7 +1243,7 @@ pub(crate) fn encrypt_core_multi(
             enc.as_str()
         )));
     }
-    validate_encrypt_header(header)?;
+    validate_encrypt_header(header, opts.understood_crit())?;
     let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
 
     // The ciphertext is at least as long as the plaintext, so refuse before any

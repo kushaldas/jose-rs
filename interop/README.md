@@ -79,7 +79,7 @@ just interop-build            # build Rust harness (release) + npm ci
 just interop                  # full matrix; exits 0, results in JSON
 ```
 
-Full matrix is **71 cells**:
+Full matrix is **79 cells**:
 
 | Family | `format` | Cells | What it checks |
 | --- | --- | --- | --- |
@@ -89,6 +89,7 @@ Full matrix is **71 cells**:
 | JWE compact | `jwe` | 4 alg:enc × 2 directions = 8 | `dir:A256GCM`, `dir:A128CBC-HS256`, `A256KW:A256GCM`, `A256KW:A128CBC-HS256`; same custom header; plaintext + header compared |
 | JWE flattened JSON | `jwe-json` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.2: same combos and header as `jwe`, emitted as a JSON object. The cell also asserts the **member shape** — `protected`/`ciphertext`/`iv`/`tag` present as strings, `encrypted_key` present for key-wrapped algs and **absent for `dir`** (§7.2.1), and no `unprotected`/`header`/`recipients`/`aad` — so a serialization bug surfaces even though the crypto is shared with `jwe` |
 | JWE flattened JSON + external AAD | `jwe-json-aad` | 4 alg:enc × 2 directions = 8 | RFC 7516 §7.2.1 `aad` member: emitted with the right encoding, decryptable by the peer **with** the out-of-band bytes, and **refused without them** |
+| JWE critical extensions | `jwe-crit` | 4 alg:enc × 2 directions = 8 | RFC 7516 §4.1.13: jose-rs emits `crit` only for a caller-declared parameter, and the parameter must be integrity protected. jwcrypto refuses to read an extension it cannot process and panva refuses to emit one, so the cell asserts the peer's rejection **and** a control message without `crit` that the peer accepts |
 | JWE general JSON (2 recipients) | `jwe-general` | 2 alg:enc × 2 directions = 4 | RFC 7516 §7.2.1: one ciphertext, one `encrypted_key` per recipient. panva's `generalDecrypt` searches the array for a key that works; jose-rs makes the caller name the recipient (ADR 0014), so the cells assert both readings of the same message |
 | JWE flattened JSON + unprotected headers | `jwe-json-unprot` | 4 alg:enc × 1 direction = 4 | JS emits the `unprotected` / `header` members jose-rs refuses to produce (RFC 7516 §7.2.1); jose-rs must read them as unauthenticated data and still authenticate the ciphertext |
 | Duplicate header member | `jws-dup` | 3 | negative vectors (see below) |
@@ -179,6 +180,8 @@ encoded by the caller and turned into the `aad` member by each implementation.
 
 | Subcommand                                  | stdin                                   | stdout                                        |
 | ------------------------------------------- | --------------------------------------- | --------------------------------------------- |
+Every JWE command accepts an optional `understood_crit` list: the private header parameters the caller implements, which `crit` may then name (ADR 0015).
+
 | `gen-key --alg <ALG> [--enc <ENC>]`         | —                                       | private JWK (`--enc` needed for `dir`)        |
 | `export-pub`                                | private JWK                             | public JWK (private fields dropped)           |
 | `sign-compact --alg <ALG>`                  | `{jwk, payload_b64u, header?}`          | `{jws}`                                       |
@@ -187,8 +190,8 @@ encoded by the caller and turned into the `aad` member by each implementation.
 | `verify-jwt --alg <ALG>`                    | `{jwk, jwt}`                            | `{ok, claims}`                                |
 | `encrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, plaintext_b64u, header?}`        | `{jwe}`                                       |
 | `decrypt-compact --alg <ALG> --enc <ENC>`   | `{jwk, jwe}`                            | `{ok, plaintext_b64u, protected_header}`      |
-| `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?, aad_b64u?}` | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string |
-| `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?}`                 | `{ok, plaintext_b64u, protected_header, unprotected_header?}` |
+| `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?, aad_b64u?, understood_crit?}` | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string |
+| `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?, understood_crit?}` | `{ok, plaintext_b64u, protected_header, unprotected_header?}` |
 | `sign-compact-raw --alg <ALG>` (Rust only)  | `{jwk, header_raw, payload_b64u}`       | `{jws}` signed over `header_raw` verbatim     |
 
 `header` is an optional object of extra protected-header members (e.g.

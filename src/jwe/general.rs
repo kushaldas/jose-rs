@@ -44,7 +44,7 @@ use crate::algorithm::{JweAlgorithm, JweEncryption};
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
-use crate::jwe::internal::{self, ensure_token_size, JweEncryptOptions};
+use crate::jwe::internal::{self, ensure_token_size, JweDecryptOptions, JweEncryptOptions};
 use crate::jwe::json::{self as json_mod, FlattenedJwe};
 use crate::member_map::MemberMap;
 
@@ -613,6 +613,22 @@ pub fn decrypt_general_with_jwk(
     recipient: usize,
 ) -> Result<Vec<u8>> {
     json_mod::decrypt_flattened_with_jwk_impl(jwk, &jwe.flatten_for(recipient)?, None)
+}
+
+/// [`decrypt_general_with_jwk`] with the caller's [`JweDecryptOptions`] —
+/// plaintext size limit, external AAD, and caller-understood `crit` extensions
+/// (ADR 0015) — for a recipient of a general message.
+///
+/// # Errors
+///
+/// As [`decrypt_general_with_jwk`].
+pub fn decrypt_general_with_jwk_options(
+    jwk: &crate::jwk::Jwk,
+    jwe: &GeneralJwe,
+    recipient: usize,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
+    json_mod::decrypt_flattened_with_jwk_options(jwk, &jwe.flatten_for(recipient)?, options)
 }
 
 /// [`decrypt_general_with_jwk`] for a message carrying an `aad` member.

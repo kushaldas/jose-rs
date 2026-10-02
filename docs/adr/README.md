@@ -18,3 +18,4 @@ history.
 | [0012](0012-jwe-external-aad.md) | External additional authenticated data is authenticated, never confidential | Accepted |
 | [0013](0013-jwe-unprotected-headers.md) | An unauthenticated `alg` is only ever read against a key that pins it | Accepted |
 | [0014](0014-jwe-general-serialization.md) | A recipient is named by the caller, never chosen by the library | Accepted |
+| [0015](0015-jwe-critical-extensions.md) | `crit` is refused by default and understood only by the caller | Accepted |

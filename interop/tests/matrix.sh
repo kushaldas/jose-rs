@@ -191,6 +191,92 @@ run_jwe_cell() {
 # emitted an `aad` member, and (b) that the consumer *refuses* the same message
 # when the out-of-band bytes are withheld — i.e. the peer really folded them
 # into the content AAD input rather than shipping them as decoration.
+# run_jwe_crit_cell <direction> <alg:enc>
+#
+# Critical (`crit`) header extensions, RFC 7516 §4.1.13 / RFC 7515 §4.1.11.
+# Both peers refuse to *read* an extension they cannot process — which is the
+# marker doing its job — and neither lets the caller declare one, so the cells
+# assert:
+#
+#   * jose-rs emits one only when the caller lists it, and the parameter then
+#     lives in the integrity-protected header;
+#   * a peer that cannot process it rejects the message (it does not quietly
+#     ignore it) while the same message without `crit` is accepted, so the
+#     rejection is demonstrably about the extension;
+#   * panva refuses even to *emit* an unrecognized extension, the same policy as
+#     jose-rs's default;
+#   * jose-rs reading a message with an opt-in list still reads ordinary
+#     (extension-free) messages with that same list.
+run_jwe_crit_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+
+  if [ "$producer" = js ]; then
+    # panva has no caller-side opt-in: producing an unrecognized critical
+    # extension must fail. Same conclusion as jose-rs's default, reached by
+    # different code.
+    if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" \
+        '{jwk:$jwk, plaintext_b64u:$p, header:{crit:["etsiU"], etsiU:"policy-42"}}' \
+        | js encrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "panva emitted an unrecognized critical extension" >&2
+      return 1
+    fi
+    # An ordinary message, read by a consumer that *has* declared an extension:
+    # the opt-in must not become a reason to reject everything else.
+    "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+      '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+      | js encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+    local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+    "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" \
+      '{jwk:$jwk, jwe:$jwe, understood_crit:["etsiU"]}' \
+      | rs decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+    [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] \
+      || { echo "opt-in consumer rejected an ordinary message" >&2; return 1; }
+    assert_header "$out_path"
+    return 0
+  fi
+
+  # producer = rust. The extension is licensed by the caller's list, and both
+  # `crit` and the parameter itself must land in the protected header.
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:($h + {crit:["etsiU"], etsiU:"policy-42"}), understood_crit:["etsiU"]}' \
+    | rs encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  printf '%s' "$jwe" | "$JQ" -e '
+    (.protected | type) == "string" and
+    ((.protected | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson) as $p
+      | ($p.crit == ["etsiU"]) and ($p.etsiU == "policy-42"))
+  ' > /dev/null || { echo "crit extension missing from protected header: $jwe" >&2; return 1; }
+
+  # A peer that cannot process the extension must refuse the message.
+  if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+      | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+    echo "peer accepted a crit extension it cannot process" >&2
+    return 1
+  fi
+
+  # Control: the identical encryption without `crit` is accepted, so the
+  # rejection above is about the extension and nothing else.
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | rs encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] \
+    || { echo "control message without crit was refused" >&2; return 1; }
+  assert_header "$out_path"
+}
+
 # run_jwe_general_cell <direction> <alg:enc>
 #
 # General JWE JSON Serialization (RFC 7516 §7.2.1): one ciphertext, one element
@@ -430,6 +516,7 @@ run_cell() {
       jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-aad)
         run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
+      jwe-crit) run_jwe_crit_cell "$direction" "$alg"; exit 0 ;;
       jwe-general) run_jwe_general_cell "$direction" "$alg"; exit 0 ;;
       jwe-json-unprot)
         # Only the JS side can emit unprotected header members.
@@ -608,6 +695,14 @@ done
 # authenticate the ciphertext.
 for alg in "${ALGS_JWE[@]}"; do
   run_cell "js-encrypt-rust-decrypt" "$alg" "jwe-json-unprot" || true
+done
+
+# Critical header extensions (RFC 7516 §4.1.13): the caller lists what it
+# implements, and a peer that cannot process the extension must refuse.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-crit" || true
+  done
 done
 
 # General JSON JWE with two recipients (RFC 7516 §7.2.1). `dir` is excluded:

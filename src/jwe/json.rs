@@ -52,8 +52,8 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jwe::internal::{
-    self, all_enc_algorithms, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op,
-    jwk_to_jwe_key_bytes, minimum_plaintext_len, JweDecryptOptions, JweEncryptOptions,
+    self, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op, jwk_to_jwe_key_bytes,
+    minimum_plaintext_len, JweDecryptOptions, JweEncryptOptions,
 };
 use crate::member_map::MemberMap;
 
@@ -880,6 +880,7 @@ fn decrypt_impl(
         iv_b64,
         &jwe.ciphertext,
         tag_b64,
+        options.understood_crit(),
     )?;
 
     // Defence in depth: `pinned_alg` is the policy that permits an
@@ -936,6 +937,32 @@ pub(crate) fn decrypt_flattened_with_jwk_impl(
     jwe: &FlattenedJwe,
     external_aad: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
+    let mut options = JweDecryptOptions::pinned_to_jwk(jwk)?;
+    if let Some(aad) = external_aad {
+        internal::ensure_external_aad_present(aad)?;
+        options = options.with_external_aad(aad);
+    }
+    decrypt_flattened_with_jwk_options(jwk, jwe, &options)
+}
+
+/// [`decrypt_flattened_with_jwk`] with the caller's full
+/// [`JweDecryptOptions`] — plaintext size limit, external AAD, and
+/// caller-understood `crit` extensions (ADR 0015).
+///
+/// The key's pin is not relaxable: `jwk.alg` supplies the key-management
+/// algorithm, and if the options' allow-list excludes it the decryption is
+/// refused. Everything else in the options is honoured as given, including the
+/// content-algorithm allow-list (an empty one means "as pinned by the key").
+///
+/// # Errors
+///
+/// As [`decrypt_flattened_with_jwk`], plus [`JoseError::UnsupportedAlgorithm`]
+/// when the options' allow-list excludes the key's algorithm.
+pub fn decrypt_flattened_with_jwk_options(
+    jwk: &crate::jwk::Jwk,
+    jwe: &FlattenedJwe,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
     let jwk_alg = jwk
         .alg
         .as_deref()
@@ -946,11 +973,7 @@ pub(crate) fn decrypt_flattened_with_jwk_impl(
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
     let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
-    let mut options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
-    if let Some(aad) = external_aad {
-        internal::ensure_external_aad_present(aad)?;
-        options = options.with_external_aad(aad);
-    }
+    let options = options.clone().allow_any_enc_when_unset();
     decrypt_impl(&key_bytes, jwe, &options, Some(jwk_alg))
 }
 

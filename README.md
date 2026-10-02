@@ -241,7 +241,17 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
   raw-key APIs refuse it. `enc`, `zip`, `crit` and the key-agreement parameters
   can never sit unprotected. jose-rs never *emits* unprotected parameters
   (ADR 0013).
-- **A general JWE is decrypted for a recipient you name.** In the general
+- **JWE critical extensions (`crit`) are refused unless you say what you
+  implement.** With the default (empty) list, any JWE carrying `crit` is
+  rejected — jose-rs implements none of its own.
+  `JweEncryptOptions::with_understood_crit` /
+  `JweDecryptOptions::with_understood_crit` declare the parameters *your* code
+  processes; the library then enforces the RFC's structure on both sides —
+  non-empty, no duplicates, no registered member posing as an extension, each
+  name actually present — and hands you the value in `JoseHeader::extra`
+  without interpreting it. `crit` **and** the parameter it names must both be in
+  the protected header: criticality asserted by bytes nobody authenticates is
+  not criticality (ADR 0015). In the general
   serialization the header the content tag is validated under is
   `protected ∪ unprotected ∪ recipients[i].header` — per recipient — so
   "decrypt this" is not a complete instruction. `jwe::general` therefore takes
