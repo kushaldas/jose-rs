@@ -812,6 +812,122 @@ pub(crate) fn wrap_cek(
     }
 }
 
+/// RFC 7518 §4.6.2's `OtherInfo`, split the way the backend's parameters want
+/// it: AlgorithmID, PartyUInfo, and PartyVInfo with **SuppPubInfo on its tail**.
+///
+/// The backend defines OtherInfo as `AlgID || PartyUInfo || PartyVInfo`; JOSE
+/// appends SuppPubInfo (the key length in bits, big-endian). Appending it to the
+/// last field makes the concatenation byte-identical to the RFC's, which the
+/// unit test below pins against the byte array printed in Appendix C.
+struct OtherInfo {
+    algorithm_id: Vec<u8>,
+    party_u: Vec<u8>,
+    party_v: Vec<u8>,
+}
+
+impl OtherInfo {
+    /// The whole structure as one buffer.
+    ///
+    /// The backend takes the three fields separately, so production code never
+    /// needs this; it exists so the tests can assert the *concatenation* — which
+    /// is what the backend hashes — against the octet array RFC 7518 Appendix C
+    /// prints.
+    #[cfg(test)]
+    fn as_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(self.algorithm_id.len() + self.party_u.len() + self.party_v.len());
+        out.extend_from_slice(&self.algorithm_id);
+        out.extend_from_slice(&self.party_u);
+        out.extend_from_slice(&self.party_v);
+        out
+    }
+}
+
+/// Build [`OtherInfo`] from already-decoded party values.
+///
+/// Each field is `Datalen || Data` with a big-endian 32-bit length. An absent
+/// `apu`/`apv` contributes the empty octet sequence — **four zero octets**, not
+/// nothing, which is the single easiest way to derive a key nobody else
+/// derives.
+fn other_info(alg_id: &str, apu: Option<&[u8]>, apv: Option<&[u8]>, key_len: usize) -> OtherInfo {
+    fn length_prefixed(data: Option<&[u8]>) -> Vec<u8> {
+        let data = data.unwrap_or(&[]);
+        let mut out = Vec::with_capacity(4 + data.len());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    let mut party_v = length_prefixed(apv);
+    party_v.extend_from_slice(&((key_len as u32) * 8).to_be_bytes());
+    OtherInfo {
+        algorithm_id: length_prefixed(Some(alg_id.as_bytes())),
+        party_u: length_prefixed(apu),
+        party_v,
+    }
+}
+
+/// JOSE's Concat KDF, RFC 7518 §4.6.2 (NIST SP 800-56A §5.8.1 single step).
+///
+/// Derives the agreed key from the ECDH shared secret `Z`. Three properties are
+/// worth stating because they are the ones an implementation gets wrong:
+///
+/// * **the digest is always SHA-256** — RFC 7518 §4.6.2 fixes it ("where the
+///   Digest Method is SHA-256") rather than tying it to the key size, so a
+///   derivation that picked SHA-512 for a 256-bit CEK would agree with nobody,
+///   including the RFC's own Appendix C vector (which this crate's tests assert);
+/// * **`OtherInfo` is length-prefixed**: each of AlgorithmID, PartyUInfo and
+///   PartyVInfo is `Datalen || Data` with a big-endian 32-bit `Datalen`, and
+///   SuppPubInfo is the key length *in bits* as a 32-bit big-endian value.
+///   Skipping a prefix, or using a zero length for an absent `apu` instead of
+///   the four zero octets, changes the derived key with no error anywhere;
+/// * **`apu` and `apv` must differ** when both are used (RFC 7518 §4.6.2), so
+///   that the two party values actually identify two parties.
+///
+/// `alg_id` is the ASCII `enc` value for direct key agreement and the ASCII
+/// `alg` value for key agreement with key wrapping (RFC 7518 §4.6.2). `apu` and
+/// `apv` are the base64url *encoded* header values, decoded here.
+///
+/// # Errors
+///
+/// [`JoseError::InvalidHeader`] for a non-canonical `apu`/`apv`, or for equal
+/// ones; [`JoseError::Crypto`] if the backend rejects the derivation.
+pub(crate) fn concat_kdf(
+    z: &[u8],
+    key_len: usize,
+    alg_id: &str,
+    apu: Option<&str>,
+    apv: Option<&str>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let apu = apu.map(crate::base64url::decode).transpose()?;
+    let apv = apv.map(crate::base64url::decode).transpose()?;
+    if let (Some(apu), Some(apv)) = (&apu, &apv) {
+        if apu == apv {
+            return Err(JoseError::InvalidHeader(
+                "apu and apv must be distinct when both are present (RFC 7518 §4.6.2)".into(),
+            ));
+        }
+    }
+
+    let info = other_info(alg_id, apu.as_deref(), apv.as_deref(), key_len);
+    // kryptering's OtherInfo is the concatenation of these three fields in
+    // order, so the bytes it hashes are RFC 7518 §4.6.2's OtherInfo exactly.
+    let params = kryptering::kdf::ConcatKdfParams {
+        hash: kryptering::HashAlgorithm::Sha256,
+        algorithm_id: Some(info.algorithm_id),
+        party_u_info: Some(info.party_u),
+        party_v_info: Some(info.party_v),
+    };
+    let derived = kryptering::kdf::concat_kdf(z, key_len, &params).map_err(JoseError::Crypto)?;
+    if derived.len() != key_len {
+        return Err(JoseError::Key(format!(
+            "Concat KDF derived {} bytes, expected {key_len}",
+            derived.len()
+        )));
+    }
+    Ok(Zeroizing::new(derived))
+}
+
 /// Check a `dir` key against the CEK size the content algorithm requires.
 fn check_dir_key(key: &[u8], enc: JweEncryption) -> Result<()> {
     let cek_len = enc.cek_size();
@@ -1281,4 +1397,64 @@ pub(crate) fn encrypt_core_multi(
         },
         wrapped,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::other_info;
+
+    #[test]
+    fn other_info_matches_the_rfc_7518_appendix_c_bytes() {
+        // RFC 7518 §C prints OtherInfo as an explicit octet array for
+        // AlgorithmID = "A128GCM", PartyUInfo = "Alice", PartyVInfo = "Bob" and
+        // a 128-bit key. Transcribed here, so the layout is pinned by the RFC
+        // rather than by this implementation's own output.
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0, 0, 0, 7, 65, 49, 50, 56, 71, 67, 77, // 7 | "A128GCM"
+            0, 0, 0, 5, 65, 108, 105, 99, 101,      // 5 | "Alice"
+            0, 0, 0, 3, 66, 111, 98,                // 3 | "Bob"
+            0, 0, 0, 128,                            // SuppPubInfo: 128 bits
+        ];
+        let info = other_info("A128GCM", Some(b"Alice"), Some(b"Bob"), 16);
+        assert_eq!(info.as_bytes(), expected);
+    }
+
+    #[test]
+    fn an_absent_party_info_is_four_zero_octets() {
+        // Not "absent": the length prefix stays, and dropping it changes the
+        // derived key with no error anywhere.
+        #[rustfmt::skip]
+        let absent_u: Vec<u8> = vec![
+            0, 0, 0, 7, 65, 49, 50, 56, 71, 67, 77, // 7 | "A128GCM"
+            0, 0, 0, 0,                              // PartyUInfo: empty
+            0, 0, 0, 3, 66, 111, 98,                 // 3 | "Bob"
+            0, 0, 0, 128,
+        ];
+        let info = other_info("A128GCM", None, Some(b"Bob"), 16);
+        assert_eq!(info.as_bytes(), absent_u);
+
+        // And the empty octet sequence is what an empty header value encodes to
+        // as well, so `""` and an absent parameter coincide — which is the
+        // server-behaviour divergence documented in the interop notes, not a
+        // bug in either reading.
+        assert_eq!(
+            other_info("A128GCM", Some(b""), Some(b"Bob"), 16).as_bytes(),
+            absent_u
+        );
+    }
+
+    #[test]
+    fn supp_pub_info_carries_the_bit_length_big_endian() {
+        for (key_len, expected) in [
+            (16usize, vec![0u8, 0, 0, 128]),
+            (24, vec![0, 0, 0, 192]),
+            (32, vec![0, 0, 1, 0]),
+        ] {
+            let info = other_info("A128GCM", None, None, key_len);
+            let bytes = info.as_bytes();
+            let tail = &bytes[bytes.len() - 4..];
+            assert_eq!(tail, expected, "{key_len} octets = {} bits", key_len * 8);
+        }
+    }
 }

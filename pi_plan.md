@@ -41,17 +41,20 @@ new behaviour/policy.
 | 2 | `feat(jwe): flattened JSON serialization` | J1 | `src/jwe/json.rs`, ADR 0011, `tests/jwe_json.rs`, jwcrypto + node interop |
 
 > **ADR numbering.** The numbers in this table were assigned before the
-> repository's ADR sequence was checked. Accepted ADRs run 0001–0010, so every
-> number below is **one lower in reality**: J1 = ADR 0011, J2 = ADR 0012,
-> J3 = ADR 0013, J4a = ADR 0014, J4b = ADR 0015, D1 = ADR 0016, K0 = ADR 0017,
-> and so on. New records take the next free number when they are written.
+> repository's ADR sequence was checked. Accepted ADRs ran 0001–0010 when the
+> plan was written, and each record takes the next free number when it is
+> written, so the real numbers are: J1 = 0011, J2 = 0012, J3 = 0013, J4a = 0014
+> (J4a and J4b landed as one record — a bounded search would authenticate against
+> a header the caller never agreed to, so recipient selection is caller-named
+> only), D1 = 0015, K0 = 0016. Later rows still carry their pre-flight numbers and
+> must be renumbered when written.
 | 3 | `feat(jwe): external AAD for JSON serializations` | J2 | options + ADR 0013, `tests/jwe_aad.rs`, interop |
 | 4 | `feat(jwe): shared and per-recipient unprotected headers` | J3 | header-union types, ADR 0014, `tests/jwe_unprotected.rs` |
 | 5 | `feat(jwe): general JSON serialization` | J4a | general envelope, ADR 0015, tests |
-| 6 | `feat(jwe): multiple recipients with bounded selection` | J4b | budgets, ADR 0016, `tests/jwe_multi_recipient.rs`, interop |
-| 7 | `feat(jwe): caller-understood crit extensions` | D1 | JWS-parity opt-in, ADR 0017, tests |
-| 8 | `feat(jwk): operation-aware key-agreement boundary` | K0 | `jwk_to_agreement_key`, ADR 0018, RFC 7518/7520 KDF vectors |
-| 9 | `feat(jwe): ECDH-ES direct agreement with P-256` | K1a | ADR 0019, `tests/jwe_ecdh_es.rs`, interop |
+| 6 | `feat(jwe): multiple recipients with bounded selection` | J4b | folded into J4a: a search authenticates against a header the caller never named, so selection is caller-scoped only (ADR 0014) |
+| 7 | `feat(jwe): caller-understood crit extensions` | D1 | JWS-parity opt-in, ADR 0015, `tests/jwe_crit.rs`, `jwe-crit` matrix family |
+| 8 | `feat(jwk): operation-aware key-agreement boundary` | K0 | **done** — `jwk::agreement` (`agreement_key`/`peer_key`/`AgreementKey::derive_key`), ADR 0016, RFC 7518 Appendix C vectors in `tests/jwk_agreement.rs` + `interop/tests/ecdh_kdf_vectors.py` |
+| 9 | `feat(jwe): ECDH-ES direct agreement with P-256` | K1a | ADR 0017, `tests/jwe_ecdh_es.rs`, interop |
 | 10 | `feat(jwe): ECDH-ES direct agreement with P-384/P-521` | K1b | vectors + interop |
 | 11 | `feat(jwe): ECDH-ES + AES key wrapping` | K2 | `tests/jwe_ecdh_es_kw.rs`, interop |
 | 12 | `feat(jwe): X25519 agreement keys for ECDH-ES` | K3a | OKP/X25519 JWK + ECDH-ES, ADR 0020, interop |
@@ -109,3 +112,4 @@ Node/panva matrix (`interop/tests/matrix.sh`), extended per feature.
 | 5 | `feat(jwe): shared and per-recipient unprotected headers` | J3 | `FlattenedJwe::{unprotected,header}`, disjointness + unprotected-position policy, `peek_jose_header`, `ParsedEnvelope::alg_authenticated`, ADR 0013, `tests/jwe_unprotected.rs` (RFC 7516 §A.5 vector), `jwe-json-unprot` matrix family + jwcrypto boundary checks |
 | 6 | `feat(jwe): general JSON serialization with caller-named recipients` | J4a + J4b | `jwe::general` (`GeneralJwe`, `RecipientSpec`, `encrypt_general*`, `decrypt_general_with_jwk{,_by_kid,_and_aad}`, `MAX_RECIPIENTS`), `wrap_cek`/`encrypt_core_multi` split, ADR 0014 (bounded array, no searching — J4b's "bounded selection" lands as a documented rejection), `tests/jwe_general.rs` (RFC 7516 §A.4 vector), `jwe-general` matrix family + jwcrypto general checks |
 | 7 | `feat(jwe): caller-understood crit extensions` | D1 | `Jwe{Encrypt,Decrypt}Options::with_understood_crit`, shared `validate_crit` (emit = receive), `JweDecryptOptions::pinned_to_jwk`, `{json,general}::decrypt_*_with_jwk_options`, ADR 0015, `tests/jwe_crit.rs`, `jwe-crit` matrix family (8 cells) + jwcrypto crit checks |
+| 8 | `feat(jwk): operation-aware key-agreement boundary` | K0 | `jwk::agreement` (`AgreementCurve`, `AgreementKey`/`PeerKey`, `agreement_key`/`peer_key`, `AgreementKey::derive_key`), one Concat KDF in `jwe::internal` (module made `pub(crate)` for it), ADR 0016, `tests/jwk_agreement.rs` (10 tests, RFC 7518 §C `Z` + derived key), `interop/tests/ecdh_kdf_vectors.py` (19 checks vs OpenSSL ECDH + an independent Python KDF), harness `agree`/`derive-key`. X25519 refused by name until its JWK import + `d`↔`x` check land (K3a) |

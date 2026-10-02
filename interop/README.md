@@ -48,7 +48,11 @@ uv venv interop/.venv \
 interop/.venv/bin/python interop/tests/ed25519_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/numeric_dates_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/jwe_json_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+interop/.venv/bin/python interop/tests/ecdh_kdf_vectors.py
 ```
+
+The last check needs `cryptography` (already a `jwcrypto` dependency) and takes
+no arguments.
 
 These checks generate disposable keys in memory and verify messages in both
 directions; they are separate from the Node matrix below. The Ed25519 check
@@ -73,6 +77,26 @@ per-recipient *unprotected* `header` member (the shape RFC 7516 §A.5 uses),
 which jose-rs refuses by name rather than reading an unauthenticated `alg`. That
 refusal is asserted, so the day the library starts accepting it the test has to
 change deliberately.
+
+### Key agreement and the Concat KDF (`ecdh_kdf_vectors.py`)
+
+ECDH is where an implementation can be silently wrong: a missing `0x04` point
+prefix, a coordinate padded on the wrong side, or an `OtherInfo` field without
+its length prefix all yield a shared secret that looks fine and decrypts
+nothing. Since `ECDH-ES` is not wired into JWE yet, there is no whole-message
+cell to compare, so this check compares the two primitives directly — 19
+assertions through the harness's `agree` and `derive-key` commands:
+
+* **RFC 7518 Appendix C**, which publishes both private keys, the shared secret
+  `Z`, every KDF parameter and the derived key: the harness's `Z` and derived key
+  are compared against the RFC's printed values, and again against **OpenSSL's**
+  ECDH and a Python transcription of RFC 7518 §4.6.2 written from the spec text;
+* per-curve (P-256/P-384/P-521) random key pairs: agreement is symmetric, `Z`
+  equals OpenSSL's, and the derived key equals the Python KDF's — with `apu`/`apv`
+  of deliberately unequal lengths, since equal-length ASCII values are exactly
+  the case an implementation that dropped the length prefix still "passes";
+* refusals: a peer carrying `d`, an own key pinned to `sign`, a P-256 scalar
+  against a P-384 point, an off-curve peer point, and `apu == apv`.
 
 ```
 just interop-build            # build Rust harness (release) + npm ci
@@ -193,10 +217,17 @@ Every JWE command accepts an optional `understood_crit` list: the private header
 | `encrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, plaintext_b64u, header?, aad_b64u?, understood_crit?}` | `{jwe}` — RFC 7516 §7.2.2 JSON, as a string |
 | `decrypt-flattened --alg <ALG> --enc <ENC>` | `{jwk, jwe, aad_b64u?, understood_crit?}` | `{ok, plaintext_b64u, protected_header, unprotected_header?}` |
 | `sign-compact-raw --alg <ALG>` (Rust only)  | `{jwk, header_raw, payload_b64u}`       | `{jws}` signed over `header_raw` verbatim     |
+| `agree` (Rust only)                          | `{own_jwk, peer_jwk}`                 | `{z_b64u, curve}` — raw ECDH shared secret |
+| `derive-key` (Rust only)                     | `{own_jwk, peer_jwk, alg_id, apu?, apv?, key_len}` | `{derived_b64u, curve}` — RFC 7518 §4.6.2 output |
 
 `header` is an optional object of extra protected-header members (e.g.
 `{"kid":"…","tenant":"…"}`); `alg` / `enc` always come from the flags and may
 not be overridden. `protected_header` is the header as that library parsed it.
+
+The two agreement commands have no JS counterpart and no matrix cells — they
+exist for `tests/ecdh_kdf_vectors.py`, which compares them against OpenSSL and
+against RFC 7518 Appendix C. `agree` emits the raw shared secret, which is a test
+probe and never a key; `derive-key` is what JOSE actually consumes.
 
 Algorithm identifiers are the **exact JOSE strings**: `ML-DSA-44`, `ML-DSA-65`,
 `ML-DSA-87`, `EdDSA`, `ES256`; JWE: `dir`, `A128KW`/`A192KW`/`A256KW` with

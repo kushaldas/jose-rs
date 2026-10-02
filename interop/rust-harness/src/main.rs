@@ -40,11 +40,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use jose_rs::algorithm::{JweAlgorithm, JweEncryption, JwsAlgorithm};
+use jose_rs::jwk::agreement::{agreement_key, peer_key};
 use jose_rs::jwk::Jwk;
 use jose_rs::jwt::{Claims, Validation};
 use jose_rs::JoseHeader;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 
 fn main() {
@@ -85,6 +86,8 @@ fn run() -> Result<()> {
     match cmd.as_str() {
         "gen-key" => gen_key(&require_alg(alg)?, enc.as_deref()),
         "export-pub" => export_pub(),
+        "agree" => agree(),
+        "derive-key" => derive_key(),
         "sign-compact" => sign_compact(&require_alg(alg)?),
         "verify-compact" => verify_compact(&require_alg(alg)?),
         "sign-compact-raw" => sign_compact_raw(&require_alg(alg)?),
@@ -172,6 +175,64 @@ fn export_pub() -> Result<()> {
     let jwk: Jwk = serde_json::from_str(&raw).context("parsing private JWK from stdin")?;
     let pubj = jwk.to_public_jwk();
     emit(&pubj)
+}
+
+#[derive(Deserialize)]
+struct AgreementInput {
+    /// Own half: must carry the private scalar.
+    own_jwk: Jwk,
+    /// Peer half: public material only.
+    peer_jwk: Jwk,
+    /// AlgorithmID for the Concat KDF (ASCII `enc` or `alg` value).
+    #[serde(default)]
+    alg_id: Option<String>,
+    #[serde(default)]
+    apu: Option<String>,
+    #[serde(default)]
+    apv: Option<String>,
+    /// Derived key length in octets; required with `alg_id`.
+    #[serde(default)]
+    key_len: Option<usize>,
+}
+
+/// Emit the raw ECDH shared secret `Z` for a key pair.
+///
+/// This exists so the Python side of the interop suite can compare this
+/// crate's agreement against another implementation's — RFC 7518 §C publishes
+/// both private keys and the resulting `Z`, so agreement, curve handling and
+/// point encoding all become comparable. It is a test probe, not a
+/// recommendation: `Z` is never a key, and `derive-key` below is what JOSE
+/// actually consumes.
+fn agree() -> Result<()> {
+    let input: AgreementInput =
+        serde_json::from_str(&read_stdin()?).context("parsing agreement input from stdin")?;
+    let own = agreement_key(&input.own_jwk).map_err(anyhow::Error::from)?;
+    let peer = peer_key(&input.peer_jwk).map_err(anyhow::Error::from)?;
+    let z = own.agree(&peer).map_err(anyhow::Error::from)?;
+    emit(&json!({
+        "z_b64u": URL_SAFE_NO_PAD.encode(z.as_slice()),
+        "curve": format!("{:?}", own.curve()),
+    }))
+}
+
+/// Run the JOSE Concat KDF (RFC 7518 §4.6.2) over an ECDH shared secret.
+fn derive_key() -> Result<()> {
+    let input: AgreementInput =
+        serde_json::from_str(&read_stdin()?).context("parsing derivation input from stdin")?;
+    let alg_id = input
+        .alg_id
+        .as_deref()
+        .context("derive-key needs alg_id (the ASCII enc or alg value)")?;
+    let key_len = input.key_len.context("derive-key needs key_len (octets)")?;
+    let own = agreement_key(&input.own_jwk).map_err(anyhow::Error::from)?;
+    let peer = peer_key(&input.peer_jwk).map_err(anyhow::Error::from)?;
+    let derived = own
+        .derive_key(&peer, alg_id, input.apu.as_deref(), input.apv.as_deref(), key_len)
+        .map_err(anyhow::Error::from)?;
+    emit(&json!({
+        "derived_b64u": URL_SAFE_NO_PAD.encode(derived.as_slice()),
+        "curve": format!("{:?}", own.curve()),
+    }))
 }
 
 #[derive(Deserialize)]

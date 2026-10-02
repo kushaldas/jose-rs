@@ -34,6 +34,12 @@ ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 
+ECDH key management (`ECDH-ES`, `ECDH-ES+AxxxKW`) is not implemented yet; the
+key-agreement boundary that will drive it — own key vs peer key, curve
+enforcement, and RFC 7518 §4.6.2's Concat KDF, verified against the RFC's own
+Appendix C vector — is already available as
+[`jose_rs::jwk::agreement`](src/jwk/agreement.rs) (see ADR 0016).
+
 ## Feature flags
 
 | Feature | Default | Description |

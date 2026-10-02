@@ -1,5 +1,6 @@
 //! JSON Web Key (JWK) types and serialization (RFC 7517).
 
+pub mod agreement;
 pub mod convert;
 pub mod generate;
 pub mod import;

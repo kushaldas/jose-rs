@@ -49,6 +49,16 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   `json::decrypt_flattened_with_jwk_options` and
   `general::decrypt_general_with_jwk_options` so the opt-in is reachable on every
   path. See ADR 0015.
+- The **key-agreement boundary** in the new `jose_rs::jwk::agreement` module:
+  `agreement_key()` prepares one's own half (curve support, `use`/`key_ops`
+  permitting `deriveKey`, an `alg` pin that names a key-agreement algorithm, and
+  the presence of private material are all enforced), `peer_key()` prepares the
+  other half (public material only, point validated, no policy read from a
+  sender-controlled key), and `AgreementKey::derive_key` performs agreement and
+  RFC 7518 §4.6.2's Concat KDF in one step so the raw shared secret never has to
+  be handled as a key. Curve mismatches are refused, and agreement is verified
+  against RFC 7518 Appendix C. This is infrastructure for the `ECDH-ES*`
+  key-management modes, which remain unimplemented. See ADR 0016.
 
 ### Internal
 

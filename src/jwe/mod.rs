@@ -32,7 +32,11 @@
 //!
 //! Not implemented, and refused by name rather than ignored: content
 //! compression (`zip`), which this crate cannot decrypt and therefore will not
-//! emit.
+//! emit; and the ECDH key-management modes (`ECDH-ES`, `ECDH-ES+A128KW`,
+//! `+A192KW`, `+A256KW`). The boundary those modes will sit behind — own key vs
+//! peer key, curve enforcement, and RFC 7518 §4.6.2's Concat KDF — already
+//! exists as [`crate::jwk::agreement`] (ADR 0016); wiring it into envelope
+//! production and consumption is what is still missing.
 
 pub mod compact;
 pub mod general;
@@ -41,7 +45,12 @@ pub mod json;
 /// Shared content-encryption implementation (crate-private).
 mod content;
 /// Shared envelope parsing, header policy and key management (crate-private).
-mod internal;
+///
+/// `pub(crate)` rather than `private` so that the key-agreement boundary in
+/// [`crate::jwk::agreement`] can run the derivation policy (JOSE's Concat KDF)
+/// that the JWE algorithms themselves use — one implementation of RFC 7518
+/// §4.6.2, not one per caller. It is not part of the public API.
+pub(crate) mod internal;
 
 pub use compact::{
     decrypt, decrypt_with_jwk, decrypt_with_options, encrypt, encrypt_with_header,
