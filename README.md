@@ -163,6 +163,12 @@ let ed_jwk = jwk::generate_ed25519().unwrap();
 let software_key = jwk::jwk_to_software_key(&ec_jwk).unwrap();
 let roundtripped = jwk::software_key_to_jwk(&software_key).unwrap();
 
+// PEM (RFC 7468): the type label decides the format, and other formats are
+// refused by name rather than guessed from the bytes.
+let from_file = jwk::jwk_from_pem(&std::fs::read_to_string("key.pem")?).unwrap();
+let public_pem = jwk::public_pem_from_jwk(&ec_jwk).unwrap();   // "-----BEGIN PUBLIC KEY-----"
+let private_pem = jwk::private_pem_from_jwk(&rsa_jwk).unwrap(); // needs a private JWK
+
 // Thumbprint (RFC 7638)
 let thumbprint = jwk::thumbprint::thumbprint_sha256(&ec_jwk).unwrap();
 // Explicit SHA-384/SHA-512 are also available; SHA-256 remains the default.

@@ -50,6 +50,7 @@ interop/.venv/bin/python interop/tests/numeric_dates_jwcrypto.py interop/rust-ha
 interop/.venv/bin/python interop/tests/jwe_json_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 interop/.venv/bin/python interop/tests/ecdh_kdf_vectors.py
 interop/.venv/bin/python interop/tests/jwe_ecdh_es_jwcrypto.py interop/rust-harness/target/debug/jose-interop
+interop/.venv/bin/python interop/tests/pem_jwcrypto.py interop/rust-harness/target/debug/jose-interop
 ```
 
 The last check needs `cryptography` (already a `jwcrypto` dependency) and takes
@@ -100,6 +101,30 @@ One divergence is pinned: RFC 7518 §4.8 allows the password to be an octet sequ
 jwcrypto's `JWK.from_password` takes text and UTF-8 encodes it itself, so it cannot
 express a password that is not valid text. jose-rs accepts both forms.
 
+### PEM key files against OpenSSL and `cryptography` (`pem_jwcrypto.py`)
+
+60 checks, and the only suite here that shells out to the `openssl` CLI — because the
+question a key file raises is not "does somebody read it" but "is it the file everybody
+else would have written".
+
+Python → Rust: `cryptography` generates RSA-2048 / P-256 / P-384 / P-521 / Ed25519 and
+exports PKCS#8 and SPKI PEM. jose-rs imports them, and every JWK member is compared against
+values computed in Python from the key object — fixed-width coordinates, minimal-width RSA
+integers — so an import that guessed at a width shows up. jose-rs then signs with the
+imported key and Python verifies with the SPKI half.
+
+Rust → Python: jose-rs exports PEM and `cryptography` loads it, then **`openssl` re-encodes
+the same key and the bytes must match**. "Parses" would have been a weaker claim; byte
+equality against another implementation's encoder is the one that catches a non-canonical
+structure. That check is what found the version-1 problem pinned in ADR 0022: the backend's
+Ed25519 PKCS#8 carries its public key as an `OneAsymmetricKey` attribute, which OpenSSL
+reads and `cryptography` refuses, so the export normalizes to `PrivateKeyInfo` (version 0)
+and the version-1 form is still accepted on the way in.
+
+Strictness is asserted in both directions: PKCS#1, SEC1, certificate, encrypted PKCS#8 and
+legacy `DEK-Info` blocks are refused with the reason named; two blocks are refused with a
+count; text before `-----BEGIN` and after `-----END` is refused; leading/trailing blank
+lines, CRLF endings and a missing final newline are accepted.
 ### AES-GCM key management against jwcrypto (`jwe_gcm_kw_jwcrypto.py`)
 
 135 checks over all three `*GCMKW` algorithms and four content algorithms. Beyond the
@@ -274,6 +299,9 @@ Every JWE command accepts an optional `understood_crit` list: the private header
 
 | `gen-key --alg <ALG> [--enc <ENC>] [--crv <CRV>]` | —                                 | private JWK (`--enc` for `dir`, `--crv` for `ECDH-ES`) |
 | `export-pub`                                | private JWK                             | public JWK (private fields dropped)           |
+| `import-pem`                                | PEM text (raw stdin)                    | imported JWK                                  |
+| `export-pem --pem=private\|public`           | JWK                                     | PEM text, emitted verbatim                    |
+| `sign-pem --alg <ALG>`                      | PEM text (raw stdin)                    | compact JWS over a fixed payload              |
 | `sign-compact --alg <ALG>`                  | `{jwk, payload_b64u, header?}`          | `{jws}`                                       |
 | `verify-compact --alg <ALG>`                | `{jwk, jws}`                            | `{ok, payload_b64u, protected_header}`        |
 | `sign-jwt --alg <ALG>`                      | `{jwk, claims}`                         | `{jwt}`                                       |

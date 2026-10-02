@@ -25,3 +25,4 @@ history.
 | [0019](0019-x25519-agreement-keys.md) | X25519 is admitted to agreement only with a `d`-derives-`x` check | Accepted, amends 0016 |
 | [0020](0020-aes-gcm-key-management.md) | AES-GCM key management generates its own `iv`/`tag` and puts them in the protected header | Accepted |
 | [0021](0021-pbes2-password-based-key-management.md) | A password is its own input type, and the sender's work budget is bounded by what peers will compute | Accepted |
+| [0022](0022-pem-label-dispatch.md) | PEM reads the label, and writes the form peers parse | Accepted |

@@ -125,6 +125,24 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
   against RFC 7518 Appendix C. This is infrastructure for the `ECDH-ES*`
   key-management modes, which remain unimplemented. See ADR 0016.
 
+- **PEM (RFC 7468) import and export for JWKs** in the new `jose_rs::jwk::pem` module:
+  `jwk_from_pem`, the format-explicit `jwk_from_pkcs8_pem`/`jwk_from_spki_pem`, and separate
+  `private_pem_from_jwk`/`public_pem_from_jwk` exports. The type label decides the parse and
+  nothing is guessed: `RSA PRIVATE KEY` (PKCS#1), `EC PRIVATE KEY` (SEC1), `CERTIFICATE` and
+  a password-encrypted `ENCRYPTED PRIVATE KEY` are refused **by name** with the entry point
+  that will serve them, and legacy `Proc-Type`/`DEK-Info` headers are refused as what they
+  are — an encrypted key — rather than failing as corruption. Two blocks are refused with a
+  count, text before `-----BEGIN` and after `-----END` is refused (RFC 7468 permits a
+  preamble; reading a key out of a document that happens to contain one is how "which key
+  did they mean?" becomes a silent decision) while whitespace around the block is accepted,
+  as are CRLF endings and canonical base64 only. The DER importers' own refusals still apply
+  through the armor. On export, Ed25519's PKCS#8 is normalized from `OneAsymmetricKey`
+  (version 1, public key in an attribute — which OpenSSL reads and `cryptography` refuses,
+  measured) down to `PrivateKeyInfo` (version 0), the form every peer emits; the version-1
+  form still imports. X25519 public export is refused by name rather than emitting a file
+  that claims an SPKI it does not have. Interoperates byte-for-byte with OpenSSL and with
+  `cryptography`-generated files in both directions. See ADR 0022.
+
 ### Internal
 
 - `jose_rs::jwe` is split into `content` (AEAD / AES-CBC-HMAC), `internal`
@@ -362,7 +380,6 @@ accepted, hence the minor-version bump.
   `thiserror`, and `cryptoki`.
 - Replaced the yanked transitive `spin 0.9.8` dependency with `0.9.9` and
   removed its obsolete CI audit warning exception.
-
 
 ## [0.7.0] - 2026-08-05
 

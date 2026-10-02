@@ -64,6 +64,7 @@ fn run() -> Result<()> {
     let mut alg: Option<String> = None;
     let mut enc: Option<String> = None;
     let mut crv: Option<String> = None;
+    let mut pem_kind: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -84,6 +85,12 @@ fn run() -> Result<()> {
             i += 1;
         } else if a == "--crv" {
             crv = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--pem=") {
+            pem_kind = Some(rest.to_string());
+            i += 1;
+        } else if a == "--pem" {
+            pem_kind = raw.get(i + 1).cloned();
             i += 2;
         } else {
             i += 1;
@@ -110,6 +117,9 @@ fn run() -> Result<()> {
         }
         "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
+        "import-pem" => import_pem(),
+        "export-pem" => export_pem(&require_pem_kind(pem_kind)?),
+        "sign-pem" => sign_pem(&require_alg(alg)?),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -173,6 +183,10 @@ fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
             jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
         }
         "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
+        // RSA generation for the PEM checks: an RSA key is the one family whose PKCS#8
+        // export is long enough that a truncated armor read would still look plausible.
+        "RS256" => set_alg(jose_rs::jwk::generate_rsa(2048)?, "RS256"),
+        "ES256-RSA" => set_alg(jose_rs::jwk::generate_rsa(3072)?, "RS256"),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
         // An agreement recipient key: a key pair pinned for one of the ECDH-ES
@@ -853,4 +867,51 @@ fn decrypt_general(alg: &str, enc: &str) -> Result<()> {
         protected_header: protected,
         unprotected_header: (!merged.is_empty()).then_some(merged),
     })
+}
+
+/// Import a PEM document from stdin and print the resulting JWK as JSON.
+///
+/// The whole point of I0 interop is that the *label* decides the parse, so the harness
+/// does not take a format argument here either — it calls the same dispatching entry
+/// point a caller would.
+fn import_pem() -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::jwk_from_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("PEM import rejected: {e}"))?;
+    emit(&jwk)
+}
+
+/// Read a JWK from stdin and print it as PEM (`--pem=private` or `--pem=public`).
+fn export_pem(kind: &str) -> Result<()> {
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let text = match kind {
+        "private" => jose_rs::jwk::private_pem_from_jwk(&jwk),
+        "public" => jose_rs::jwk::public_pem_from_jwk(&jwk),
+        other => bail!("unknown --pem kind: {other}"),
+    }
+    .map_err(|e| anyhow!("PEM export refused: {e}"))?;
+    // Emitted verbatim: the library's PEM already ends in exactly one newline, and the
+    // byte-exact checks compare against other implementations' files.
+    print!("{text}");
+    Ok(())
+}
+
+/// Import a private key from PEM, pin the caller's algorithm, sign stdin, print the JWS.
+///
+/// This is the check that matters for a key *file*: the bytes that came from another
+/// implementation's exporter have to work as a signing key, not merely parse.
+fn sign_pem(alg: &str) -> Result<()> {
+    let text = read_stdin()?;
+    let mut jwk = jose_rs::jwk::jwk_from_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("PEM import rejected: {e}"))?;
+    jwk.alg = Some(alg.to_string());
+    let header = jose_rs::JoseHeader::new(alg);
+    let token = jose_rs::jws::compact::sign_with_jwk(&jwk, b"pem interop", &header)
+        .map_err(|e| anyhow!("signing with an imported key failed: {e}"))?;
+    println!("{token}");
+    Ok(())
+}
+
+fn require_pem_kind(kind: Option<String>) -> Result<String> {
+    kind.ok_or_else(|| anyhow!("--pem=private|public is required"))
 }

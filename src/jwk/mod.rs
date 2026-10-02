@@ -4,6 +4,7 @@ pub mod agreement;
 pub mod convert;
 pub mod generate;
 pub mod import;
+pub mod pem;
 pub mod thumbprint;
 
 /// The X25519 base point, shared by key generation and by the `d`-derives-`x`
@@ -17,6 +18,9 @@ pub use generate::{
     generate_symmetric_for_alg, generate_x25519,
 };
 pub use import::{jwk_from_pkcs8_der, jwk_from_spki_der};
+pub use pem::{
+    jwk_from_pem, jwk_from_pkcs8_pem, jwk_from_spki_pem, private_pem_from_jwk, public_pem_from_jwk,
+};
 
 // Re-export JwkOp at the crate root pattern.
 
