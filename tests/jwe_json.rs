@@ -363,6 +363,26 @@ fn jws_objects_are_refused_as_jwe() {
     }
 }
 
+/// Regression for the flattened-JWE fuzz artifacts: private members are stored
+/// in document order, so serialization must not route them through a sorted map.
+#[test]
+fn private_member_order_survives_round_trip() {
+    let text = r#"{"ciphertext":"AA","z-private":1,"protected":"e30","a-private":2}"#;
+    let parsed = json::FlattenedJwe::from_json(text).expect("artifact shape parses");
+    assert_eq!(
+        parsed
+            .other
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["z-private", "a-private"]
+    );
+
+    let reparsed = json::FlattenedJwe::from_json(&parsed.to_json().expect("re-emit"))
+        .expect("re-emitted document parses");
+    assert_eq!(reparsed, parsed, "private-member order changed");
+}
+
 /// The compact <-> flattened conversion is information-preserving, so a
 /// message produced by either API is readable by both.
 #[test]

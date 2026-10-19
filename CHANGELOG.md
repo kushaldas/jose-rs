@@ -7,6 +7,13 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [0.10.0] - 2026-10-19
 
+### Fixed
+
+- Preserve the relative order of retained private members when a flattened JWE is
+  serialized, matching the `FlattenedJwe::other` round-trip contract.
+- Preserve arbitrary-precision numbers in unregistered JWT claims instead of allowing
+  repeated parse/serialize cycles to change their value.
+
 ### Security
 
 - Bound attacker-controlled work before cryptography: JSON duplicate tracking is linear,

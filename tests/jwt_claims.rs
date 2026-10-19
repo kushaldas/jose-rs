@@ -73,6 +73,23 @@ fn encoding_emits_one_member_per_claim_name() {
     assert_eq!(back.extra["scope"], json!("read write"));
 }
 
+/// Regression for the claims fuzz artifacts: unregistered JSON numbers must
+/// not drift when a parsed claim set is serialized and parsed again.
+#[test]
+fn extra_numbers_round_trip_without_precision_drift() {
+    let input = br#"{"integer":1000001000000080100080100801000801700005,"tiny":1e-124,"large":1700036.1E125}"#;
+    let claims = Claims::from_json_bytes(input).expect("artifact shape parses");
+    let emitted = claims.to_json_vec().expect("claims emit");
+    let reparsed = Claims::from_json_bytes(&emitted).expect("emitted claims parse");
+
+    for name in ["integer", "tiny", "large"] {
+        assert_eq!(
+            reparsed.extra[name], claims.extra[name],
+            "custom claim number {name} changed across one parse/emit cycle"
+        );
+    }
+}
+
 #[test]
 fn a_colliding_extra_claim_cannot_be_signed_at_all() {
     let key = signer();

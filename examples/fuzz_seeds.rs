@@ -433,6 +433,20 @@ fn jwe_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let text = flattened.to_json()?;
     write_seed(out, "jwe_json_flattened", "valid.json", text.as_bytes())?;
 
+    // Regression for artifacts that found retained private members being
+    // reordered by the flattened serializer's intermediate JSON map.
+    let mut private_order = flattened.clone();
+    private_order.other = vec![
+        ("z-private".into(), serde_json::json!(1)),
+        ("a-private".into(), serde_json::json!(2)),
+    ];
+    write_seed(
+        out,
+        "jwe_json_flattened",
+        "regression-private-member-order.json",
+        private_order.to_json()?.as_bytes(),
+    )?;
+
     // `alg` copied into the unprotected header: the member this crate accepts
     // only from the protected place (ADR 0013).
     let mut duplicated = flattened.clone();
@@ -514,6 +528,10 @@ fn claims_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         (
             "huge-numeric.json",
             r#"{"iat":9007199254740993,"exp":18446744073709551616}"#,
+        ),
+        (
+            "regression-large-extra-number.json",
+            r#"{"integer":1000001000000080100080100801000801700005,"tiny":1e-124,"large":1700036.1E125}"#,
         ),
         (
             "fractional.json",

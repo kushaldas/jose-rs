@@ -218,62 +218,58 @@ impl FlattenedJwe {
 
     /// Serialize back to the flattened JSON syntax.
     ///
-    /// Members are written into a JSON map, so a name cannot appear twice
-    /// (RFC 7515 §4 / RFC 7516 §5.2 step 4). Retained private members are
-    /// re-emitted unchanged.
+    /// Members are written through an ordered, duplicate-rejecting member list,
+    /// so a name cannot appear twice (RFC 7515 §4 / RFC 7516 §5.2 step 4).
+    /// Retained private members are re-emitted unchanged and in their original
+    /// relative order.
     pub fn to_json(&self) -> Result<String> {
-        let mut map = serde_json::Map::new();
+        let mut members = Vec::new();
         if let Some(protected) = &self.protected {
-            map.insert("protected".into(), serde_json::json!(protected));
+            members.push(("protected".into(), serde_json::json!(protected)));
         }
         if let Some(unprotected) = &self.unprotected {
             if !unprotected.is_empty() {
-                map.insert(
+                members.push((
                     "unprotected".into(),
                     serde_json::Value::Object(unprotected.clone()),
-                );
+                ));
             }
         }
         if let Some(header) = &self.header {
             if !header.is_empty() {
-                map.insert("header".into(), serde_json::Value::Object(header.clone()));
+                members.push(("header".into(), serde_json::Value::Object(header.clone())));
             }
         }
         if let Some(aad) = &self.aad {
             // RFC 7516 §7.2.1: absent rather than empty.
             if !aad.is_empty() {
-                map.insert("aad".into(), serde_json::json!(aad));
+                members.push(("aad".into(), serde_json::json!(aad)));
             }
         }
         if let Some(encrypted_key) = &self.encrypted_key {
             // RFC 7516 §7.2.1: absent when the JWE Encrypted Key is empty.
             if !encrypted_key.is_empty() {
-                map.insert("encrypted_key".into(), serde_json::json!(encrypted_key));
+                members.push(("encrypted_key".into(), serde_json::json!(encrypted_key)));
             }
         }
         if let Some(iv) = &self.iv {
             if !iv.is_empty() {
-                map.insert("iv".into(), serde_json::json!(iv));
+                members.push(("iv".into(), serde_json::json!(iv)));
             }
         }
         if let Some(tag) = &self.tag {
             if !tag.is_empty() {
-                map.insert("tag".into(), serde_json::json!(tag));
+                members.push(("tag".into(), serde_json::json!(tag)));
             }
         }
-        map.insert("ciphertext".into(), serde_json::json!(&self.ciphertext));
+        members.push(("ciphertext".into(), serde_json::json!(&self.ciphertext)));
 
-        // Retained private members are written last and `write_into` refuses
-        // any name already present, so a token that smuggled a private member
-        // named `ciphertext` cannot be re-emitted with two meanings.
-        let retained: Vec<(String, serde_json::Value)> = self
-            .other
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        MemberMap::new(retained)?.write_into(&mut map)?;
+        // Retained private members are written last and `MemberMap::new`
+        // refuses any repeated name, so a manually constructed value cannot
+        // be emitted with two meanings for `ciphertext` or another member.
+        members.extend(self.other.iter().cloned());
 
-        let text = serde_json::to_string(&map)?;
+        let text = serde_json::to_string(&MemberMap::new(members)?)?;
         ensure_token_size(&text)?;
         Ok(text)
     }

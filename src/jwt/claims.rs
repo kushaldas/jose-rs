@@ -20,8 +20,8 @@
 //!
 //! * **Numbers keep their precision.** Registered timestamps are [`NumericDate`], which parses
 //!   decimal text rather than going through `f64`; unregistered claims are kept as
-//!   [`serde_json::Value`], which preserves `u64`/`i64` exactly. A claim larger than 2^53 is not
-//!   quietly rounded.
+//!   arbitrary-precision [`serde_json::Value`] numbers. Integers beyond native integer ranges
+//!   and exponent-form decimals are not quietly rounded during parse/emit cycles.
 //! * **Absent and null are the same thing for optional claims.** `"exp": null` and no `exp`
 //!   member both mean "no expiration". This is stated because it is *not* the JSON convention
 //!   elsewhere in this crate — header members are strictly typed and a `null` `crit` is an
