@@ -5,3 +5,5 @@ fuzz/corpus/
 fuzz/artifacts/
 fuzz/fuzz-targets/
 fuzz/Cargo.lock
+__pycache__/
+*.pyc
