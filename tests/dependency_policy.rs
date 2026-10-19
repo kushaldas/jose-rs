@@ -168,6 +168,28 @@ fn every_direct_dependency_is_documented_with_its_locked_version() {
 }
 
 #[test]
+fn dependency_report_lists_every_direct_dependency() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new("bash")
+        .arg(root.join("scripts/dependency-report.sh"))
+        .current_dir(&root)
+        .output()
+        .expect("dependency report script runs");
+    assert!(
+        output.status.success(),
+        "dependency report failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8(output.stdout).expect("dependency report is UTF-8");
+    for (name, _) in direct_dependencies() {
+        assert!(
+            report.contains(&format!("| `{name}`")),
+            "dependency report omitted direct dependency {name}"
+        );
+    }
+}
+
+#[test]
 fn the_documented_msrv_is_the_declared_one() {
     let text = manifest();
     let declared = extract_quoted(&text, "rust-version").expect("rust-version is declared");

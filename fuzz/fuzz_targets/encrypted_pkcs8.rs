@@ -29,7 +29,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let password = Password::from_utf8("fuzz-password");
+    // The checked-in OpenSSL fixtures were generated with this public test
+    // password; matching it keeps the successful decrypt path in the corpus.
+    let password = Password::from_utf8("hunter2");
     let options = Pkcs8ReadOptions::default()
         .with_max_iterations(jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS);
 

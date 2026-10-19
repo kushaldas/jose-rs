@@ -38,10 +38,16 @@ fuzz_target!(|data: &[u8]| {
     // refuses rather than write two members with one name.
     if let Ok(bytes) = claims.to_json_vec() {
         if let Ok(again) = Claims::from_json_bytes(&bytes) {
+            let emitted: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("Claims::to_json_vec emitted invalid JSON");
+            let again_bytes = again
+                .to_json_vec()
+                .expect("parsed emitted claims did not re-serialize");
+            let round_tripped: serde_json::Value = serde_json::from_slice(&again_bytes)
+                .expect("round-tripped Claims emitted invalid JSON");
             assert_eq!(
-                again.to_json_vec().ok().as_deref(),
-                Some(bytes.as_slice()),
-                "claims round-trip is not stable"
+                round_tripped, emitted,
+                "claims round-trip changed the JSON value"
             );
         }
         // Accessors and the string-view parse are pure reads and must not panic

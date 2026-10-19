@@ -56,10 +56,9 @@ fuzz_target!(|data: &[u8]| {
 
 /// A `dir` + A256GCM content key as a JWK, from fixed bytes.
 fn content_key_jwk() -> Option<Jwk> {
-    let mut material = [0x5au8; 32];
-    // Touch the array so the compiler cannot fold it away and so the value is
-    // visibly not a secret from anywhere real.
-    material[0] ^= 0x01;
+    // Public corpus material, intentionally identical to the seed generator
+    // and stable replay key so valid seeds reach authenticated decryption.
+    let material = [0x5au8; 32];
     let encoded = jose_rs::base64url::encode(&material);
     let text = format!(r#"{{"kty":"oct","alg":"dir","kid":"fuzz-dir-key","k":"{encoded}"}}"#);
     Jwk::from_json(&text).ok()

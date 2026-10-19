@@ -403,10 +403,11 @@ impl JwkSet {
 
     /// Parse a JWK Set under explicit import budgets.
     ///
-    /// Identical to [`from_json`](Self::from_json) except that the document size and entry count
-    /// are checked first, so a published set cannot cost more to parse than the caller decided.
-    /// Both checks run *before* the entries are turned into keys, which is the only order in
-    /// which a budget does anything: after parsing, the memory is already spent.
+    /// Identical to [`from_json`](Self::from_json) except that the document size is checked before
+    /// JSON parsing and the entry count is checked immediately after deserialization. The byte
+    /// limit is therefore the pre-allocation defence. The entry limit prevents an oversized set
+    /// from being returned or used, but the `Vec<Jwk>` has already been allocated by the time its
+    /// length is knowable; callers must set an appropriate byte limit to bound parsing memory.
     ///
     /// [`from_json`](Self::from_json) deliberately keeps its unbounded behaviour — a limit
     /// that appears silently

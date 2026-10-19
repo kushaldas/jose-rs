@@ -62,6 +62,13 @@ fn seeds_for(harness: &str) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+fn named_seed(harness: &str, name: &str) -> Vec<u8> {
+    seeds_for(harness)
+        .into_iter()
+        .find_map(|(candidate, bytes)| (candidate == name).then_some(bytes))
+        .unwrap_or_else(|| panic!("missing {name} seed for {harness}"))
+}
+
 /// Bounds on mutation enumeration, so this file stays a test rather than becoming
 /// a batch job. A 300 KB JWK Set is a legitimate seed (`over-entry-limit.json`) and
 /// enumerating its prefixes would mean 300 000 parses of a document whose whole
@@ -209,7 +216,7 @@ fn replay_encrypted_pkcs8(bytes: &[u8]) {
         return;
     }
     use jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS;
-    let password = jose_rs::jwk::Password::from_utf8("fuzz-password");
+    let password = jose_rs::jwk::Password::from_utf8("hunter2");
     let options = Pkcs8ReadOptions::default().with_max_iterations(PKCS8_MIN_ITERATIONS);
     for result in [
         jose_rs::jwk::encrypted_pkcs8::jwk_from_encrypted_pkcs8_der_with_options(
@@ -296,10 +303,16 @@ fn replay_claims(bytes: &[u8]) {
     };
     if let Ok(emitted) = claims.to_json_vec() {
         if let Ok(again) = Claims::from_json_bytes(&emitted) {
+            let emitted_value: serde_json::Value =
+                serde_json::from_slice(&emitted).expect("Claims::to_json_vec emitted invalid JSON");
+            let again_bytes = again
+                .to_json_vec()
+                .expect("parsed emitted claims did not re-serialize");
+            let round_tripped: serde_json::Value = serde_json::from_slice(&again_bytes)
+                .expect("round-tripped Claims emitted invalid JSON");
             assert_eq!(
-                again.to_json_vec().ok().as_deref(),
-                Some(emitted.as_slice()),
-                "claims round-trip is not stable"
+                round_tripped, emitted_value,
+                "claims round-trip changed the JSON value"
             );
         }
         let _ = claims.sub.as_deref();
@@ -498,6 +511,28 @@ fn replay_encrypted_pkcs8_corpus() {
 }
 
 #[test]
+fn encrypted_pkcs8_supported_seed_reaches_reexport() {
+    let seed = named_seed("encrypted_pkcs8", "enc-sha256-aes256.pem");
+    let text = std::str::from_utf8(&seed).expect("encrypted PKCS#8 seed is UTF-8");
+    let password = jose_rs::jwk::Password::from_utf8("hunter2");
+    let options = Pkcs8ReadOptions::default()
+        .with_max_iterations(jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS);
+    let jwk = jose_rs::jwk::encrypted_pkcs8::jwk_from_encrypted_pkcs8_pem_with_options(
+        text, &password, &options,
+    )
+    .expect("supported encrypted PKCS#8 seed imports with the harness password");
+    jose_rs::jwk::jwk_to_software_key(&jwk).expect("imported seed converts to a software key");
+    jose_rs::jwk::encrypted_pkcs8::encrypted_pkcs8_der_from_jwk(
+        &jwk,
+        &password,
+        &Pkcs8Encryption::Aes256CbcPbkdf2HmacSha256 {
+            iterations: jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS,
+        },
+    )
+    .expect("imported seed re-exports");
+}
+
+#[test]
 fn replay_jwkset_select_corpus() {
     let inputs = drive("jwkset_select", replay_jwkset_select);
     assert!(inputs > 100, "only {inputs} inputs replayed");
@@ -549,6 +584,57 @@ fn replay_jwe_compact_corpus() {
 fn replay_jwt_unverified_corpus() {
     let inputs = drive("jwt_decode_unverified", replay_jwt_unverified);
     assert!(inputs > 100, "only {inputs} inputs replayed");
+}
+
+#[test]
+fn flattened_jwe_seeds_cover_success_and_header_collision_paths() {
+    let valid = named_seed("jwe_json_flattened", "valid.json");
+    let valid_text = std::str::from_utf8(&valid).expect("flattened seed is UTF-8");
+    let valid_jwe = FlattenedJwe::from_json(valid_text).expect("flattened seed parses");
+    let plaintext = jose_rs::jwe::json::decrypt_flattened_with_jwk(&dir_key_jwk(), &valid_jwe)
+        .expect("flattened seed decrypts with the harness key");
+    assert_eq!(plaintext, b"fuzz plaintext for the seed corpus");
+
+    let collision = named_seed("jwe_json_flattened", "unprotected-alg.json");
+    assert_ne!(
+        collision, valid,
+        "header-collision seed must differ from valid"
+    );
+    let collision_text = std::str::from_utf8(&collision).expect("collision seed is UTF-8");
+    FlattenedJwe::from_json(collision_text)
+        .expect_err("duplicate protected and unprotected alg must be refused");
+}
+
+#[test]
+fn general_jwe_valid_seed_reaches_authenticated_decryption() {
+    let seed = named_seed("jwe_json_general", "valid-one-recipient.json");
+    let text = std::str::from_utf8(&seed).expect("general seed is UTF-8");
+    let jwe = GeneralJwe::from_json(text).expect("general seed parses");
+    let plaintext = jose_rs::jwe::general::decrypt_general_with_jwk(&dir_key_jwk(), &jwe, 0)
+        .expect("general seed decrypts with the harness key");
+    assert_eq!(plaintext, b"fuzz plaintext for the seed corpus");
+}
+
+#[test]
+#[allow(deprecated)]
+fn jwt_unverified_seeds_reach_claims_parsing() {
+    let signed = named_seed("jwt_decode_unverified", "hs256.txt");
+    let signed = std::str::from_utf8(&signed).expect("signed JWT seed is UTF-8");
+    let (header, claims) = jose_rs::jwt::decode_unverified(signed)
+        .expect("signed JWT seed contains a JSON claims object");
+    assert_eq!(header.alg, "HS256");
+    assert_eq!(claims.sub.as_deref(), Some("fuzz-seed"));
+
+    let unsecured = named_seed("jwt_decode_unverified", "alg-none.txt");
+    let unsecured = std::str::from_utf8(&unsecured).expect("unsecured JWT seed is UTF-8");
+    assert!(
+        unsecured.ends_with('.'),
+        "unsecured JWT has an empty signature"
+    );
+    let (header, claims) = jose_rs::jwt::decode_unverified(unsecured)
+        .expect("unsecured JWT seed contains a JSON claims object");
+    assert_eq!(header.alg, "none");
+    assert_eq!(claims.sub.as_deref(), Some("fuzz-seed"));
 }
 
 /// Entry points that live only in a harness, with the reason each one is

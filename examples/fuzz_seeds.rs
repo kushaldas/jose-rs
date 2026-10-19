@@ -244,11 +244,14 @@ fn key_file_seeds(root: &Path, out: &Path) -> Result<(), Box<dyn std::error::Err
 fn token_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hmac = hmac_jwk(Some("hmac-a"))?;
     let payload = b"seed corpus payload";
+    let claims = br#"{"iss":"https://issuer.example","sub":"fuzz-seed","exp":4100000000}"#;
 
     let jws = jose_rs::jws::compact::sign_with_jwk(&hmac, payload, &JoseHeader::new("HS256"))?;
     write_seed(out, "jws_decode_header", "hs256.txt", jws.as_bytes())?;
     write_seed(out, "jws_verify", "hs256.txt", jws.as_bytes())?;
-    write_seed(out, "jwt_decode_unverified", "hs256.txt", jws.as_bytes())?;
+
+    let jwt = jose_rs::jws::compact::sign_with_jwk(&hmac, claims, &JoseHeader::new("HS256"))?;
+    write_seed(out, "jwt_decode_unverified", "hs256.txt", jwt.as_bytes())?;
 
     // Detached and single-segment shapes: the segments a caller may re-join
     // wrongly.
@@ -268,7 +271,8 @@ fn token_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_seed(out, "jws_decode_header", "empty.txt", b"")?;
 
     // `alg: none`, the shape that must never verify but must still parse.
-    let unsecured = format!("{}..{}", parts[0], base64url_payload(payload));
+    let none_header = base64url_payload(br#"{"alg":"none"}"#);
+    let unsecured = format!("{none_header}.{}.", base64url_payload(claims));
     write_seed(
         out,
         "jwt_decode_unverified",
@@ -431,11 +435,12 @@ fn jwe_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // `alg` copied into the unprotected header: the member this crate accepts
     // only from the protected place (ADR 0013).
-    let duplicated = text.replacen(
-        "{\"protected\"",
-        r#"{"unprotected":{"alg":"dir"},"protected""#,
-        1,
-    );
+    let mut duplicated = flattened.clone();
+    duplicated.unprotected = Some(serde_json::Map::from_iter([(
+        "alg".into(),
+        serde_json::Value::String("dir".into()),
+    )]));
+    let duplicated = duplicated.to_json()?;
     write_seed(
         out,
         "jwe_json_flattened",
@@ -453,8 +458,16 @@ fn jwe_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         rewritten.as_bytes(),
     )?;
 
-    let general =
-        general::encrypt_general_with_jwks(&header, &[&jwk], plaintext, JweEncryption::A256GCM)?;
+    // The JWK's `kid` is emitted in the recipient header. Keep it out of the
+    // protected header so the three JOSE header locations remain disjoint.
+    let mut general_header = header.clone();
+    general_header.kid = None;
+    let general = general::encrypt_general_with_jwks(
+        &general_header,
+        &[&jwk],
+        plaintext,
+        JweEncryption::A256GCM,
+    )?;
     let general_text = general.to_json()?;
     write_seed(
         out,

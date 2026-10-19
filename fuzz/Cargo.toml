@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 jose-rs = { path = "..", features = ["post-quantum"] }
 kryptering = { version = "0.7", default-features = false, features = ["rustcrypto", "post-quantum"] }
+serde_json = "1"
 
 [[bin]]
 name = "base64url_decode"

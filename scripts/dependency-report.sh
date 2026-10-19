@@ -42,7 +42,7 @@ for block in re.findall(r"\[\[package\]\]\n(.*?)(?=\n\[|\Z)", lock, re.S):
 for values in versions.values():
     values.sort(key=lambda v: tuple(int(part) for part in re.findall(r"\d+", v)[:3]))
 
-section = re.search(r"\[dependencies\]\n(.*?)\n\n", manifest, re.S)
+section = re.search(r"^\[dependencies\]\s*\n(.*?)(?=^\[|\Z)", manifest, re.M | re.S)
 if not section:
     print("could not find [dependencies] in Cargo.toml", file=sys.stderr)
     raise SystemExit(2)
