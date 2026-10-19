@@ -30,6 +30,11 @@ interop/
 └── vectors/             # runtime artifacts (gitignored); one JSON file per cell
 ```
 
+Vector filenames percent-encode filesystem-reserved characters from semantic
+cell IDs (for example, `:` becomes `%3A`). The unmodified cell ID remains in
+`interop-results.json`, so CI artifacts are portable without making reports
+harder to read.
+
 The Rust harness is **not** a member of the main crate — it's a sibling cargo
 package with a path dep, so `cargo publish` on `jose-rs` is untouched and no
 new `[[bin]]` target lands on the library.

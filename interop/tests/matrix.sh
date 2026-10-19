@@ -117,6 +117,27 @@ assert_header() {
     || { echo "protected header mismatch: want $HDR_MEMBERS, got $("$JQ" -c .protected_header "$1")" >&2; return 1; }
 }
 
+# Encode a semantic cell ID as one portable filename component. The results
+# file keeps the original ID; only runtime vector paths use this form. GitHub's
+# artifact service rejects the Windows-reserved characters below even when the
+# runner itself is Linux. Percent is encoded first so the mapping is injective.
+portable_cell_stem() {
+  local stem="$1"
+  stem="${stem//%/%25}"
+  stem="${stem//\"/%22}"
+  stem="${stem//:/%3A}"
+  stem="${stem//</%3C}"
+  stem="${stem//>/%3E}"
+  stem="${stem//|/%7C}"
+  stem="${stem//\*/%2A}"
+  stem="${stem//\?/%3F}"
+  stem="${stem//$'\r'/%0D}"
+  stem="${stem//$'\n'/%0A}"
+  stem="${stem//\//%2F}"
+  stem="${stem//\\/%5C}"
+  printf '%s' "$stem"
+}
+
 record() {
   # record <cell-id> <direction> <alg> <format> <result> <stderr-file> [observed-json-file]
   local cell="$1" dir="$2" alg="$3" fmt="$4" result="$5" errfile="$6" obsfile="${7:-}"
@@ -512,6 +533,8 @@ run_dup_cell() {
 run_cell() {
   local direction="$1" alg="$2" fmt="$3"
   local cell="${direction}_${alg}_${fmt}"
+  local file_cell
+  file_cell="$(portable_cell_stem "$cell")"
   local errfile obsfile
   errfile="$(mktemp)"
   obsfile="$(mktemp)"
@@ -519,7 +542,9 @@ run_cell() {
   # Subshell isolation so `set -e` inside doesn't abort the matrix.
   (
     set -e
-    CELL="$cell"
+    # Helpers use CELL exclusively as a filename stem. Keep `cell` unchanged
+    # for interop-results.json and the human-readable job summary.
+    CELL="$file_cell"
     OBSFILE="$obsfile"
     case "$fmt" in
       hdr) run_hdr_cell "$direction" "$alg"; exit 0 ;;
@@ -541,9 +566,9 @@ run_cell() {
         run_jwe_json_cell "$direction" "$alg" "" yes; exit 0 ;;
       jws-dup) run_dup_cell "$direction" "$alg"; exit 0 ;;
     esac
-    local priv_path="$VECTORS/${cell}.priv.json"
-    local pub_path="$VECTORS/${cell}.pub.json"
-    local signed_path="$VECTORS/${cell}.signed.json"
+    local priv_path="$VECTORS/${file_cell}.priv.json"
+    local pub_path="$VECTORS/${file_cell}.pub.json"
+    local signed_path="$VECTORS/${file_cell}.signed.json"
 
     case "$direction" in
       # 1. producer=rust (keygen+sign), consumer=js
@@ -696,7 +721,7 @@ run_jwe_ecdh_cell() {
     .protected_header.epk as $epk
     | ($epk != null) and ($epk.crv == $crv) and ($epk.kty == $kty)
       and ($epk.d == null) and ($epk.x != null)
-      and (if $has_y then ($epk.y != null) else ($epk | has "y" | not) end)
+      and (if $has_y then ($epk.y != null) else ($epk | has("y") | not) end)
   ' "$out_path" > /dev/null \
     || { echo "epk shape wrong: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
 
