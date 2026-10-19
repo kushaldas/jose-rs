@@ -13,6 +13,8 @@ set dotenv-load := false
 interop_dir := justfile_directory() + "/interop"
 rust_harness := interop_dir + "/rust-harness"
 js_harness := interop_dir + "/js-harness"
+fuzz_dir := justfile_directory() + "/fuzz"
+fuzz_scripts := fuzz_dir + "/scripts"
 
 _default:
     @just --list
@@ -76,6 +78,50 @@ gate-interop:
 # Regenerate the capability tables from the code.
 capabilities:
     cargo run --locked --example capabilities > docs/capabilities.md
+
+# --- Fuzzing (fuzz/, cargo-fuzz + libFuzzer) ----------------------------
+
+# Install nightly, llvm-tools and cargo-fuzz; detached campaigns also need tmux.
+fuzz-setup:
+    rustup toolchain install nightly
+    rustup component add llvm-tools-preview --toolchain nightly
+    cargo install --locked cargo-fuzz
+
+# Build every fuzz target once before starting a campaign.
+fuzz-build:
+    {{fuzz_scripts}}/build.sh
+
+# Fuzz every target in tmux; duration is seconds and zero runs until stopped.
+fuzz seconds="0":
+    {{fuzz_scripts}}/fuzz-all.sh {{seconds}}
+
+# Fuzz one target in foreground fork mode: `just fuzz-one jwk_from_json 3600`.
+fuzz-one target seconds="0":
+    {{fuzz_scripts}}/run.sh {{target}} {{seconds}}
+
+# Attach to the detached campaign.
+fuzz-attach:
+    tmux attach -t jose-rs-fuzz
+
+# Stop the detached campaign, if one exists.
+fuzz-stop:
+    tmux kill-session -t jose-rs-fuzz || true
+
+# List crash, timeout and out-of-memory artifacts found so far.
+fuzz-crashes:
+    @if [[ -d "{{fuzz_dir}}/artifacts" ]] && find "{{fuzz_dir}}/artifacts" -type f -print -quit | grep -q .; then find "{{fuzz_dir}}/artifacts" -type f | sort; else echo "no artifacts yet"; fi
+
+# Reproduce an artifact: `just fuzz-repro jwk_from_json path/to/crash-abc`.
+fuzz-repro target artifact:
+    {{fuzz_scripts}}/repro.sh {{target}} {{artifact}}
+
+# Generate an HTML line-coverage report for one target's accumulated corpus.
+fuzz-coverage target:
+    {{fuzz_scripts}}/coverage.sh {{target}}
+
+# Remove corpus entries that do not add coverage for the selected target.
+fuzz-cmin target:
+    {{fuzz_scripts}}/minimize.sh {{target}}
 
 # --- Interop (panva/jose) ------------------------------------------------
 

@@ -31,7 +31,13 @@ fuzz_target!(|data: &[u8]| {
 
     // Two limit settings: the shipped defaults, and a tight pair that should
     // refuse most inputs. Both must return, not hang or crash.
-    for limits in [SetLimits::default(), SetLimits { max_bytes: 4096, max_entries: 4 }] {
+    for limits in [
+        SetLimits::default(),
+        SetLimits {
+            max_bytes: 4096,
+            max_entries: 4,
+        },
+    ] {
         let Ok(set) = JwkSet::from_json_with_limits(text, &limits) else {
             continue;
         };

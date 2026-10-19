@@ -3,6 +3,7 @@ interop/.venv/
 interop/js-harness/node_modules/
 fuzz/corpus/
 fuzz/artifacts/
+fuzz/coverage/
 fuzz/fuzz-targets/
 fuzz/Cargo.lock
 __pycache__/

@@ -50,7 +50,8 @@ fuzz_target!(|data: &[u8]| {
         None => return,
     };
     let _ = jose_rs::jwe::json::decrypt_flattened_with_jwk(&jwk, &jwe);
-    let _ = jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(&jwk, &jwe, b"fuzz-external-aad");
+    let _ =
+        jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(&jwk, &jwe, b"fuzz-external-aad");
 });
 
 /// A `dir` + A256GCM content key as a JWK, from fixed bytes.

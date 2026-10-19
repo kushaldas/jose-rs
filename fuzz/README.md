@@ -17,38 +17,71 @@ which in turn wraps libFuzzer.
 | `jws_verify_composite`    | Full compact-JWS verify and aggregate-signature splitting for ML-DSA-44-Ed25519 |
 | `jwe_decrypt`             | Full JWE compact decrypt pipeline (fixed dir CEK)      |
 | `jwt_decode_unverified`   | JWT header + claims parse without crypto               |
+| `jwk_from_pem`            | PEM label dispatch and explicit PEM key importers      |
+| `jwk_from_der`            | Bounded PKCS#8, SPKI, PKCS#1 and SEC1 DER import       |
+| `certificate_extract`     | Bounded X.509 public-key extraction                    |
+| `encrypted_pkcs8`         | Password-encrypted PKCS#8 parsing under a KDF budget   |
+| `jwkset_select`           | Bounded JWK Set parsing, diagnostics and selection     |
+| `jwe_json_flattened`      | Flattened JSON JWE parsing and decryption paths         |
+| `jwe_json_general`        | General JSON JWE parsing and recipient handling        |
+| `jwt_claims`              | Claims parsing, duplicate rejection and serialization  |
 
 ## Prerequisites
 
 Fuzzing requires a nightly Rust toolchain and `cargo-fuzz`:
 
 ```
-rustup toolchain install nightly
-cargo install --locked cargo-fuzz
+just fuzz-setup
 ```
+
+Detached all-target campaigns additionally require `tmux` from the system
+package manager.
 
 ## Running a target
 
-From the **repository root**:
+The Justfile exposes the same workflow for local and remote runs:
 
+```sh
+just fuzz-build                         # compile all 17 targets once
+just fuzz-one base64url_decode 300      # one target, foreground, five minutes
+just fuzz 3600                          # all targets in tmux for one hour
+just fuzz-attach                        # inspect the detached campaign
+just fuzz-crashes                       # list saved artifacts
+just fuzz-stop                          # stop the detached campaign
 ```
-cargo +nightly fuzz run base64url_decode
+
+`just fuzz` creates one tmux window per target, builds once before launching,
+and divides logical CPUs evenly across targets. A duration of zero runs until
+stopped. `just fuzz-one` uses every logical CPU by default through libFuzzer
+fork mode. Override worker count or the default 128-KiB input ceiling when a
+focused campaign needs it:
+
+```sh
+JOBS=4 MAX_LEN=1048577 just fuzz-one jwt_claims 600
 ```
 
-Replace the target name with any from the table above. libFuzzer will
-run until it finds a crash, hits the time limit (`-- -max_total_time=N`),
-or is interrupted. Discovered inputs are saved under
-`fuzz/corpus/<target>/` and any crash under `fuzz/artifacts/<target>/`.
+Each run copies checked-in seeds into the target's working corpus without
+overwriting earlier discoveries. Discovered inputs live under
+`fuzz/corpus/<target>/`; crashes, timeouts and out-of-memory inputs live under
+`fuzz/artifacts/<target>/`.
 
-Examples:
+For direct cargo-fuzz use, run from the repository root:
 
-```
-# 5-minute run
+```sh
 cargo +nightly fuzz run jwk_from_json -- -max_total_time=300
-
-# Replay a crash artifact
-cargo +nightly fuzz run jwk_from_json fuzz/artifacts/jwk_from_json/crash-<hash>
 ```
+
+## Artifacts, coverage and corpus maintenance
+
+```sh
+just fuzz-repro jwk_from_json fuzz/artifacts/jwk_from_json/crash-<hash>
+just fuzz-coverage jwk_from_json
+just fuzz-cmin jwk_from_json
+```
+
+Coverage requires `llvm-tools-preview`, installed by `just fuzz-setup`, and
+writes HTML to `fuzz/coverage/<target>/html/index.html`. Corpus minimization
+keeps only inputs that add coverage; it does not modify the checked-in seeds.
 
 ## Build-only
 

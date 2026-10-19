@@ -30,16 +30,15 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let password = Password::from_utf8("fuzz-password");
-    let options = Pkcs8ReadOptions::default().with_max_iterations(
-        jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS,
-    );
+    let options = Pkcs8ReadOptions::default()
+        .with_max_iterations(jose_rs::jwk::encrypted_pkcs8::PKCS8_MIN_ITERATIONS);
 
     for result in [
         jose_rs::jwk::encrypted_pkcs8::jwk_from_encrypted_pkcs8_der_with_options(
             data, &password, &options,
         ),
         std::str::from_utf8(data)
-            .map_err(|_| ())
+            .map_err(|_| jose_rs::JoseError::Key("not utf-8".into()))
             .and_then(|text| {
                 jose_rs::jwk::encrypted_pkcs8::jwk_from_encrypted_pkcs8_pem_with_options(
                     text, &password, &options,

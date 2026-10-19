@@ -597,21 +597,20 @@ eliminates transcription risk in 1000+-char RSA key material.
 ### Fuzzing
 
 `fuzz/` is a [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
-project with eight targets covering the attacker-controlled parse and
-verify paths (base64url, JWK JSON, thumbprint, JWS decode/verify, JWE
-decrypt, JWT header/claims, and post-quantum JWS verify via
-`jws_verify_mldsa`). See `fuzz/README.md` for the per-target breakdown.
+project with 17 targets covering attacker-controlled parse, key import,
+selection, verification and decryption paths. See `fuzz/README.md` for the
+per-target breakdown and long-running campaign controls.
 
-```
-rustup toolchain install nightly
-cargo install --locked cargo-fuzz
-cargo +nightly fuzz run jwk_from_json         # run indefinitely
-cargo +nightly fuzz run jws_verify -- -max_total_time=300
+```sh
+just fuzz-setup
+just fuzz-build
+just fuzz-one jwk_from_json 300
+just fuzz 3600                              # all targets, detached in tmux
 ```
 
-CI (`.github/workflows/fuzz.yml`) builds every target on every PR to
-catch compilation regressions; the actual fuzzing runs are expected to
-live in a longer-running job or OSS-Fuzz once the corpus stabilizes.
+The manually dispatched CI workflow (`.github/workflows/fuzz.yml`) builds every
+target to catch compilation regressions; actual fuzzing runs belong in a
+longer-running campaign or OSS-Fuzz once the corpus stabilizes.
 
 ## License
 
