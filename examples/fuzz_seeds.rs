@@ -534,6 +534,10 @@ fn claims_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
             r#"{"integer":1000001000000080100080100801000801700005,"tiny":1e-124,"large":1700036.1E125}"#,
         ),
         (
+            "regression-serde-private-names.json",
+            r#"{"$serde_json::private::RawValue":123,"$serde_json::private::Number":1E23}"#,
+        ),
+        (
             "fractional.json",
             r#"{"iat":1700000000.5,"nbf":1700000000.25,"exp":1800000000.125}"#,
         ),

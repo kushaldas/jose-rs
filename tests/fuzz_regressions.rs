@@ -303,16 +303,9 @@ fn replay_claims(bytes: &[u8]) {
     };
     if let Ok(emitted) = claims.to_json_vec() {
         if let Ok(again) = Claims::from_json_bytes(&emitted) {
-            let emitted_value: serde_json::Value =
-                serde_json::from_slice(&emitted).expect("Claims::to_json_vec emitted invalid JSON");
-            let again_bytes = again
-                .to_json_vec()
-                .expect("parsed emitted claims did not re-serialize");
-            let round_tripped: serde_json::Value = serde_json::from_slice(&again_bytes)
-                .expect("round-tripped Claims emitted invalid JSON");
             assert_eq!(
-                round_tripped, emitted_value,
-                "claims round-trip changed the JSON value"
+                again, claims,
+                "claims round-trip changed the parsed claim values"
             );
         }
         let _ = claims.sub.as_deref();

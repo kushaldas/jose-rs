@@ -90,6 +90,25 @@ fn extra_numbers_round_trip_without_precision_drift() {
     }
 }
 
+/// Serde JSON's private protocol names are still ordinary JWT claim names on
+/// the wire. Flattened serialization must not reinterpret attacker-chosen keys
+/// as serializer control messages.
+#[test]
+fn serde_json_private_names_round_trip_as_ordinary_claims() {
+    for input in [
+        br#"{"$serde_json::private::RawValue":123}"#.as_slice(),
+        br#"{"$serde_json::private::RawValue":[]}"#.as_slice(),
+        br#"{"$serde_json::private::RawValue":{"nested":1E23}}"#.as_slice(),
+        br#"{"$serde_json::private::Number":1E23}"#.as_slice(),
+    ] {
+        let claims = Claims::from_json_bytes(input).expect("regression input is claims");
+        let emitted = claims.to_json_vec().expect("claims emit");
+        let reparsed = Claims::from_json_bytes(&emitted)
+            .unwrap_or_else(|err| panic!("private-looking claim name did not reparse: {err}"));
+        assert_eq!(reparsed.extra, claims.extra);
+    }
+}
+
 #[test]
 fn a_colliding_extra_claim_cannot_be_signed_at_all() {
     let key = signer();

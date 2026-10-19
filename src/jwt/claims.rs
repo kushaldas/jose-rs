@@ -47,7 +47,7 @@ pub const REGISTERED_CLAIMS: [&str; 7] = ["iss", "sub", "aud", "exp", "nbf", "ia
 ///
 /// See the [module documentation](self) for the duplicate-member, precision and null
 /// semantics this type enforces.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Claims {
     /// Issuer (`iss`)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,7 +83,7 @@ pub struct Claims {
 }
 
 /// Audience can be a single string or an array of strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Audience {
     /// A single audience string.
