@@ -230,6 +230,64 @@ fn ensure_general_signature_count(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate encoded-field sizes and protected/unprotected name disjointness before
+/// allocating results, constructing keys, or attempting a signature.
+fn preflight_flattened_structure(jws: &FlattenedJws) -> Result<()> {
+    crate::jws::compact::ensure_token_size(&jws.protected)?;
+    crate::jws::compact::ensure_token_size(&jws.signature)?;
+    if let Some(payload) = &jws.payload {
+        crate::jws::compact::ensure_token_size(payload)?;
+    }
+    validate_inbound_header_pair(&jws.protected, jws.header.as_ref())
+}
+
+/// General-JWS structural preflight shared by raw-verifier and JWK-aware APIs.
+fn preflight_general_structure(jws: &GeneralJws) -> Result<()> {
+    ensure_general_signature_count(jws.signatures.len())?;
+    if let Some(payload) = &jws.payload {
+        crate::jws::compact::ensure_token_size(payload)?;
+    }
+    for entry in &jws.signatures {
+        crate::jws::compact::ensure_token_size(&entry.protected)?;
+        crate::jws::compact::ensure_token_size(&entry.signature)?;
+        validate_inbound_header_pair(&entry.protected, entry.header.as_ref())?;
+    }
+    Ok(())
+}
+
+/// Enforce RFC 7515 §7.2.1 over the original protected JSON member names.
+///
+/// Parsing directly into [`crate::member_map::MemberMap`] is intentional: converting to
+/// [`JoseHeader`] and serializing it again can erase a present member whose value is
+/// `null`, allowing that name to collide with an attacker-controlled unprotected value.
+fn validate_inbound_header_pair(
+    protected_segment: &str,
+    unprotected: Option<&serde_json::Value>,
+) -> Result<()> {
+    let Some(unprotected) = unprotected else {
+        return Ok(());
+    };
+    let unprotected = unprotected.as_object().ok_or_else(|| {
+        JoseError::InvalidHeader("unprotected header must be a JSON object".into())
+    })?;
+    let protected_bytes = base64url::decode(protected_segment)?;
+    let mut protected: crate::member_map::MemberMap = serde_json::from_slice(&protected_bytes)?;
+    let protected_names = protected
+        .drain_leftovers()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::HashSet<_>>();
+    for name in unprotected.keys() {
+        if protected_names.contains(name) {
+            return Err(JoseError::InvalidHeader(format!(
+                "unprotected header member {name} also appears in the protected header \
+                 (RFC 7515 §7.2.1)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_payload_for_verify<'a>(
     embedded: Option<&'a str>,
     detached: Option<&'a [u8]>,
@@ -367,11 +425,7 @@ pub fn verify_flattened_opts(
     detached_payload: Option<&[u8]>,
     opts: &VerifyOptions,
 ) -> Result<Vec<u8>> {
-    crate::jws::compact::ensure_token_size(&jws.protected)?;
-    crate::jws::compact::ensure_token_size(&jws.signature)?;
-    if let Some(p) = &jws.payload {
-        crate::jws::compact::ensure_token_size(p)?;
-    }
+    preflight_flattened_structure(jws)?;
     let b64 = validate_header_opts(&jws.protected, verifier, opts)?;
     let (payload_segment, payload_source) =
         resolve_payload_for_verify(jws.payload.as_deref(), detached_payload, b64)?;
@@ -597,16 +651,10 @@ fn verify_general_inner(
     opts: &VerifyOptions,
     stop_on_first_valid: bool,
 ) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
-    ensure_general_signature_count(jws.signatures.len())?;
-
-    if let Some(p) = &jws.payload {
-        crate::jws::compact::ensure_token_size(p)?;
-    }
+    preflight_general_structure(jws)?;
 
     let mut shared_b64: Option<bool> = None;
     for entry in &jws.signatures {
-        crate::jws::compact::ensure_token_size(&entry.protected)?;
-        crate::jws::compact::ensure_token_size(&entry.signature)?;
         let Ok(b64) = validate_header_b64_opts(&entry.protected, opts) else {
             continue;
         };
@@ -837,6 +885,7 @@ pub fn verify_flattened_with_jwk_opts(
     detached_payload: Option<&[u8]>,
     opts: &VerifyOptions,
 ) -> Result<Vec<u8>> {
+    preflight_flattened_structure(jws)?;
     let header = decode_protected(&jws.protected)?;
     let verifier = crate::jws::compact::verifier_from_jwk(jwk, &header.alg)?;
     verify_flattened_opts(&verifier, jws, detached_payload, opts)
@@ -1012,6 +1061,7 @@ pub fn verify_general_with_jwks(
             jwks.len()
         )));
     }
+    preflight_general_structure(jws)?;
 
     let mut results: Vec<JwkSignatureResult> = Vec::with_capacity(jws.signatures.len());
     for (index, entry) in jws.signatures.iter().enumerate() {
@@ -1586,6 +1636,35 @@ mod tests {
         };
         let result = verify_flattened(&hmac_verifier(KEY_A), &jws);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn inbound_protected_and_unprotected_names_must_be_disjoint() {
+        let flattened = FlattenedJws {
+            payload: Some(base64url::encode(b"p")),
+            // `kid: null` is present in the original protected object even though a typed
+            // JoseHeader would turn it into `None` and omit it if serialized again.
+            protected: base64url::encode(br#"{"alg":"HS256","kid":null}"#),
+            header: Some(serde_json::json!({"kid": "attacker"})),
+            signature: base64url::encode(b"not-reached"),
+        };
+        let err = verify_flattened(&hmac_verifier(KEY_A), &flattened)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid") && err.contains("also appears"), "{err}");
+
+        let general = GeneralJws {
+            payload: flattened.payload.clone(),
+            signatures: vec![JwsSignature {
+                protected: flattened.protected,
+                header: flattened.header,
+                signature: flattened.signature,
+            }],
+        };
+        let err = verify_general(&hmac_verifier(KEY_A), &general)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid") && err.contains("also appears"), "{err}");
     }
 
     /// J-03 regression: Flattened verify rejects alg=none.

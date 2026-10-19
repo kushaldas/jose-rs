@@ -72,7 +72,7 @@ pub use password::{
 };
 
 pub use json::{
-    decrypt_flattened_with_password, encrypt_flattened_with_password,
-    encrypt_flattened_with_password_header, encrypt_flattened_with_password_header_options,
-    encrypt_flattened_with_password_options,
+    decrypt_flattened_with_password, decrypt_flattened_with_password_options,
+    encrypt_flattened_with_password, encrypt_flattened_with_password_header,
+    encrypt_flattened_with_password_header_options, encrypt_flattened_with_password_options,
 };

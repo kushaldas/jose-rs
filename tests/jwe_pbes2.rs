@@ -280,6 +280,45 @@ fn the_default_iteration_count_is_the_documented_one_and_is_overridable() {
         b"x"
     );
 
+    let flat = json::encrypt_flattened_with_password_options(
+        &password,
+        b"x",
+        JweAlgorithm::Pbes2Hs256A128kw,
+        JweEncryption::A128GCM,
+        &JweEncryptOptions::new().with_pbes2_iterations(2048),
+    )
+    .unwrap();
+    let err = json::decrypt_flattened_with_password_options(
+        &password,
+        &flat,
+        &JweDecryptOptions::new(PBES2.to_vec(), vec![JweEncryption::A128GCM])
+            .with_pbes2_max_iterations(2047),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("budget") && err.contains("2048"), "{err}");
+
+    let header = JoseHeader::for_jwe(JweAlgorithm::Pbes2Hs256A128kw, JweEncryption::A128GCM);
+    let general = general::encrypt_general_with_passwords_options(
+        &header,
+        &[&password],
+        b"x",
+        JweAlgorithm::Pbes2Hs256A128kw,
+        JweEncryption::A128GCM,
+        &JweEncryptOptions::new().with_pbes2_iterations(2048),
+    )
+    .unwrap();
+    let err = general::decrypt_general_with_password_options(
+        &password,
+        &general,
+        0,
+        &JweDecryptOptions::new(PBES2.to_vec(), vec![JweEncryption::A128GCM])
+            .with_pbes2_max_iterations(2047),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("budget") && err.contains("2048"), "{err}");
+
     // Below the floor, the *emit* side refuses: a message nobody else will read is worse
     // than an error, and this crate does not write what it will not accept.
     let err = compact::encrypt_with_password_options(
@@ -292,6 +331,25 @@ fn the_default_iteration_count_is_the_documented_one_and_is_overridable() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("minimum of 1000"), "{err}");
+}
+
+#[test]
+fn password_json_decrypt_bounds_a_directly_constructed_protected_header() {
+    let password = Password::from_utf8("x");
+    let mut flat = json::encrypt_flattened_with_password_options(
+        &password,
+        b"x",
+        JweAlgorithm::Pbes2Hs256A128kw,
+        JweEncryption::A128GCM,
+        &JweEncryptOptions::new().with_pbes2_iterations(FAST),
+    )
+    .unwrap();
+    flat.protected = Some("A".repeat(jose_rs::MAX_TOKEN_BYTES + 1));
+
+    let err = json::decrypt_flattened_with_password(&password, &flat)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("MAX_TOKEN_BYTES"), "{err}");
 }
 
 #[test]

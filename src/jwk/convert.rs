@@ -3,7 +3,8 @@
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::jwk::Jwk;
-use p521::elliptic_curve::sec1::ToEncodedPoint;
+use p521::elliptic_curve::sec1::ToSec1Point;
+use zeroize::Zeroizing;
 
 /// Convert a JWK to a kryptering SoftwareKey.
 ///
@@ -219,7 +220,7 @@ pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
             let public_key = p521::PublicKey::from_public_key_der(&public_der)
                 .map_err(|e| JoseError::Key(format!("parse exported P-521 SPKI: {e}")))?;
             let public = p521::ecdsa::VerifyingKey::from_sec1_bytes(
-                public_key.to_encoded_point(false).as_bytes(),
+                public_key.to_sec1_point(false).as_bytes(),
             )
             .map_err(|e| JoseError::Key(format!("parse exported P-521 public point: {e}")))?;
             let private = if key.has_private_key() {
@@ -374,18 +375,18 @@ fn new_jwk(kty: &str) -> Jwk {
 // ── RSA ────────────────────────────────────────────────────────────────
 
 fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
-    use num_bigint_dig::BigUint;
-    use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
+    use rsa::{traits::PublicKeyParts, BoxedUint, RsaPrivateKey, RsaPublicKey};
 
     let n_bytes = require(jwk, "n")?;
     let e_bytes = require(jwk, "e")?;
-    let n = BigUint::from_bytes_be(&n_bytes);
-    let e = BigUint::from_bytes_be(&e_bytes);
+    crate::ensure_rsa_modulus_bytes(&n_bytes)?;
+    let n = BoxedUint::from_be_slice_vartime(&n_bytes);
+    let e = BoxedUint::from_be_slice_vartime(&e_bytes);
 
     // Public exponent sanity: must be >= 3 and odd. RFC 7518 does not pin a
     // value, but 65537 (AQAB) is the universal default. Reject values that
     // could produce degenerate or insecure RSA instances.
-    let three = BigUint::from(3u32);
+    let three = BoxedUint::from(3u32);
     if e < three {
         return Err(JoseError::Key(
             "RSA public exponent is below the minimum of 3".into(),
@@ -393,7 +394,7 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     }
     // Even exponents are invalid — they cannot be coprime to phi(n) for any
     // usable modulus.
-    let is_even = e.to_bytes_be().last().copied().unwrap_or(0) & 1 == 0;
+    let is_even = e.to_be_bytes().last().copied().unwrap_or(0) & 1 == 0;
     if is_even {
         return Err(JoseError::Key("RSA public exponent must be odd".into()));
     }
@@ -401,22 +402,15 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     let public = RsaPublicKey::new(n.clone(), e.clone())
         .map_err(|err| JoseError::Key(format!("invalid RSA public key: {err}")))?;
 
-    // RFC 7518 §3.3 / §4.2: RSA keys must be at least 2048 bits.
-    if public.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            public.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
+    crate::ensure_rsa_bits(public.n().bits() as usize)?;
 
     let private = if jwk.d.is_some() {
-        let d_bytes = require(jwk, "d")?;
-        let d = BigUint::from_bytes_be(&d_bytes);
+        let d_bytes = Zeroizing::new(require(jwk, "d")?);
+        let d = BoxedUint::from_be_slice_vartime(&d_bytes);
 
         let primes = if jwk.p.is_some() && jwk.q.is_some() {
-            let p = BigUint::from_bytes_be(&require(jwk, "p")?);
-            let q = BigUint::from_bytes_be(&require(jwk, "q")?);
+            let p = BoxedUint::from_be_slice_vartime(&require(jwk, "p")?);
+            let q = BoxedUint::from_be_slice_vartime(&require(jwk, "q")?);
             vec![p, q]
         } else {
             vec![]
@@ -451,25 +445,29 @@ fn rsa_to_jwk(private: Option<&rsa::RsaPrivateKey>, public: &rsa::RsaPublicKey) 
     use rsa::traits::PublicKeyParts;
 
     let mut jwk = new_jwk("RSA");
-    jwk.n = Some(base64url::encode(&public.n().to_bytes_be()));
-    jwk.e = Some(base64url::encode(&public.e().to_bytes_be()));
+    jwk.n = Some(base64url::encode(&public.n().to_be_bytes_trimmed_vartime()));
+    jwk.e = Some(base64url::encode(&public.e().to_be_bytes_trimmed_vartime()));
 
     if let Some(priv_key) = private {
         use rsa::traits::PrivateKeyParts;
 
-        jwk.d = Some(base64url::encode(&priv_key.d().to_bytes_be()));
+        jwk.d = Some(base64url::encode(
+            &priv_key.d().to_be_bytes_trimmed_vartime(),
+        ));
 
         let primes = priv_key.primes();
         if primes.len() >= 2 {
-            jwk.p = Some(base64url::encode(&primes[0].to_bytes_be()));
-            jwk.q = Some(base64url::encode(&primes[1].to_bytes_be()));
-            jwk.dp = priv_key.dp().map(|v| base64url::encode(&v.to_bytes_be()));
-            jwk.dq = priv_key.dq().map(|v| base64url::encode(&v.to_bytes_be()));
-            // qinv returns &BigInt (signed); extract magnitude bytes.
-            jwk.qi = priv_key.qinv().map(|v| {
-                let (_sign, bytes) = v.to_bytes_be();
-                base64url::encode(&bytes)
-            });
+            jwk.p = Some(base64url::encode(&primes[0].to_be_bytes_trimmed_vartime()));
+            jwk.q = Some(base64url::encode(&primes[1].to_be_bytes_trimmed_vartime()));
+            jwk.dp = priv_key
+                .dp()
+                .map(|v| base64url::encode(&v.to_be_bytes_trimmed_vartime()));
+            jwk.dq = priv_key
+                .dq()
+                .map(|v| base64url::encode(&v.to_be_bytes_trimmed_vartime()));
+            jwk.qi = priv_key
+                .qinv()
+                .map(|v| base64url::encode(&v.retrieve().to_be_bytes_trimmed_vartime()));
         }
     }
 
@@ -493,7 +491,7 @@ fn jwk_to_ec(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
 }
 
 fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
-    use p256::elliptic_curve::sec1::FromEncodedPoint;
+    use p256::elliptic_curve::sec1::FromSec1Point;
 
     let x_bytes = require(jwk, "x")?;
     let y_bytes = require(jwk, "y")?;
@@ -505,15 +503,15 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     point.extend(pad_left(&x_bytes, coord_len));
     point.extend(pad_left(&y_bytes, coord_len));
 
-    let encoded_point = p256::EncodedPoint::from_bytes(&point)
+    let encoded_point = p256::Sec1Point::from_bytes(&point)
         .map_err(|e| JoseError::Key(format!("invalid P-256 point: {e}")))?;
     let public_key: Option<p256::PublicKey> =
-        p256::PublicKey::from_encoded_point(&encoded_point).into();
+        p256::PublicKey::from_sec1_point(&encoded_point).into();
     let public_key = public_key.ok_or_else(|| JoseError::Key("P-256 point not on curve".into()))?;
     let verifying_key = p256::ecdsa::VerifyingKey::from(&public_key);
 
     let private = if jwk.d.is_some() {
-        let d_bytes = require(jwk, "d")?;
+        let d_bytes = Zeroizing::new(require(jwk, "d")?);
         let signing_key = p256::ecdsa::SigningKey::from_slice(&d_bytes)
             .map_err(|e| JoseError::Key(format!("invalid P-256 private key: {e}")))?;
         // The public point (x, y) and the private scalar d are imported
@@ -554,7 +552,7 @@ fn jwk_to_ec_p256(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
 }
 
 fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
-    use p384::elliptic_curve::sec1::FromEncodedPoint;
+    use p384::elliptic_curve::sec1::FromSec1Point;
 
     let x_bytes = require(jwk, "x")?;
     let y_bytes = require(jwk, "y")?;
@@ -566,10 +564,10 @@ fn jwk_to_ec_p384(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     point.extend(pad_left(&x_bytes, coord_len));
     point.extend(pad_left(&y_bytes, coord_len));
 
-    let encoded_point = p384::EncodedPoint::from_bytes(&point)
+    let encoded_point = p384::Sec1Point::from_bytes(&point)
         .map_err(|e| JoseError::Key(format!("invalid P-384 point: {e}")))?;
     let public_key: Option<p384::PublicKey> =
-        p384::PublicKey::from_encoded_point(&encoded_point).into();
+        p384::PublicKey::from_sec1_point(&encoded_point).into();
     let public_key = public_key.ok_or_else(|| JoseError::Key("P-384 point not on curve".into()))?;
     let verifying_key = p384::ecdsa::VerifyingKey::from(&public_key);
 
@@ -632,7 +630,7 @@ fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         // p521's VerifyingKey does not implement PartialEq; compare the
         // uncompressed SEC1 encodings of the supplied and derived points.
         let derived = p521::ecdsa::VerifyingKey::from(&signing_key);
-        if derived.to_encoded_point(false) != verifying_key.to_encoded_point(false) {
+        if derived.to_sec1_point(false) != verifying_key.to_sec1_point(false) {
             return Err(JoseError::Key(
                 "P-521 private key d does not match the public point (x, y)".into(),
             ));
@@ -658,7 +656,7 @@ fn jwk_to_ec_p521(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         .map_err(Into::into)
     } else {
         let public =
-            p521::PublicKey::from_sec1_bytes(verifying_key.to_encoded_point(false).as_bytes())
+            p521::PublicKey::from_sec1_bytes(verifying_key.to_sec1_point(false).as_bytes())
                 .map_err(|e| JoseError::Key(format!("convert P-521 public point: {e}")))?;
         let der = public
             .to_public_key_der()
@@ -675,7 +673,7 @@ fn ec_p256_to_jwk(
     private: Option<&p256::ecdsa::SigningKey>,
     public: &p256::ecdsa::VerifyingKey,
 ) -> Result<Jwk> {
-    let point = public.to_encoded_point(false);
+    let point = public.to_sec1_point(false);
     let mut jwk = new_jwk("EC");
     jwk.crv = Some("P-256".into());
     jwk.x = Some(base64url::encode(point.x().unwrap()));
@@ -688,7 +686,7 @@ fn ec_p384_to_jwk(
     private: Option<&p384::ecdsa::SigningKey>,
     public: &p384::ecdsa::VerifyingKey,
 ) -> Result<Jwk> {
-    let point = public.to_encoded_point(false);
+    let point = public.to_sec1_point(false);
     let mut jwk = new_jwk("EC");
     jwk.crv = Some("P-384".into());
     jwk.x = Some(base64url::encode(point.x().unwrap()));
@@ -701,7 +699,7 @@ fn ec_p521_to_jwk(
     private: Option<&p521::ecdsa::SigningKey>,
     public: &p521::ecdsa::VerifyingKey,
 ) -> Result<Jwk> {
-    let point = public.to_encoded_point(false);
+    let point = public.to_sec1_point(false);
     let mut jwk = new_jwk("EC");
     jwk.crv = Some("P-521".into());
     jwk.x = Some(base64url::encode(point.x().unwrap()));
@@ -828,7 +826,7 @@ fn jwk_to_x25519(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     }
 
     let private = if jwk.d.is_some() {
-        let d_bytes = require(jwk, "d")?;
+        let d_bytes = Zeroizing::new(require(jwk, "d")?);
         if d_bytes.len() != 32 {
             return Err(JoseError::Key(format!(
                 "X25519 private key must be 32 bytes, got {}",
@@ -850,7 +848,8 @@ fn jwk_to_x25519(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         None
     };
 
-    kryptering::SoftwareKey::from_x25519(private.as_deref(), &x_bytes).map_err(Into::into)
+    kryptering::SoftwareKey::from_x25519(private.as_ref().map(|bytes| &bytes[..]), &x_bytes)
+        .map_err(Into::into)
 }
 
 /// Export a backend X25519 key as an OKP JWK.
@@ -1166,12 +1165,12 @@ fn mldsa_public_key_len(variant: kryptering::MlDsaVariant) -> usize {
 
 #[cfg(feature = "post-quantum")]
 fn mldsa_raw_public_to_spki_der(variant: kryptering::MlDsaVariant, raw: &[u8]) -> Result<Vec<u8>> {
-    use pkcs8_pq::spki::EncodePublicKey;
+    use pkcs8::spki::EncodePublicKey;
 
     fn encode<P>(raw: &[u8]) -> Result<Vec<u8>>
     where
         P: ml_dsa::MlDsaParams,
-        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
+        P: pkcs8::spki::AssociatedAlgorithmIdentifier<Params = pkcs8::der::AnyRef<'static>>,
     {
         let enc = ml_dsa::EncodedVerifyingKey::<P>::try_from(raw)
             .map_err(|_| JoseError::Key("ML-DSA public key length mismatch".into()))?;
@@ -1191,12 +1190,12 @@ fn mldsa_raw_public_to_spki_der(variant: kryptering::MlDsaVariant, raw: &[u8]) -
 
 #[cfg(feature = "post-quantum")]
 fn mldsa_spki_der_to_raw_public(variant: kryptering::MlDsaVariant, der: &[u8]) -> Result<Vec<u8>> {
-    use pkcs8_pq::spki::DecodePublicKey;
+    use pkcs8::spki::DecodePublicKey;
 
     fn decode<P>(der: &[u8]) -> Result<Vec<u8>>
     where
         P: ml_dsa::MlDsaParams,
-        P: pkcs8_pq::spki::AssociatedAlgorithmIdentifier<Params = pkcs8_pq::der::AnyRef<'static>>,
+        P: pkcs8::spki::AssociatedAlgorithmIdentifier<Params = pkcs8::der::AnyRef<'static>>,
     {
         let vk = ml_dsa::VerifyingKey::<P>::from_public_key_der(der)
             .map_err(|e| JoseError::Key(format!("parse ML-DSA SPKI: {e}")))?;
@@ -1214,6 +1213,11 @@ fn mldsa_spki_der_to_raw_public(variant: kryptering::MlDsaVariant, der: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::elliptic_curve::Generate;
+
+    fn rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+        getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+    }
 
     fn rsa_private_key(key: &rsa::RsaPrivateKey) -> kryptering::SoftwareKey {
         use pkcs8::EncodePrivateKey;
@@ -1271,7 +1275,7 @@ mod tests {
 
     #[test]
     fn rsa_generate_to_jwk_roundtrip() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let sw = rsa_private_key(&private_key);
 
         // Convert to JWK
@@ -1309,7 +1313,7 @@ mod tests {
 
     #[test]
     fn rsa_public_only_roundtrip() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let public_key = private_key.to_public_key();
         let sw = rsa_public_key(&public_key);
 
@@ -1326,7 +1330,7 @@ mod tests {
 
     #[test]
     fn ec_p256_roundtrip() {
-        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let signing_key = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let sw = p256_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
@@ -1369,7 +1373,7 @@ mod tests {
 
     #[test]
     fn ec_p384_roundtrip() {
-        let signing_key = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let signing_key = p384::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let sw = p384_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
@@ -1387,7 +1391,7 @@ mod tests {
 
     #[test]
     fn ec_p521_roundtrip() {
-        let signing_key = p521::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let signing_key = p521::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let sw = p521_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
@@ -1405,7 +1409,7 @@ mod tests {
 
     #[test]
     fn ed25519_roundtrip() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rng());
         let sw = ed25519_private_key(&signing_key);
 
         let jwk = software_key_to_jwk(&sw).unwrap();
@@ -1479,8 +1483,8 @@ mod tests {
     /// point `(x, y)` must be rejected at import.
     #[test]
     fn ec_p256_mismatched_d_rejected() {
-        let a = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let b = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let a = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
+        let b = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let a_jwk = software_key_to_jwk(&p256_private_key(&a)).unwrap();
         let b_jwk = software_key_to_jwk(&p256_private_key(&b)).unwrap();
 
@@ -1498,8 +1502,8 @@ mod tests {
     /// must be rejected at import.
     #[test]
     fn ed25519_mismatched_d_rejected() {
-        let a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let a = ed25519_dalek::SigningKey::generate(&mut rng());
+        let b = ed25519_dalek::SigningKey::generate(&mut rng());
         let a_jwk = software_key_to_jwk(&ed25519_private_key(&a)).unwrap();
         let b_jwk = software_key_to_jwk(&ed25519_private_key(&b)).unwrap();
 
@@ -1613,10 +1617,10 @@ mod tests {
     #[test]
     fn rsa_exponent_too_small_is_rejected() {
         // Build a valid 2048-bit modulus but with e=1.
-        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let n_b64 = {
             use rsa::traits::PublicKeyParts;
-            base64url::encode(&private_key.n().to_bytes_be())
+            base64url::encode(&private_key.n().to_be_bytes_trimmed_vartime())
         };
         let json = format!(r#"{{"kty":"RSA","n":"{n_b64}","e":"AQ"}}"#);
         let jwk = Jwk::from_json(&json).unwrap();
@@ -1633,10 +1637,10 @@ mod tests {
     /// Phase 2: even RSA exponent (e.g. 4) must be rejected.
     #[test]
     fn rsa_exponent_even_is_rejected() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let n_b64 = {
             use rsa::traits::PublicKeyParts;
-            base64url::encode(&private_key.n().to_bytes_be())
+            base64url::encode(&private_key.n().to_be_bytes_trimmed_vartime())
         };
         // e = 4 → base64url("BA") — wait, 4 is two bytes? No, 4 = 0x04 → one byte "BA"
         // Actually base64url(0x04) — let's encode explicitly.

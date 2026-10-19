@@ -50,8 +50,7 @@ fn oct_key(alg: &str, fill: impl FnOnce(&mut [u8])) -> Jwk {
 }
 
 fn rand_fill(bytes: &mut [u8]) {
-    use rand::RngCore;
-    rand::thread_rng().fill_bytes(bytes);
+    getrandom::fill(bytes).expect("OS randomness");
 }
 
 /// The protected header of a compact token, decoded.

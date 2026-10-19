@@ -4,7 +4,32 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-19
+
+### Security
+
+- Bound attacker-controlled work before cryptography: JSON duplicate tracking is linear,
+  General JWS applies its signature ceiling before result/key construction, JWE checks
+  algorithms, encoded sizes, plaintext limits and external AAD before body decoding or
+  key recovery, and JSON password decryption now accepts a per-call PBES2 budget. RSA
+  generation/import uses one 2048–8192-bit policy and a 64-KiB DER input ceiling. See
+  ADR 0038.
+- Flattened and General JWS verification now rejects protected/unprotected header-name
+  collisions using the original protected JSON member set, including members whose value
+  is `null`. See ADR 0039.
+- Private PEM/PKCS#8 buffers and X25519 scalar temporaries are zeroizing. Encrypted
+  PKCS#8 maps all failures after CBC decryption begins to one coarse error, closing the
+  padding-versus-inner-format distinction. `Password::from_bytes` now takes a borrowed
+  slice; use `Password::from(Vec<u8>)` or `Password::from(String)` to transfer an owned
+  input without an unwiped copy. See ADR 0040.
+
 ### Changed
+
+- Bumped the crate version to `0.10.0`.
+- Upgraded Kryptering to 0.7 and moved direct RustCrypto dependencies to its coordinated
+  trait-version family. Resolver 3 preserves the declared Rust 1.88 floor (selecting
+  `aes` 0.9.2 there), `rand` 0.8 and `num-bigint-dig` leave the graph, and classical and
+  post-quantum PKCS#8 use one dependency. See ADR 0037.
 
 - JWT claim parsing and serialization are now unambiguous by construction (L1):
   `Claims::from_json_bytes` rejects payloads with duplicate top-level members
@@ -22,14 +47,14 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 - A checked dependency, MSRV and platform record (Q2): `docs/dependencies.md` states the
   declared MSRV and the rule that raising it is breaking, the backend as the ceiling on
   feature work (A0-A3, each naming the missing primitive), the feature-to-dependency
-  mapping, every direct dependency with its locked version, the duplicated RustCrypto
-  trait families and which consumer forces each, the coordinated-upgrade sequence, the
+  mapping, every direct dependency with its locked version, the unified RustCrypto trait
+  family, the coordinated-upgrade sequence, the
   compile-time refusals that make SHA-1/DES/3DES key-encryption schemes unreachable, and
   the single advisory ignore with its mitigation. `tests/dependency_policy.rs` (8 tests)
   asserts all of it against `Cargo.toml`, `Cargo.lock` and `.cargo/audit.toml` - including
   that `dev-dependencies` stays empty and `src/` contains no `unsafe`, process, network or
-  filesystem access. `scripts/dependency-report.sh` regenerates the inputs. No dependency
-  changed. See ADR 0036.
+  filesystem access. `scripts/dependency-report.sh` regenerates the inputs. See ADRs 0036
+  and 0037.
 
 ### Added
 

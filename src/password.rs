@@ -72,10 +72,12 @@ impl Password {
     ///
     /// This is the form RFC 7518 §4.8 calls the "octet sequence" input. Use
     /// [`Password::from_utf8`] when the password is text, so the encoding step is
-    /// written down rather than assumed.
-    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+    /// written down rather than assumed. For an owned `Vec<u8>`, use
+    /// `Password::from(bytes)` to transfer its allocation into zeroizing storage without
+    /// leaving a copied source allocation behind.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
         Self {
-            secret: Zeroizing::new(bytes.as_ref().to_vec()),
+            secret: Zeroizing::new(bytes.to_vec()),
         }
     }
 
@@ -116,7 +118,26 @@ impl From<&str> for Password {
 
 impl From<String> for Password {
     fn from(text: String) -> Self {
-        Password::from_utf8(&text)
+        Self {
+            secret: Zeroizing::new(text.into_bytes()),
+        }
+    }
+}
+
+impl From<Vec<u8>> for Password {
+    /// Take ownership of raw password octets without leaving a copied source
+    /// allocation to be dropped unwiped.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            secret: Zeroizing::new(bytes),
+        }
+    }
+}
+
+impl From<&[u8]> for Password {
+    /// Copy borrowed raw password octets into zeroizing storage.
+    fn from(bytes: &[u8]) -> Self {
+        Password::from_bytes(bytes)
     }
 }
 

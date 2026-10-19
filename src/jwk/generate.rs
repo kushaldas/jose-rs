@@ -4,22 +4,22 @@ use crate::algorithm::JweEncryption;
 use crate::error::{JoseError, Result};
 use crate::jwk::convert::software_key_to_jwk;
 use crate::jwk::Jwk;
+use zeroize::Zeroizing;
+
+fn rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+    getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+}
 
 /// Generate an RSA key pair as a JWK.
 ///
 /// `bits` is the modulus size in bits (e.g. 2048, 3072, 4096). Must be at
-/// least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3.
+/// at least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3 and at most
+/// [`crate::MAX_RSA_BITS`] (8192) to bound key-generation work.
 pub fn generate_rsa(bits: usize) -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 
-    if bits < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "requested RSA key size {} bits is below the required minimum of {}",
-            bits,
-            crate::MIN_RSA_BITS
-        )));
-    }
-    let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits)
+    crate::ensure_rsa_bits(bits)?;
+    let private_key = rsa::RsaPrivateKey::new(&mut rng(), bits)
         .map_err(|e| JoseError::Key(format!("RSA keygen failed: {e}")))?;
     let der = private_key
         .to_pkcs8_der()
@@ -33,11 +33,12 @@ pub fn generate_rsa(bits: usize) -> Result<Jwk> {
 ///
 /// `curve` must be one of `"P-256"`, `"P-384"`, or `"P-521"`.
 pub fn generate_ec(curve: &str) -> Result<Jwk> {
+    use p256::elliptic_curve::Generate;
     use pkcs8::EncodePrivateKey;
 
     let sw = match curve {
         "P-256" => {
-            let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let der = sk
                 .to_pkcs8_der()
                 .map_err(|e| JoseError::Key(format!("P-256 PKCS#8 encode failed: {e}")))?;
@@ -47,7 +48,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
             )?
         }
         "P-384" => {
-            let sk = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p384::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let der = sk
                 .to_pkcs8_der()
                 .map_err(|e| JoseError::Key(format!("P-384 PKCS#8 encode failed: {e}")))?;
@@ -57,7 +58,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
             )?
         }
         "P-521" => {
-            let sk = p521::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p521::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let secret = p521::SecretKey::from_slice(&sk.to_bytes())
                 .map_err(|e| JoseError::Key(format!("P-521 key conversion failed: {e}")))?;
             let der = secret
@@ -90,7 +91,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
 pub fn generate_ed25519() -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 
-    let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let sk = ed25519_dalek::SigningKey::generate(&mut rng());
     let der = sk
         .to_pkcs8_der()
         .map_err(|e| JoseError::Key(format!("Ed25519 PKCS#8 encode failed: {e}")))?;
@@ -123,15 +124,19 @@ pub fn generate_ed25519() -> Result<Jwk> {
 /// # }
 /// ```
 pub fn generate_x25519() -> Result<Jwk> {
-    use rand::RngCore;
-
     // X25519 clamps the scalar internally, so no masking is applied here; the
     // value must simply be uniformly random and 32 octets long.
-    let mut secret = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut secret);
-    let public =
-        kryptering::software::keyagreement::ecdh_x25519(&crate::jwk::X25519_BASEPOINT, &secret)?;
-    let sw = kryptering::SoftwareKey::from_x25519(Some(&secret), &public)?;
+    let mut secret = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *secret).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
+    let public = kryptering::software::keyagreement::ecdh_x25519(
+        &crate::jwk::X25519_BASEPOINT,
+        &secret[..],
+    )?;
+    let sw = kryptering::SoftwareKey::from_x25519(Some(&secret[..]), &public)?;
     software_key_to_jwk(&sw)
 }
 
@@ -139,9 +144,12 @@ pub fn generate_x25519() -> Result<Jwk> {
 ///
 /// `len` is the key length in bytes (e.g. 16 for AES-128, 32 for AES-256 / HS256).
 pub fn generate_symmetric(len: usize) -> Result<Jwk> {
-    use rand::RngCore;
     let mut key_bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
+    getrandom::fill(&mut key_bytes).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
     let sw =
         kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &key_bytes)?;
     software_key_to_jwk(&sw)

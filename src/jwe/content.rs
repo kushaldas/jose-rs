@@ -13,8 +13,6 @@
 use crate::algorithm::JweEncryption;
 use crate::error::{JoseError, Result};
 
-use rand::RngCore;
-
 /// Encrypt `plaintext` and return `(iv, ciphertext, tag)`.
 pub(crate) fn content_encrypt(
     enc: JweEncryption,
@@ -70,12 +68,16 @@ fn aes_gcm_encrypt(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     use aes_gcm::{KeyInit, Nonce};
 
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    getrandom::fill(&mut nonce_bytes).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
+    let nonce = Nonce::try_from(nonce_bytes.as_slice()).expect("fixed-size AES-GCM nonce");
 
     let mut buffer = plaintext.to_vec();
 
@@ -87,7 +89,7 @@ fn aes_gcm_encrypt(
         16 => {
             let cipher = aes_gcm::Aes128Gcm::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
+                .encrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into())
                 .map_err(gcm_err)?
         }
         24 => {
@@ -95,13 +97,13 @@ fn aes_gcm_encrypt(
             let cipher =
                 aes_gcm::AesGcm::<aes::Aes192, U12>::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
+                .encrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into())
                 .map_err(gcm_err)?
         }
         32 => {
             let cipher = aes_gcm::Aes256Gcm::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
+                .encrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into())
                 .map_err(gcm_err)?
         }
         other => {
@@ -119,7 +121,7 @@ fn aes_gcm_decrypt(
     tag: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     use aes_gcm::{KeyInit, Nonce, Tag};
 
     if iv.len() != 12 {
@@ -135,8 +137,8 @@ fn aes_gcm_decrypt(
         )));
     }
 
-    let nonce = Nonce::from_slice(iv);
-    let auth_tag = Tag::from_slice(tag);
+    let nonce = Nonce::try_from(iv).expect("AES-GCM IV length checked above");
+    let auth_tag = Tag::try_from(tag).expect("AES-GCM tag length checked above");
     let mut buffer = ciphertext.to_vec();
 
     let auth_fail = || {
@@ -150,7 +152,7 @@ fn aes_gcm_decrypt(
         16 => {
             let cipher = aes_gcm::Aes128Gcm::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
+                .decrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into(), &auth_tag)
                 .map_err(|_| auth_fail())?;
         }
         24 => {
@@ -158,13 +160,13 @@ fn aes_gcm_decrypt(
             let cipher =
                 aes_gcm::AesGcm::<aes::Aes192, U12>::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
+                .decrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into(), &auth_tag)
                 .map_err(|_| auth_fail())?;
         }
         32 => {
             let cipher = aes_gcm::Aes256Gcm::new_from_slice(cek).map_err(key_err)?;
             cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
+                .decrypt_inout_detached(&nonce, aad, (&mut buffer[..]).into(), &auth_tag)
                 .map_err(|_| auth_fail())?;
         }
         other => {
@@ -212,7 +214,11 @@ fn aes_cbc_hs_encrypt(
 
     // Generate random 128-bit IV.
     let mut iv = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut iv);
+    getrandom::fill(&mut iv).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
 
     // PKCS#7 pad and encrypt with AES-CBC.
     let ciphertext = aes_cbc_encrypt_raw(enc_key, &iv, plaintext)?;
@@ -277,7 +283,7 @@ fn compute_cbc_hs_tag(
     ciphertext: &[u8],
     tag_len: usize,
 ) -> Result<Vec<u8>> {
-    use hmac::Mac;
+    use hmac::{KeyInit, Mac};
 
     // AAD length in bits as big-endian u64.
     let aad_len_bits = (aad.len() as u64) * 8;
@@ -323,7 +329,7 @@ fn compute_cbc_hs_tag(
 // ---------------------------------------------------------------------------
 
 fn aes_cbc_encrypt_raw(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
     let padded = pkcs7_pad(plaintext, 16);
     let padded_len = padded.len();
@@ -333,7 +339,7 @@ fn aes_cbc_encrypt_raw(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
         ($aes:ty) => {{
             let enc = cbc::Encryptor::<$aes>::new_from_slices(key, iv)
                 .map_err(|e| JoseError::Key(format!("AES-CBC init: {e}")))?;
-            enc.encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
+            enc.encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
                 .map_err(|e| {
                     JoseError::Crypto(kryptering::Error::Crypto(format!("AES-CBC encrypt: {e}")))
                 })?;
@@ -353,7 +359,7 @@ fn aes_cbc_encrypt_raw(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
 }
 
 fn aes_cbc_decrypt_raw(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 
     if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return Err(JoseError::InvalidToken(
@@ -367,7 +373,7 @@ fn aes_cbc_decrypt_raw(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
         ($aes:ty) => {{
             let dec = cbc::Decryptor::<$aes>::new_from_slices(key, iv)
                 .map_err(|e| JoseError::Key(format!("AES-CBC init: {e}")))?;
-            dec.decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
+            dec.decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
                 .map_err(|e| {
                     JoseError::Crypto(kryptering::Error::Crypto(format!("AES-CBC decrypt: {e}")))
                 })?;
@@ -476,7 +482,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Fill `len` bytes from the OS CSPRNG.
 pub(crate) fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut buf);
+    getrandom::fill(&mut buf).expect("operating-system randomness unavailable");
     buf
 }
 

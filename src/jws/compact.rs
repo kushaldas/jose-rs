@@ -788,9 +788,8 @@ mod tests {
     #[test]
     fn sign_verify_ed25519_roundtrip() {
         use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
-
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key =
+            SigningKey::generate(&mut getrandom::rand_core::UnwrapErr(getrandom::SysRng));
         let verifying_key = signing_key.verifying_key();
 
         use pkcs8::spki::EncodePublicKey;

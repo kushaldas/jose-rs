@@ -775,6 +775,17 @@ pub(crate) struct ParsedEnvelope<'a> {
     pub tag: Vec<u8>,
 }
 
+/// Protected-header decisions made before any ciphertext field is decoded.
+pub(crate) struct InspectedEnvelope {
+    /// Key-management algorithm and whether its source was authenticated.
+    pub alg: JweAlgorithm,
+    pub alg_authenticated: bool,
+    /// Protected content-encryption algorithm.
+    pub enc: JweEncryption,
+    /// Parsed protected header used by key management after policy passes.
+    pub protected: JoseHeader,
+}
+
 /// Decode and policy-check one envelope's fields.
 ///
 /// `unprotected_alg` is the `alg` value conveyed outside the protected header,
@@ -800,8 +811,34 @@ pub(crate) fn parse_envelope<'a>(
     iv_b64: &str,
     ciphertext_b64: &str,
     tag_b64: &str,
-    understood_crit: &[String],
+    options: &JweDecryptOptions,
 ) -> Result<(ParsedEnvelope<'a>, JoseHeader)> {
+    let inspected = inspect_envelope(header_b64, unprotected_alg, options.understood_crit())?;
+    preflight_envelope_fields(
+        encrypted_key_b64,
+        iv_b64,
+        ciphertext_b64,
+        tag_b64,
+        &inspected,
+        options,
+    )?;
+    decode_envelope_fields(
+        header_b64,
+        encrypted_key_b64,
+        iv_b64,
+        ciphertext_b64,
+        tag_b64,
+        inspected,
+    )
+}
+
+/// Parse and validate only the protected header, without decoding encrypted bodies.
+pub(crate) fn inspect_envelope(
+    header_b64: &str,
+    unprotected_alg: Option<&str>,
+    understood_crit: &[String],
+) -> Result<InspectedEnvelope> {
+    ensure_token_size(header_b64)?;
     let header_json = base64url::decode(header_b64)?;
     let header: JoseHeader = serde_json::from_slice(&header_json)?;
 
@@ -836,17 +873,51 @@ pub(crate) fn parse_envelope<'a>(
         .ok_or_else(|| JoseError::InvalidHeader("missing enc field".into()))?;
     let enc = JweEncryption::from_str(enc_str)?;
 
-    let envelope = ParsedEnvelope {
-        header_b64,
+    Ok(InspectedEnvelope {
         alg,
         alg_authenticated,
         enc,
+        protected: header,
+    })
+}
+
+/// Enforce algorithm, allocation, and plaintext budgets before decoding body fields.
+pub(crate) fn preflight_envelope_fields(
+    encrypted_key_b64: &str,
+    iv_b64: &str,
+    ciphertext_b64: &str,
+    tag_b64: &str,
+    inspected: &InspectedEnvelope,
+    options: &JweDecryptOptions,
+) -> Result<()> {
+    for field in [encrypted_key_b64, iv_b64, ciphertext_b64, tag_b64] {
+        ensure_token_size(field)?;
+    }
+    options.check(inspected.alg, inspected.enc)?;
+    options.check_plaintext_size(minimum_plaintext_len(ciphertext_b64.len(), inspected.enc))?;
+    Ok(())
+}
+
+/// Decode encrypted fields after the caller has completed all cheap policy checks.
+pub(crate) fn decode_envelope_fields<'a>(
+    header_b64: &'a str,
+    encrypted_key_b64: &str,
+    iv_b64: &str,
+    ciphertext_b64: &str,
+    tag_b64: &str,
+    inspected: InspectedEnvelope,
+) -> Result<(ParsedEnvelope<'a>, JoseHeader)> {
+    let envelope = ParsedEnvelope {
+        header_b64,
+        alg: inspected.alg,
+        alg_authenticated: inspected.alg_authenticated,
+        enc: inspected.enc,
         encrypted_key: base64url::decode(encrypted_key_b64)?,
         iv: base64url::decode(iv_b64)?,
         ciphertext: base64url::decode(ciphertext_b64)?,
         tag: base64url::decode(tag_b64)?,
     };
-    Ok((envelope, header))
+    Ok((envelope, inspected.protected))
 }
 
 /// Content-decrypt an envelope and enforce the plaintext-size limit. The
@@ -1657,7 +1728,7 @@ struct GcmKeyWrap {
 /// future caller cannot introduce it.
 macro_rules! gcm_kw_aead {
     (encrypt $kek:expr, $iv:expr, $buffer:expr) => {{
-        use aes_gcm::aead::{AeadInPlace, KeyInit, Nonce};
+        use aes_gcm::aead::{AeadInOut, KeyInit, Nonce};
         let gcm_err = |e: aes_gcm::Error| {
             JoseError::Crypto(kryptering::Error::Crypto(format!("AES-GCM: {e}")))
         };
@@ -1674,7 +1745,11 @@ macro_rules! gcm_kw_aead {
                 type Cipher = aes_gcm::Aes128Gcm;
                 let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
                 cipher
-                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .encrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv.as_slice()).expect("IV length checked above"),
+                        b"",
+                        (&mut buffer[..]).into(),
+                    )
                     .map_err(gcm_err)?
             }
             24 => {
@@ -1682,14 +1757,22 @@ macro_rules! gcm_kw_aead {
                 type Cipher = aes_gcm::AesGcm<aes::Aes192, U12>;
                 let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
                 cipher
-                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .encrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv.as_slice()).expect("IV length checked above"),
+                        b"",
+                        (&mut buffer[..]).into(),
+                    )
                     .map_err(gcm_err)?
             }
             32 => {
                 type Cipher = aes_gcm::Aes256Gcm;
                 let cipher = Cipher::new_from_slice(kek).map_err(key_err)?;
                 cipher
-                    .encrypt_in_place_detached(Nonce::<Cipher>::from_slice(iv), b"", buffer)
+                    .encrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv.as_slice()).expect("IV length checked above"),
+                        b"",
+                        (&mut buffer[..]).into(),
+                    )
                     .map_err(gcm_err)?
             }
             other => {
@@ -1702,7 +1785,7 @@ macro_rules! gcm_kw_aead {
         }
     }};
     (decrypt $kek:expr, $iv:expr, $buffer:expr, $tag:expr) => {{
-        use aes_gcm::aead::{AeadInPlace, KeyInit, Nonce, Tag};
+        use aes_gcm::aead::{AeadInOut, KeyInit, Nonce, Tag};
         let gcm_err = |e: aes_gcm::Error| {
             JoseError::Crypto(kryptering::Error::Crypto(format!("AES-GCM: {e}")))
         };
@@ -1727,11 +1810,11 @@ macro_rules! gcm_kw_aead {
                 type Cipher = aes_gcm::Aes128Gcm;
                 Cipher::new_from_slice(kek)
                     .map_err(key_err)?
-                    .decrypt_in_place_detached(
-                        Nonce::<Cipher>::from_slice(iv),
+                    .decrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv).expect("IV length checked above"),
                         b"",
-                        buffer,
-                        Tag::<Cipher>::from_slice(tag),
+                        (&mut buffer[..]).into(),
+                        &Tag::<Cipher>::try_from(tag).expect("tag length checked above"),
                     )
                     .map_err(gcm_err)?
             }
@@ -1740,11 +1823,11 @@ macro_rules! gcm_kw_aead {
                 type Cipher = aes_gcm::AesGcm<aes::Aes192, U12>;
                 Cipher::new_from_slice(kek)
                     .map_err(key_err)?
-                    .decrypt_in_place_detached(
-                        Nonce::<Cipher>::from_slice(iv),
+                    .decrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv).expect("IV length checked above"),
                         b"",
-                        buffer,
-                        Tag::<Cipher>::from_slice(tag),
+                        (&mut buffer[..]).into(),
+                        &Tag::<Cipher>::try_from(tag).expect("tag length checked above"),
                     )
                     .map_err(gcm_err)?
             }
@@ -1752,11 +1835,11 @@ macro_rules! gcm_kw_aead {
                 type Cipher = aes_gcm::Aes256Gcm;
                 Cipher::new_from_slice(kek)
                     .map_err(key_err)?
-                    .decrypt_in_place_detached(
-                        Nonce::<Cipher>::from_slice(iv),
+                    .decrypt_inout_detached(
+                        &Nonce::<Cipher>::try_from(iv).expect("IV length checked above"),
                         b"",
-                        buffer,
-                        Tag::<Cipher>::from_slice(tag),
+                        (&mut buffer[..]).into(),
+                        &Tag::<Cipher>::try_from(tag).expect("tag length checked above"),
                     )
                     .map_err(gcm_err)?
             }
@@ -1779,7 +1862,11 @@ macro_rules! gcm_kw_aead {
 /// tag as AAD, not by anything the key wrap authenticates itself.
 fn gcm_kw_wrap(kek: &[u8], cek: &[u8]) -> Result<GcmKeyWrap> {
     let mut iv = [0u8; 12];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut iv);
+    getrandom::fill(&mut iv).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
     let mut buffer = cek.to_vec();
     let tag = gcm_kw_aead!(encrypt kek, &iv, &mut buffer);
     Ok(GcmKeyWrap {
@@ -2154,30 +2241,26 @@ pub(crate) fn jwe_alg_to_keytransport(
 pub(crate) fn parse_rsa_public_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
     use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
+    crate::ensure_key_der_size(der.len())?;
     let key = rsa::RsaPublicKey::from_public_key_der(der)
         .map_err(|e| JoseError::Key(format!("failed to parse RSA public key DER: {e}")))?;
-    if key.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            key.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
+    crate::ensure_rsa_bits(key.n().bits() as usize)?;
     kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 
 pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
+    use pkcs8::der::Decode;
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
+    crate::ensure_key_der_size(der.len())?;
+    let info = pkcs8::PrivateKeyInfoRef::from_der(der)
+        .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
+    let raw = rsa::pkcs1::RsaPrivateKeyRef::from_der(info.private_key.as_bytes())
+        .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
+    crate::ensure_rsa_modulus_bytes(raw.modulus.as_bytes())?;
     let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
         .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
-    if key.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            key.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
+    crate::ensure_rsa_bits(key.n().bits() as usize)?;
     kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 

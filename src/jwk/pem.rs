@@ -63,6 +63,7 @@
 
 use crate::error::{JoseError, Result};
 use crate::jwk::Jwk;
+use zeroize::Zeroizing;
 
 /// The RFC 7468 type label for an unencrypted PKCS#8 private key.
 const LABEL_PRIVATE: &str = "PRIVATE KEY";
@@ -236,23 +237,25 @@ pub fn private_pem_from_jwk(jwk: &Jwk) -> Result<String> {
 ///
 /// Keys that already have no attribute — RSA and the EC curves — pass through untouched,
 /// byte for byte.
-pub(crate) fn pkcs8_portable_form(der: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn pkcs8_portable_form(der: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     use pkcs8::der::{Decode, Encode};
-    let info = pkcs8::PrivateKeyInfo::from_der(der).map_err(|e| {
+    let info = pkcs8::PrivateKeyInfoRef::from_der(der).map_err(|e| {
         JoseError::Key(format!(
             "PKCS#8 export from the backend did not parse: {e:?}"
         ))
     })?;
     if info.public_key.is_none() {
-        return Ok(der.to_vec());
+        return Ok(Zeroizing::new(der.to_vec()));
     }
-    let slim = pkcs8::PrivateKeyInfo {
-        algorithm: info.algorithm,
-        private_key: info.private_key,
-        public_key: None,
-    };
-    slim.to_der()
-        .map_err(|e| JoseError::Key(format!("PKCS#8 re-encoding failed: {e:?}")))
+    let slim = pkcs8::PrivateKeyInfoRef::new(info.algorithm, info.private_key);
+    let encoded_len = slim
+        .encoded_len()
+        .and_then(usize::try_from)
+        .map_err(|e| JoseError::Key(format!("PKCS#8 re-encoding length failed: {e:?}")))?;
+    let mut encoded = Zeroizing::new(vec![0; encoded_len]);
+    slim.encode_to_slice(&mut encoded)
+        .map_err(|e| JoseError::Key(format!("PKCS#8 re-encoding failed: {e:?}")))?;
+    Ok(encoded)
 }
 
 /// Export the public half of a [`Jwk`] as an SPKI `PUBLIC KEY` PEM document.
@@ -332,7 +335,7 @@ fn unsupported_label(label: &str) -> JoseError {
 ///
 /// The armor-level rules live here so all three import entry points share them; only the
 /// label dispatch differs between them.
-pub(crate) fn decompose(text: &str) -> Result<(&str, Vec<u8>)> {
+pub(crate) fn decompose(text: &str) -> Result<(&str, Zeroizing<Vec<u8>>)> {
     // Bound the input before parsing anything, as everywhere in this crate: PEM is text,
     // and a 4 GiB "key file" should be refused rather than allocated through.
     crate::ensure_emit_size(text.len())?;
@@ -346,7 +349,14 @@ pub(crate) fn decompose(text: &str) -> Result<(&str, Vec<u8>)> {
     // already drew the line (whitespace around the block is fine, text is not), so the
     // decoder is handed the trimmed text and its own boundary errors stay meaningful for
     // everything else.
-    let (label, der) = pem_rfc7468::decode_vec(text.trim().as_bytes()).map_err(armor_error)?;
+    // Allocate a bounded upper limit under a zeroizing owner before decoding. Using the
+    // crate's top-level `decode` retains its legacy-header classifier; constructing a
+    // `Decoder` directly would turn Proc-Type / DEK-Info into a generic base64 error.
+    let input = text.trim().as_bytes();
+    let mut der = Zeroizing::new(vec![0; input.len()]);
+    let (label, decoded) = pem_rfc7468::decode(input, &mut der).map_err(armor_error)?;
+    let decoded_len = decoded.len();
+    der.truncate(decoded_len);
     Ok((label, der))
 }
 

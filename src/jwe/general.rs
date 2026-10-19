@@ -336,6 +336,21 @@ impl GeneralJwe {
                 self.recipients.len()
             ))
         })?;
+        // Bound every attacker-controlled string before cloning the selected
+        // recipient into the flattened owned representation.
+        for field in [
+            self.protected.as_deref(),
+            self.aad.as_deref(),
+            self.iv.as_deref(),
+            Some(self.ciphertext.as_str()),
+            self.tag.as_deref(),
+            entry.encrypted_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure_token_size(field)?;
+        }
         Ok(FlattenedJwe {
             protected: self.protected.clone(),
             unprotected: self.unprotected.clone(),
@@ -711,7 +726,36 @@ pub fn decrypt_general_with_password(
     jwe: &GeneralJwe,
     recipient: usize,
 ) -> Result<Vec<u8>> {
-    json_mod::decrypt_flattened_with_password(password, &jwe.flatten_for(recipient)?)
+    decrypt_general_with_password_options(
+        password,
+        jwe,
+        recipient,
+        &JweDecryptOptions::new(
+            crate::jwe::compact::pbes2_algorithms(),
+            internal::all_enc_algorithms(),
+        ),
+    )
+}
+
+/// [`decrypt_general_with_password`] with an explicit recipient policy and PBES2
+/// iteration ceiling.
+///
+/// # Errors
+///
+/// Returns [`JoseError::InvalidToken`] when `recipient` is out of range or a configured
+/// size/work/AAD policy fails, and otherwise the errors documented by
+/// [`crate::jwe::json::decrypt_flattened_with_password_options`].
+pub fn decrypt_general_with_password_options(
+    password: &crate::jwe::password::Password,
+    jwe: &GeneralJwe,
+    recipient: usize,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
+    json_mod::decrypt_flattened_with_password_options(
+        password,
+        &jwe.flatten_for(recipient)?,
+        options,
+    )
 }
 
 /// Decrypt the given recipient of a general JWE with a JWK.

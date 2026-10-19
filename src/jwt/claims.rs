@@ -139,16 +139,15 @@ fn ensure_unique_top_level_members(bytes: &[u8]) -> Result<()> {
                     // cheaper to reason about than borrowing through the map access lifetime —
                     // and it avoids the `Box::leak` "optimization" that a first draft of this
                     // function needed and that no library should ship.
-                    let mut seen: Vec<String> = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
                     while let Some(key) = map.next_key::<String>()? {
-                        if seen.iter().any(|existing| existing == &key) {
+                        if !seen.insert(key.clone()) {
                             // Naming the duplicate is the whole point: "your token has two
                             // meanings" is only actionable if the caller can see which member.
                             return Err(serde::de::Error::custom(format!(
                                 "duplicate JSON member {key}"
                             )));
                         }
-                        seen.push(key);
                         // Values are skipped here and parsed once, properly, by the typed parse
                         // that follows.
                         map.next_value::<serde::de::IgnoredAny>()?;
@@ -368,6 +367,19 @@ mod tests {
         let payload = format!(r#"{{"jti":"{filler}"}}"#);
         let err = Claims::from_json_bytes(payload.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn many_unique_claim_names_remain_acceptable() {
+        let payload = format!(
+            "{{{}}}",
+            (0..4096)
+                .map(|index| format!(r#""claim-{index}":{index}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let claims = Claims::from_json_bytes(payload.as_bytes()).unwrap();
+        assert_eq!(claims.extra.len(), 4096);
     }
 
     #[test]

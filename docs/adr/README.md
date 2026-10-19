@@ -40,3 +40,7 @@ history.
 | [0034](0034-fuzz-logic-runs-in-ci.md) | Fuzz logic runs in CI; the fuzzer only searches | Accepted |
 | [0035](0035-baselines-are-a-harness-plus-shapes.md) | Baselines are a harness plus shapes; committed numbers are not baselines | Accepted |
 | [0036](0036-dependency-record-is-checked-not-trusted.md) | Two majors in one lock, documented, beat one major forced forward | Accepted |
+| [0037](0037-kryptering-0-7-coordinated-trait-wave.md) | Kryptering 0.7 closes the split trait-family window | Accepted; supersedes 0036 |
+| [0038](0038-bound-untrusted-work-before-cryptography.md) | Bound untrusted work before cryptography | Accepted |
+| [0039](0039-jws-header-disjointness-uses-wire-members.md) | JWS header disjointness uses wire members | Accepted |
+| [0040](0040-transient-secrets-have-zeroizing-owners.md) | Transient secrets have zeroizing owners | Accepted |

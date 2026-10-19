@@ -14,6 +14,7 @@
 
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashSet;
 
 use crate::error::{JoseError, Result};
 
@@ -27,16 +28,15 @@ pub(crate) struct MemberMap {
 impl MemberMap {
     /// Build a map from `(name, value)` pairs, refusing duplicate names.
     pub(crate) fn new(members: Vec<(String, serde_json::Value)>) -> Result<Self> {
-        let mut map = MemberMap::default();
-        for (name, value) in members {
-            if map.contains(&name) {
+        let mut seen = HashSet::with_capacity(members.len());
+        for (name, _) in &members {
+            if !seen.insert(name.as_str()) {
                 return Err(JoseError::InvalidToken(format!(
                     "duplicate JSON member {name}"
                 )));
             }
-            map.members.push((name, value));
         }
-        Ok(map)
+        Ok(MemberMap { members })
     }
 
     /// `true` when `name` is present.
@@ -137,8 +137,9 @@ impl<'de> Deserialize<'de> for MemberMap {
                 // observed here even though `Value`/`Map` targets would
                 // silently collapse it.
                 let mut members: Vec<(String, serde_json::Value)> = Vec::new();
+                let mut seen = HashSet::new();
                 while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
-                    if members.iter().any(|(n, _)| *n == name) {
+                    if !seen.insert(name.clone()) {
                         return Err(serde::de::Error::custom(format!(
                             "duplicate JSON member {name}"
                         )));
@@ -247,5 +248,17 @@ mod tests {
         assert_eq!(MemberMap::from_json(&text).unwrap(), map);
         // Order survives this crate's own serializer.
         assert_eq!(text, r#"{"a":1,"b":"two"}"#);
+    }
+
+    #[test]
+    fn accepts_many_unique_members_and_rejects_a_late_duplicate() {
+        let members = (0..4096)
+            .map(|index| (format!("member-{index}"), serde_json::json!(index)))
+            .collect::<Vec<_>>();
+        assert_eq!(MemberMap::new(members.clone()).unwrap().members.len(), 4096);
+
+        let mut with_duplicate = members;
+        with_duplicate.push(("member-0".into(), serde_json::json!("duplicate")));
+        assert!(MemberMap::new(with_duplicate).is_err());
     }
 }

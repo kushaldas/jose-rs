@@ -54,7 +54,7 @@
 use ::pkcs8::der::Decode;
 use ::pkcs8::pkcs5::pbes2::{Kdf, Pbkdf2Prf};
 use ::pkcs8::pkcs5::EncryptionScheme as Pkcs5Scheme;
-use ::pkcs8::{EncryptedPrivateKeyInfo, PrivateKeyInfo};
+use ::pkcs8::{EncryptedPrivateKeyInfoRef, PrivateKeyInfoRef};
 use zeroize::Zeroizing;
 
 use crate::error::{JoseError, Result};
@@ -228,7 +228,7 @@ pub fn jwk_from_encrypted_pkcs8_der_with_options(
     options: &Pkcs8ReadOptions,
 ) -> Result<Jwk> {
     crate::ensure_emit_size(der.len())?;
-    let info = EncryptedPrivateKeyInfo::from_der(der).map_err(|e| {
+    let info = EncryptedPrivateKeyInfoRef::from_der(der).map_err(|e| {
         // Schemes the dependency does not even compile — DES, 3DES, AES-192-CBC — fail to
         // *parse*, so the parse error is where their refusal surfaces. Naming the OID the
         // file actually contains is the difference between "your file uses 3DES" and
@@ -243,12 +243,21 @@ pub fn jwk_from_encrypted_pkcs8_der_with_options(
     // Before deriving: naming the scheme is free, computing it is not.
     describe_scheme(&info.encryption_algorithm, options.max_iterations())?;
 
-    let plaintext = info.decrypt(password.as_bytes()).map_err(|_| {
+    // CBC padding is not an authenticity check. Once decryption starts, padding failure
+    // and a padding-valid plaintext that is not a permitted key are deliberately
+    // indistinguishable, so this API cannot be used as a padding/format oracle.
+    let decryption_failed = || {
         JoseError::Key(
             "PKCS#8 decryption failed (wrong password, or the file is not intact)".into(),
         )
-    })?;
-    super::import::jwk_from_pkcs8_der(plaintext.as_bytes())
+    };
+    let mut plaintext = Zeroizing::new(info.encrypted_data.as_bytes().to_vec());
+    let plaintext_len = info
+        .encryption_algorithm
+        .decrypt_in_place(password.as_bytes(), &mut plaintext)
+        .map_err(|_| decryption_failed())?
+        .len();
+    super::import::jwk_from_pkcs8_der(&plaintext[..plaintext_len]).map_err(|_| decryption_failed())
 }
 
 /// Import a [`Jwk`] from a password-encrypted PKCS#8 PEM document.
@@ -329,24 +338,29 @@ pub fn encrypted_pkcs8_der_from_jwk(
     // so the fix has to happen *before* encryption — after decryption is too late to help a
     // file already handed to a peer.
     let plain = super::pem::pkcs8_portable_form(software.export_private()?.as_ref())?;
-    let info = PrivateKeyInfo::from_der(&plain).map_err(|e| {
+    let info = PrivateKeyInfoRef::from_der(&plain).map_err(|e| {
         JoseError::Key(format!(
             "PKCS#8 export from the backend did not parse: {e:?}"
         ))
     })?;
 
-    let mut rng = rand::rngs::OsRng;
     let mut salt = [0u8; 16];
     let mut iv = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rng, &mut salt);
-    rand::RngCore::fill_bytes(&mut rng, &mut iv);
+    getrandom::fill(&mut salt)
+        .map_err(|e| JoseError::Key(format!("operating-system randomness failed: {e}")))?;
+    getrandom::fill(&mut iv)
+        .map_err(|e| JoseError::Key(format!("operating-system randomness failed: {e}")))?;
 
     let params = match scheme {
         Pkcs8Encryption::Aes128CbcPbkdf2HmacSha256 { .. } => {
-            ::pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes128cbc(iterations, &salt, &iv)
+            ::pkcs8::pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes128cbc(
+                iterations, &salt, iv,
+            )
         }
         Pkcs8Encryption::Aes256CbcPbkdf2HmacSha256 { .. } => {
-            ::pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(iterations, &salt, &iv)
+            ::pkcs8::pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(
+                iterations, &salt, iv,
+            )
         }
     }
     .map_err(|e| JoseError::Key(format!("PKCS#8 PBES2 parameters were rejected: {e:?}")))?;
@@ -377,7 +391,7 @@ pub fn encrypted_pkcs8_pem_from_jwk(
 /// Check a file's scheme against the allow-list and the work budget, before deriving.
 ///
 /// Returns the iteration count it accepted, so a caller (or a test) can see what was paid.
-fn describe_scheme(scheme: &Pkcs5Scheme<'_>, max_iterations: u32) -> Result<u32> {
+fn describe_scheme(scheme: &Pkcs5Scheme, max_iterations: u32) -> Result<u32> {
     match scheme {
         Pkcs5Scheme::Pbes1(_) => Err(JoseError::Key(
             "PBES1 (RFC 8018 §6.1) encrypted PKCS#8 is unsupported: its PRF family is \
@@ -629,6 +643,27 @@ mod tests {
     }
 
     #[test]
+    fn padding_valid_invalid_plaintext_is_indistinguishable_from_a_wrong_password() {
+        let key = ec_jwk();
+        let password = Password::from_utf8("right");
+        let mut der = encrypted_pkcs8_der_from_jwk(&key, &password, &Pkcs8Encryption::default())
+            .expect("encrypt");
+
+        let wrong_password =
+            jwk_from_encrypted_pkcs8_der(&der, &Password::from_utf8("wrong")).unwrap_err();
+
+        // The encrypted payload occupies the tail of EncryptedPrivateKeyInfo. Changing
+        // its first block leaves the final PKCS#7 padding intact but corrupts the inner
+        // PrivateKeyInfo, exercising the post-decryption parse path.
+        let info = EncryptedPrivateKeyInfoRef::from_der(&der).expect("parse envelope");
+        let offset = der.len() - info.encrypted_data.as_bytes().len();
+        der[offset] ^= 1;
+        let invalid_plaintext = jwk_from_encrypted_pkcs8_der(&der, &password).unwrap_err();
+
+        assert_eq!(invalid_plaintext.to_string(), wrong_password.to_string());
+    }
+
+    #[test]
     fn plaintext_forms_are_refused_without_a_fallback() {
         let pem = jwk::private_pem_from_jwk(&ec_jwk()).expect("plaintext PEM");
         let err = jwk_from_encrypted_pkcs8_pem(&pem, &Password::from_utf8("x"))
@@ -749,8 +784,6 @@ mod tests {
     #[test]
     fn ed25519_exports_encrypt_the_portable_form() {
         use ::pkcs8::der::Decode;
-        use ::pkcs8::PrivateKeyInfo;
-
         for key in [
             crate::jwk::generate_ed25519().expect("ed25519"),
             crate::jwk::generate_ec("P-256").expect("ec"),
@@ -758,9 +791,9 @@ mod tests {
             let password = Password::from_utf8("x");
             let der = encrypted_pkcs8_der_from_jwk(&key, &password, &Pkcs8Encryption::default())
                 .expect("encrypt");
-            let info = EncryptedPrivateKeyInfo::from_der(&der).expect("parse");
+            let info = EncryptedPrivateKeyInfoRef::from_der(&der).expect("parse");
             let inner = info.decrypt(password.as_bytes()).expect("decrypt");
-            let inner_info = PrivateKeyInfo::from_der(inner.as_bytes()).expect("inner pkcs8");
+            let inner_info = PrivateKeyInfoRef::from_der(inner.as_bytes()).expect("inner pkcs8");
             assert!(
                 inner_info.public_key.is_none(),
                 "{}: encrypted payload still carries the OneAsymmetricKey publicKey attribute",
@@ -779,16 +812,14 @@ mod tests {
     #[test]
     fn scrypt_files_are_refused_even_though_pkcs8_writes_them() {
         use ::pkcs8::der::Decode;
-        use ::pkcs8::PrivateKeyInfo;
-
         let key = ec_jwk();
         let plain = super::super::convert::jwk_to_software_key(&key)
             .expect("convert")
             .export_private()
             .expect("pkcs8");
-        let info = PrivateKeyInfo::from_der(plain.as_ref()).expect("parse");
+        let info = PrivateKeyInfoRef::from_der(plain.as_ref()).expect("parse");
         let scrypt_file = info
-            .encrypt(&mut rand::rngs::OsRng, b"hunter2")
+            .encrypt_with_rng(&mut getrandom::SysRng, b"hunter2")
             .expect("scrypt encrypt");
 
         let err =
@@ -816,9 +847,10 @@ mod tests {
             PKCS8_DEFAULT_ITERATIONS,
             PKCS8_DEFAULT_MAX_ITERATIONS,
         ] {
-            let params =
-                ::pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(iterations, &salt, &iv)
-                    .expect("parameters");
+            let params = ::pkcs8::pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(
+                iterations, &salt, iv,
+            )
+            .expect("parameters");
             let started = Instant::now();
             params
                 .encrypt(b"benchmark password", b"payload".as_slice())

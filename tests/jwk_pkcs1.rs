@@ -126,6 +126,18 @@ fn the_modulus_floor_applies_through_this_door_too() {
 }
 
 #[test]
+fn rsa_work_is_bounded_before_private_key_validation() {
+    let oversized = vec![0u8; jose_rs::MAX_KEY_DER_BYTES + 1];
+    let err = jwk::jwk_from_pkcs1_der(&oversized).unwrap_err().to_string();
+    assert!(err.contains("MAX_KEY_DER_BYTES"), "{err}");
+
+    let err = jwk::generate_rsa(jose_rs::MAX_RSA_BITS + 1)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("maximum"), "{err}");
+}
+
+#[test]
 fn lines_wrapped_past_rfc_7468_are_refused_with_the_rule_named() {
     // RFC 7468 §3 caps a base64 line at 64 characters. Generic base64 writers emit 76, and
     // a decoder that only says "invalid base64" leaves the caller hunting for a corrupt

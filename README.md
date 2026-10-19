@@ -226,12 +226,11 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 ## Security notes
 
 - **`rsa` crate advisory (RUSTSEC-2023-0071, a.k.a. "Marvin attack").** The
-  upstream `rsa` crate has a network-observable timing side channel in its
-  padding and private-key decryption paths. This affects JWE `RSA-OAEP-256`
-  and, with the `deprecated` feature, `RSA-OAEP`. RustSec lists no patched
-  release as of 2026-08-02. The mitigations described in `.cargo/audit.toml`
-  reduce oracle exposure but do not fix the upstream issue. Rate-limit
-  decryption failures and prefer non-RSA key management algorithms.
+  upstream advisory remains open. Kryptering 0.7 blinds RSA private operations
+  with OS randomness; jose-rs also collapses RSA-OAEP failure classes and keeps
+  SHA-1 OAEP behind `deprecated`. The tracking rationale remains in
+  `.cargo/audit.toml`; rate-limit decryption failures and prefer non-RSA key
+  management where practical.
 - **Trust-sensitive header fields.** `jku`, `x5u`, and `jwk` headers are
   parsed by the library but **never fetched or trusted** — callers must
   never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
@@ -415,11 +414,12 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.9.0", features = ["post-quantum"] }
+jose-rs = { version = "0.10.0", features = ["post-quantum"] }
 ```
 
-Enabling this pulls in the `ml-dsa` and `pkcs8-pq` crates plus kryptering's
-post-quantum backend. It enables pure `ML-DSA-44`, `ML-DSA-65`, and
+Enabling this pulls in the optional `ml-dsa` crate plus kryptering's
+post-quantum backend. The shared `pkcs8` 0.11 dependency supplies its key
+encoding. It enables pure `ML-DSA-44`, `ML-DSA-65`, and
 `ML-DSA-87`, as well as all six composite identifiers listed above.
 
 ### JWK wire format (`kty = "AKP"`)
@@ -528,12 +528,11 @@ as judgement instead of pretending to be automated (ADR 0033).
 ### Dependencies, MSRV and platform checks
 
 [`docs/dependencies.md`](docs/dependencies.md) records the locked versions, the feature
-map, the duplicated RustCrypto trait families and why they are documented rather than
-force-upgraded, the advisory ignore and its mitigation, and the platform promises (no
+map, the unified RustCrypto trait family, the advisory posture, and the platform promises (no
 `unsafe`, no async, no network, no filesystem in the library).
 `tests/dependency_policy.rs` checks those claims against the manifest and the lock, so
 the page cannot rot into folklore; `./scripts/dependency-report.sh` regenerates its inputs
-(ADR 0036).
+(ADRs 0036 and 0037).
 
 ### Performance baselines
 

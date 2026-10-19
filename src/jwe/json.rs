@@ -52,8 +52,8 @@ use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 use crate::jwe::internal::{
-    self, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op, minimum_plaintext_len,
-    recipient_key, JweDecryptOptions, JweEncryptOptions, KeyMaterial,
+    self, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op, recipient_key,
+    JweDecryptOptions, JweEncryptOptions, KeyMaterial,
 };
 use crate::member_map::MemberMap;
 
@@ -753,6 +753,37 @@ pub fn decrypt_flattened_with_password(
     password: &crate::jwe::password::Password,
     jwe: &FlattenedJwe,
 ) -> Result<Vec<u8>> {
+    decrypt_flattened_with_password_options(
+        password,
+        jwe,
+        &JweDecryptOptions::new(
+            crate::jwe::compact::pbes2_algorithms(),
+            internal::all_enc_algorithms(),
+        ),
+    )
+}
+
+/// [`decrypt_flattened_with_password`] with an explicit algorithm, plaintext,
+/// external-AAD, critical-header, and PBES2 work policy.
+///
+/// The password-specific family gate is not relaxable: even permissive options cannot
+/// offer password bytes to a non-PBES2 key-management algorithm.
+///
+/// # Errors
+///
+/// Returns [`JoseError::Key`] for a non-PBES2 algorithm or unusable password-derived
+/// material, [`JoseError::UnsupportedAlgorithm`] for an allow-list miss,
+/// [`JoseError::InvalidHeader`] / [`JoseError::InvalidToken`] for malformed or
+/// over-budget input, and [`JoseError::Crypto`] when authentication fails.
+pub fn decrypt_flattened_with_password_options(
+    password: &crate::jwe::password::Password,
+    jwe: &FlattenedJwe,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
+    let protected = jwe.protected.as_deref().ok_or_else(|| {
+        JoseError::InvalidHeader("JWE JSON requires a protected header carrying enc".into())
+    })?;
+    ensure_token_size(protected)?;
     // Read the header to find out which key-management mode this claims to be — before
     // the password is offered to anything. `decrypt_impl` re-checks `alg` against the
     // options' allow-list below, so this is the family gate rather than the only one.
@@ -772,15 +803,7 @@ pub fn decrypt_flattened_with_password(
     // password family, which is the strongest pin available when the secret cannot carry
     // one — and it is the pin that matters, because it keeps a byte-key algorithm from
     // ever being handed the password.
-    decrypt_impl(
-        &key,
-        jwe,
-        &JweDecryptOptions::new(
-            crate::jwe::compact::pbes2_algorithms(),
-            internal::all_enc_algorithms(),
-        ),
-        None,
-    )
+    decrypt_impl(&key, jwe, options, None)
 }
 
 fn encrypt_flattened_material(
@@ -1022,22 +1045,36 @@ fn decrypt_impl(
     let iv_b64 = jwe.iv.as_deref().unwrap_or_default();
     let tag_b64 = jwe.tag.as_deref().unwrap_or_default();
 
-    let (envelope, _protected_header) = internal::parse_envelope(
-        protected,
-        unprotected_alg,
+    let inspected =
+        internal::inspect_envelope(protected, unprotected_alg, options.understood_crit())?;
+    internal::preflight_envelope_fields(
         encrypted_key_b64,
         iv_b64,
         &jwe.ciphertext,
         tag_b64,
-        options.understood_crit(),
+        &inspected,
+        options,
+    )?;
+
+    // External AAD is public policy state. Reject a mismatch after the protected
+    // algorithm policy is known but before ciphertext allocation or key recovery.
+    if let Some(aad) = jwe.aad.as_deref() {
+        ensure_token_size(aad)?;
+    }
+    let external_aad = options.resolve_external_aad(jwe.aad.as_deref())?;
+
+    let (envelope, protected_header) = internal::decode_envelope_fields(
+        protected,
+        encrypted_key_b64,
+        iv_b64,
+        &jwe.ciphertext,
+        tag_b64,
+        inspected,
     )?;
 
     // Defence in depth: `pinned_alg` is the policy that permits an
     // unauthenticated `alg`, so the envelope must never report one without it.
     debug_assert!(envelope.alg_authenticated || pinned_alg.is_some());
-
-    options.check(envelope.alg, envelope.enc)?;
-    options.check_plaintext_size(minimum_plaintext_len(jwe.ciphertext.len(), envelope.enc))?;
 
     // `protected_header` is the decoded *protected* header: the only place a
     // peer key (`epk`) is believed (ADR 0013 refuses it anywhere else).
@@ -1049,7 +1086,6 @@ fn decrypt_impl(
         &protected_header,
         options.pbes2_max_iterations(),
     )?;
-    let external_aad = options.resolve_external_aad(jwe.aad.as_deref())?;
     let aad = internal::aad_input(protected, external_aad.as_deref());
     internal::finish_decrypt(&envelope, &cek, &aad, options)
 }
@@ -1979,6 +2015,16 @@ mod tests {
             wrong.contains("does not match the message's \"aad\" member"),
             "{wrong}"
         );
+
+        // A public AAD mismatch is rejected before encrypted fields are decoded or
+        // any recipient key work begins.
+        let mut malformed_body = jwe.clone();
+        malformed_body.encrypted_key = Some("not base64url!".into());
+        let err =
+            decrypt_flattened_with_options(&key(), &malformed_body, &aad_dec_opts(b"invoice-43"))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("does not match"), "{err}");
 
         // No bytes at all: told what is missing.
         let missing = decrypt_flattened(&key(), &jwe).unwrap_err().to_string();

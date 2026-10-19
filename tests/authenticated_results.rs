@@ -57,16 +57,14 @@ fn a_compact_jws_returns_the_header_it_authenticated() {
 
 #[test]
 fn unprotected_metadata_stays_out_of_the_authenticated_header() {
-    // The core assertion of the module: a document that verifies perfectly, carrying a
-    // hostile `kid` in its unprotected member. The authenticated view must report the
-    // signed kid, and the forgery must still be *visible* (it is data, just not authority).
+    // Non-colliding unprotected metadata remains visible but outside the authenticated
+    // view. A colliding name is structurally ambiguous and is refused by ADR 0039.
     let key = ec("ES256", "P-256");
     let mut header = JoseHeader::new("ES256");
     header.kid = Some("real".into());
-    // Signed with an innocuous unprotected member; our own serializer refuses one that repeats
-    // a protected name (ADR 0013), so the hostile `kid` is added the way an on-path attacker
-    // would add it: after the fact, in the clear.
-    let mut flat = jws_json::sign_flattened_with_jwk_opts(
+    // Signed with an innocuous unprotected member; both serializer and verifier refuse one
+    // that repeats a protected name (ADR 0039).
+    let flat = jws_json::sign_flattened_with_jwk_opts(
         &key,
         b"payload",
         &header,
@@ -74,15 +72,18 @@ fn unprotected_metadata_stays_out_of_the_authenticated_header() {
         &jws::SignOptions::new(),
     )
     .unwrap();
-    flat.header = Some(json!({"kid": "attacker", "comment": "look at me"}));
 
     let outcome = jws_json::verify_flattened_with_jwk_authenticated(&key, &flat).unwrap();
     assert_eq!(outcome.kid(), Some("real"));
     assert_eq!(outcome.protected.kid.as_deref(), Some("real"));
     assert!(outcome.has_unprotected());
-    assert_eq!(outcome.unprotected[0]["kid"], json!("attacker"));
+    assert_eq!(outcome.unprotected[0]["comment"], json!("look at me"));
     // And merging them is not something this type can be tricked into.
     assert!(!outcome.protected.extra.contains_key("kid"));
+    let mut hostile = flat.clone();
+    hostile.header = Some(json!({"kid": "attacker", "comment": "look at me"}));
+    let err = jws_json::verify_flattened_with_jwk_authenticated(&key, &hostile).unwrap_err();
+    assert!(matches!(err, JoseError::InvalidHeader(_)), "{err:?}");
     // A JWS serializer that *did* let both through would be ambiguous on the wire; ours refuses.
     let err = jws_json::sign_flattened_with_jwk_opts(
         &key,
@@ -93,11 +94,6 @@ fn unprotected_metadata_stays_out_of_the_authenticated_header() {
     )
     .unwrap_err();
     assert!(matches!(err, JoseError::InvalidHeader(_)), "{err:?}");
-
-    // The forgery is only metadata: changing it cannot change who verifies.
-    flat.header = Some(json!({"kid": "someone-else"}));
-    let outcome = jws_json::verify_flattened_with_jwk_authenticated(&key, &flat).unwrap();
-    assert_eq!(outcome.kid(), Some("real"));
 }
 
 #[test]

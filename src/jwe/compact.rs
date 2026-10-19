@@ -15,7 +15,7 @@ use crate::header::JoseHeader;
 
 use crate::jwe::internal::{
     self, all_enc_algorithms, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op,
-    minimum_plaintext_len, parse_envelope, recipient_key, recover_cek, KeyMaterial,
+    parse_envelope, recipient_key, recover_cek, KeyMaterial,
 };
 
 pub use crate::jwe::internal::{JweDecryptOptions, JweEncryptOptions};
@@ -532,15 +532,8 @@ fn decrypt_with_options_material(
         iv_b64,
         ciphertext_b64,
         tag_b64,
-        options.understood_crit(),
+        options,
     )?;
-
-    // Enforce caller's allow-list before touching any key material.
-    options.check(envelope.alg, envelope.enc)?;
-
-    // Reject content that provably cannot fit the configured plaintext limit
-    // before decoding ciphertext or recovering a key.
-    options.check_plaintext_size(minimum_plaintext_len(ciphertext_b64.len(), envelope.enc))?;
 
     // 3. Recover CEK.
     let cek = recover_cek(
@@ -680,7 +673,7 @@ mod tests {
 
     fn generate_rsa_keypair() -> (Vec<u8>, Vec<u8>) {
         use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        let mut rng = rand::thread_rng();
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let public_key = rsa::RsaPublicKey::from(&private_key);
 
