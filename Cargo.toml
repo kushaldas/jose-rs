@@ -5,7 +5,6 @@ edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
 repository = "https://github.com/kushaldas/jose-rs"
-homepage = "https://github.com/kushaldas/jose-rs"
 keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
 categories = ["cryptography", "authentication", "web-programming"]
 rust-version = "1.88"
