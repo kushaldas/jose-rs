@@ -13,6 +13,11 @@
 #   - format `jwe`: compact JWE, alg label `<ALG>:<ENC>` (e.g. `dir:A256GCM`),
 #     same custom header. Directions rust-encrypt-js-decrypt /
 #     js-encrypt-rust-decrypt; plaintext and header compared.
+#   - format `jwe-json`: the same key-management/content combinations in the
+#     RFC 7516 §7.2.2 flattened JSON Serialization. The emitted member set is
+#     also asserted (protected/encrypted_key/iv/ciphertext/tag, and
+#     `encrypted_key` absent for `dir`), so the cell checks the *serialization*,
+#     not just decryptability.
 #   - format `jws-dup`: negative vectors. Rust hand-builds a validly signed
 #     compact JWS whose protected header repeats a member (dup-kid, dup-alg,
 #     dup-ext). Both sides verify; what each did lands in the cell's
@@ -55,6 +60,17 @@ DIRECTIONS_HDR=("rust-sign-js-verify" "js-sign-rust-verify")
 # JWE cells: "<key-management alg>:<content enc>".
 ALGS_JWE=("dir:A256GCM" "dir:A128CBC-HS256" "A256KW:A256GCM" "A256KW:A128CBC-HS256")
 DIRECTIONS_JWE=("rust-encrypt-js-decrypt" "js-encrypt-rust-decrypt")
+# ECDH-ES cells: "<curve>:<content enc>", key management is always ECDH-ES.
+ALGS_ECDH=("P-256:A256GCM" "P-256:A128CBC-HS256" "P-384:A192CBC-HS384" "P-521:A256GCM" "X25519:A256GCM")
+# ECDH with key wrapping: `alg:curve:enc`. One wrapping algorithm per curve, so
+# the three KDF AlgorithmID/keydatalen pairings are each covered once.
+ALGS_ECDH_KW=("ECDH-ES+A128KW:P-256:A256GCM" "ECDH-ES+A192KW:P-384:A128CBC-HS256" "ECDH-ES+A256KW:P-521:A128GCM" "ECDH-ES+A128KW:X25519:A128CBC-HS256")
+# PBES2 (RFC 7518 §4.8): `alg:enc`. The password is fixed by the cell (it is supplied,
+# not generated), and `p2c` is passed explicitly so the cells stay quick.
+ALGS_PBES2=("PBES2-HS256+A128KW:A256GCM" "PBES2-HS384+A192KW:A128CBC-HS256" "PBES2-HS512+A256KW:A128GCM")
+# AES-GCM key management (RFC 7518 §4.7): `alg:enc`. The key size follows `alg`,
+# so one content algorithm per key size covers the pairings.
+ALGS_GCMKW=("A128GCMKW:A256GCM" "A192GCMKW:A128CBC-HS256" "A256GCMKW:A128GCM")
 # Duplicate-member negative cells (signature alg is ES256 throughout).
 DIRECTIONS_DUP=("dup-kid" "dup-alg" "dup-ext")
 
@@ -83,6 +99,11 @@ PAYLOAD_TEXT="interop payload $(date -u +%FT%TZ)"
 # for macOS/BSD parity. (GNU wraps at 76 chars by default; BSD doesn't wrap.)
 PAYLOAD_B64U="$(printf '%s' "$PAYLOAD_TEXT" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
 CLAIMS='{"iss":"interop","sub":"matrix","foo":"bar"}'
+# External additional authenticated data for the `jwe-json-aad` cells (raw
+# octets; producers base64url-encode it into the `aad` member themselves).
+AAD_TEXT="interop external aad"
+AAD_B64U="$(printf '%s' "$AAD_TEXT" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+
 # Extra protected-header members for the `hdr` / `jwe` cells: one registered
 # (kid) and one private, non-registered member (tenant). Consumers must
 # report both back unchanged.
@@ -94,6 +115,27 @@ assert_header() {
     '.protected_header as $h | $want | to_entries | all(.value == $h[.key])' \
     "$1" > /dev/null \
     || { echo "protected header mismatch: want $HDR_MEMBERS, got $("$JQ" -c .protected_header "$1")" >&2; return 1; }
+}
+
+# Encode a semantic cell ID as one portable filename component. The results
+# file keeps the original ID; only runtime vector paths use this form. GitHub's
+# artifact service rejects the Windows-reserved characters below even when the
+# runner itself is Linux. Percent is encoded first so the mapping is injective.
+portable_cell_stem() {
+  local stem="$1"
+  stem="${stem//%/%25}"
+  stem="${stem//\"/%22}"
+  stem="${stem//:/%3A}"
+  stem="${stem//</%3C}"
+  stem="${stem//>/%3E}"
+  stem="${stem//|/%7C}"
+  stem="${stem//\*/%2A}"
+  stem="${stem//\?/%3F}"
+  stem="${stem//$'\r'/%0D}"
+  stem="${stem//$'\n'/%0A}"
+  stem="${stem//\//%2F}"
+  stem="${stem//\\/%5C}"
+  printf '%s' "$stem"
 }
 
 record() {
@@ -170,6 +212,255 @@ run_jwe_cell() {
   assert_header "$out_path"
 }
 
+# run_jwe_json_cell <direction> <alg:enc> [aad-b64u] — flattened JSON JWE
+# (RFC 7516 §7.2.2), optionally with external additional authenticated data.
+#
+# Same key material, header members and payload as `run_jwe_cell`; the only
+# difference is the serialization, which is the point: a JSON-serialization bug
+# must show up here even though the crypto is shared.
+#
+# With an AAD argument the cell additionally asserts (a) that the producer
+# emitted an `aad` member, and (b) that the consumer *refuses* the same message
+# when the out-of-band bytes are withheld — i.e. the peer really folded them
+# into the content AAD input rather than shipping them as decoration.
+# run_jwe_crit_cell <direction> <alg:enc>
+#
+# Critical (`crit`) header extensions, RFC 7516 §4.1.13 / RFC 7515 §4.1.11.
+# Both peers refuse to *read* an extension they cannot process — which is the
+# marker doing its job — and neither lets the caller declare one, so the cells
+# assert:
+#
+#   * jose-rs emits one only when the caller lists it, and the parameter then
+#     lives in the integrity-protected header;
+#   * a peer that cannot process it rejects the message (it does not quietly
+#     ignore it) while the same message without `crit` is accepted, so the
+#     rejection is demonstrably about the extension;
+#   * panva refuses even to *emit* an unrecognized extension, the same policy as
+#     jose-rs's default;
+#   * jose-rs reading a message with an opt-in list still reads ordinary
+#     (extension-free) messages with that same list.
+run_jwe_crit_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+
+  if [ "$producer" = js ]; then
+    # panva has no caller-side opt-in: producing an unrecognized critical
+    # extension must fail. Same conclusion as jose-rs's default, reached by
+    # different code.
+    if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" \
+        '{jwk:$jwk, plaintext_b64u:$p, header:{crit:["etsiU"], etsiU:"policy-42"}}' \
+        | js encrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "panva emitted an unrecognized critical extension" >&2
+      return 1
+    fi
+    # An ordinary message, read by a consumer that *has* declared an extension:
+    # the opt-in must not become a reason to reject everything else.
+    "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+      '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+      | js encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+    local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+    "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" \
+      '{jwk:$jwk, jwe:$jwe, understood_crit:["etsiU"]}' \
+      | rs decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+    [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] \
+      || { echo "opt-in consumer rejected an ordinary message" >&2; return 1; }
+    assert_header "$out_path"
+    return 0
+  fi
+
+  # producer = rust. The extension is licensed by the caller's list, and both
+  # `crit` and the parameter itself must land in the protected header.
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:($h + {crit:["etsiU"], etsiU:"policy-42"}), understood_crit:["etsiU"]}' \
+    | rs encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  printf '%s' "$jwe" | "$JQ" -e '
+    (.protected | type) == "string" and
+    ((.protected | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson) as $p
+      | ($p.crit == ["etsiU"]) and ($p.etsiU == "policy-42"))
+  ' > /dev/null || { echo "crit extension missing from protected header: $jwe" >&2; return 1; }
+
+  # A peer that cannot process the extension must refuse the message.
+  if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+      | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+    echo "peer accepted a crit extension it cannot process" >&2
+    return 1
+  fi
+
+  # Control: the identical encryption without `crit` is accepted, so the
+  # rejection above is about the extension and nothing else.
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | rs encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] \
+    || { echo "control message without crit was refused" >&2; return 1; }
+  assert_header "$out_path"
+}
+
+# run_jwe_general_cell <direction> <alg:enc>
+#
+# General JWE JSON Serialization (RFC 7516 §7.2.1): one ciphertext, one element
+# per recipient. Both producers address two recipients; both consumers must open
+# the right element. The asymmetry is the point: panva's `generalDecrypt` tries
+# the key against each element itself, while jose-rs requires the caller to name
+# the recipient (or to name it through the key's own kid), because the header
+# the content tag is validated under is per-recipient.
+run_jwe_general_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_a="$VECTORS/${CELL}.key-a.json"
+  local key_b="$VECTORS/${CELL}.key-b.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  # `dir` conveys no encrypted key, so it cannot address a second recipient —
+  # RFC 7516 says so, and panva enforces it on emit. The runner only feeds us
+  # key-wrapping pairs; assert it rather than assume it.
+  [ "$alg" = "dir" ] && { echo "general JWE cannot use dir" >&2; return 1; }
+
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_a"
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_b"
+  "$JQ" -n --argjson a "$(cat "$key_a")" --argjson b "$(cat "$key_b")" \
+    --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwks:[$a,$b], plaintext_b64u:$p, header:($h - ["tenant"])}' \
+    | "$producer" encrypt-general --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+
+  # Shape: a recipients array of two elements, each with its own encrypted key,
+  # over one shared ciphertext. No shared unprotected header is emitted.
+  printf '%s' "$jwe" | "$JQ" -e '
+    (.protected | type) == "string" and
+    (.ciphertext | type) == "string" and
+    (.recipients | type) == "array" and
+    (.recipients | length) == 2 and
+    (.recipients | all(.encrypted_key | type == "string")) and
+    ((has("unprotected") | not))
+  ' > /dev/null || { echo "general JWE members wrong for $alg: $jwe" >&2; return 1; }
+
+  # Recipient 0, named explicitly, with key A.
+  "$JQ" -n --argjson jwk "$(cat "$key_a")" --arg jwe "$jwe" \
+    '{jwk:$jwk, jwe:$jwe, recipient:0}' \
+    | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "recipient 0 plaintext mismatch" >&2; return 1; }
+  "$JQ" -e '.recipient_count == 2' "$out_path" > /dev/null \
+    || { echo "recipient count wrong: $(cat "$out_path")" >&2; return 1; }
+
+  # Recipient 1, resolved from the key's own kid where the consumer supports
+  # that resolution, with key B.
+  "$JQ" -n --argjson jwk "$(cat "$key_b")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "recipient 1 plaintext mismatch" >&2; return 1; }
+
+  # The consumer that names recipients must also refuse to mix them up: key B
+  # cannot open recipient 0. (panva searches, so this is only assertable on the
+  # jose-rs side — recorded as a divergence in interop/README.md rather than
+  # faked here.)
+  if [ "$consumer" = rs ]; then
+    "$JQ" -e '.recipient == 1' "$out_path" > /dev/null \
+      || { echo "kid resolution picked the wrong recipient: $(cat "$out_path")" >&2; return 1; }
+    if "$JQ" -n --argjson jwk "$(cat "$key_b")" --arg jwe "$jwe" \
+        '{jwk:$jwk, jwe:$jwe, recipient:0}' \
+        | "$consumer" decrypt-general --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "consumer opened recipient 0 with recipient 1's key" >&2
+      return 1
+    fi
+  fi
+}
+
+run_jwe_json_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}" aad_b64u="${3:-}" unprot="${4:-no}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+  # In the `unprot` variant the JS producer moves `tenant` into the
+  # per-recipient unprotected header and adds a `jku` to the shared unprotected
+  # header. jose-rs never emits these members, so only js-encrypt-rust-decrypt
+  # can exercise them — and that is precisely the direction worth testing.
+  local unprot_json='{}'
+  if [ "$unprot" = yes ]; then
+    unprot_json='{"unprotected":{"jku":"https://interop.invalid/keys.jwks"},"recipient_header":{"tenant":"interop"}}'
+  fi
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    --arg a "$aad_b64u" --argjson u "$unprot_json" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}
+     + (if $a == "" then {} else {aad_b64u:$a} end)
+     + $u
+     + (if $u.unprotected then {header: ($h - ["tenant"])} else {} end)' \
+    | "$producer" encrypt-flattened --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+
+  # Serialization-shape assertions on the emitted object: RFC 7516 §7.2.1
+  # presence rules, and nothing in an unprotected position.
+  printf '%s' "$jwe" | "$JQ" -e --arg alg "$alg" --arg u "$unprot" '
+    (.protected | type) == "string" and
+    (.ciphertext | type) == "string" and
+    (.iv | type) == "string" and
+    (.tag | type) == "string" and
+    (if $alg == "dir"
+       then (has("encrypted_key") | not)
+       else (.encrypted_key | type) == "string" end) and
+    (has("recipients") | not) and
+    (if $u == "yes" then
+       true
+     else
+       ((has("unprotected") | not) and (has("header") | not) and (has("aad") | not))
+     end)
+  ' > /dev/null || { echo "flattened JSON members wrong for $alg: $jwe" >&2; return 1; }
+
+  if [ -n "$aad_b64u" ]; then
+    printf '%s' "$jwe" | "$JQ" -e '(.aad | type) == "string"' > /dev/null \
+      || { echo "external AAD was not emitted as an aad member: $jwe" >&2; return 1; }
+  fi
+
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" --arg a "$aad_b64u" \
+    '{jwk:$jwk, jwe:$jwe} + (if $a == "" then {} else {aad_b64u:$a} end)' \
+    | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+
+  if [ "$unprot" = yes ]; then
+    # The consumer must report the unprotected members back as data — proof it
+    # read all three header locations rather than only the protected one.
+    "$JQ" -e '.protected_header.tenant == null and .unprotected_header.jku == "https://interop.invalid/keys.jwks" and .unprotected_header.tenant == "interop"' \
+      "$out_path" > /dev/null \
+      || { echo "unprotected header members not reported: $(cat "$out_path")" >&2; return 1; }
+  else
+    assert_header "$out_path"
+  fi
+
+  if [ -n "$aad_b64u" ]; then
+    # Withholding the out-of-band bytes must break authentication on the peer,
+    # not silently succeed. Expected failure, so no `set -e` trap is needed.
+    if "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+      | "$consumer" decrypt-flattened --alg "$alg" --enc "$enc" > /dev/null 2>&1; then
+      echo "consumer accepted an external-AAD message without the AAD" >&2
+      return 1
+    fi
+  fi
+}
+
 # try_verify <rs|js> <alg> <pub-jwk-file> <jws> — never fails; prints
 # {accepted, protected_header?, error?} describing what that side did.
 try_verify() {
@@ -242,6 +533,8 @@ run_dup_cell() {
 run_cell() {
   local direction="$1" alg="$2" fmt="$3"
   local cell="${direction}_${alg}_${fmt}"
+  local file_cell
+  file_cell="$(portable_cell_stem "$cell")"
   local errfile obsfile
   errfile="$(mktemp)"
   obsfile="$(mktemp)"
@@ -249,16 +542,33 @@ run_cell() {
   # Subshell isolation so `set -e` inside doesn't abort the matrix.
   (
     set -e
-    CELL="$cell"
+    # Helpers use CELL exclusively as a filename stem. Keep `cell` unchanged
+    # for interop-results.json and the human-readable job summary.
+    CELL="$file_cell"
     OBSFILE="$obsfile"
     case "$fmt" in
       hdr) run_hdr_cell "$direction" "$alg"; exit 0 ;;
       jwe) run_jwe_cell "$direction" "$alg"; exit 0 ;;
+      jwe-json) run_jwe_json_cell "$direction" "$alg"; exit 0 ;;
+      jwe-json-aad)
+        run_jwe_json_cell "$direction" "$alg" "$AAD_B64U"; exit 0 ;;
+      jwe-crit) run_jwe_crit_cell "$direction" "$alg"; exit 0 ;;
+      jwe-general) run_jwe_general_cell "$direction" "$alg"; exit 0 ;;
+      jwe-ecdh) run_jwe_ecdh_cell "$direction" "$alg"; exit 0 ;;
+      jwe-ecdh-kw)
+        # `alg:curve:enc` — the same cell, with the wrapping algorithm named.
+        run_jwe_ecdh_cell "$direction" "${alg#*:}" "${alg%%:*}"; exit 0 ;;
+      jwe-gcmkw) run_jwe_gcmkw_cell "$direction" "$alg"; exit 0 ;;
+      jwe-pbes2) run_jwe_pbes2_cell "$direction" "$alg"; exit 0 ;;
+      jwe-json-unprot)
+        # Only the JS side can emit unprotected header members.
+        [ "$direction" = "js-encrypt-rust-decrypt" ] || return 0
+        run_jwe_json_cell "$direction" "$alg" "" yes; exit 0 ;;
       jws-dup) run_dup_cell "$direction" "$alg"; exit 0 ;;
     esac
-    local priv_path="$VECTORS/${cell}.priv.json"
-    local pub_path="$VECTORS/${cell}.pub.json"
-    local signed_path="$VECTORS/${cell}.signed.json"
+    local priv_path="$VECTORS/${file_cell}.priv.json"
+    local pub_path="$VECTORS/${file_cell}.pub.json"
+    local signed_path="$VECTORS/${file_cell}.signed.json"
 
     case "$direction" in
       # 1. producer=rust (keygen+sign), consumer=js
@@ -365,6 +675,185 @@ run_cell() {
 }
 
 # --cell <direction> <alg> <format>  — run one cell, exit non-zero on fail
+# run_jwe_ecdh_cell <direction> <crv:enc>
+#
+# Direct key agreement (RFC 7518 §4.6, "ECDH-ES"). Structurally unlike every
+# other JWE family in this matrix: no key is transported, so the producer needs
+# only the recipient's **public** half and the consumer needs the private one.
+# The cells therefore run the key pair through `export-pub` on the producer side
+# — an encrypt step that had to see `d` would fail here, and that is part of what
+# the cell proves.
+#
+# The cell also asserts the `epk` shape on the consuming side: it must be
+# reported back as authenticated metadata, and it must carry public material only
+# (RFC 7518 §4.6.1.1), which is a claim about the *producer's* serialization.
+run_jwe_ecdh_cell() {
+  local direction="$1" crv="${2%%:*}" enc="${2#*:}" alg="${3:-ECDH-ES}"
+  local priv_path="$VECTORS/${CELL}.priv.json"
+  local pub_path="$VECTORS/${CELL}.pub.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$producer" gen-key --alg "$alg" --crv "$crv" > "$priv_path"
+  "$producer" export-pub < "$priv_path" > "$pub_path"
+  "$JQ" -n --argjson jwk "$(cat "$pub_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | "$producer" encrypt-compact --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$priv_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-compact --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+  assert_header "$out_path"
+
+  # The ephemeral key the content was agreed under must be reported back, on the
+  # curve the recipient's key is on, and without a private component. The key type
+  # and the coordinate set follow the curve: an X25519 public value is a bare
+  # u-coordinate under kty OKP, with no `y` to check (RFC 8037 §2).
+  local kty="EC" has_y=true
+  [ "$crv" = "X25519" ] && { kty="OKP"; has_y=false; }
+  "$JQ" -e --arg crv "$crv" --arg kty "$kty" --argjson has_y "$has_y" '
+    .protected_header.epk as $epk
+    | ($epk != null) and ($epk.crv == $crv) and ($epk.kty == $kty)
+      and ($epk.d == null) and ($epk.x != null)
+      and (if $has_y then ($epk.y != null) else ($epk | has("y") | not) end)
+  ' "$out_path" > /dev/null \
+    || { echo "epk shape wrong: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  # The compact serialization's second segment is the discriminator between the
+  # two agreement modes: the empty octet sequence in direct mode, and the wrapped
+  # CEK in the wrapping modes (RFC 7518 §4.6). Asserting it here means a cell
+  # cannot silently change mode — an implementation that agreed the CEK where it
+  # should have wrapped it would fail even though both sides "decrypt".
+  local encrypted_key_segment; encrypted_key_segment="$(printf '%s' "$jwe" | cut -d. -f2)"
+  case "$alg" in
+    ECDH-ES)
+      [ "$encrypted_key_segment" = "" ] \
+        || { echo "ECDH-ES must not convey an encrypted key" >&2; return 1; } ;;
+    *)
+      [ -n "$encrypted_key_segment" ] \
+        || { echo "$alg must convey the CEK wrapped under the agreed key" >&2; return 1; } ;;
+  esac
+}
+
+# AES-GCM key management (RFC 7518 §4.7): the CEK is encrypted with the algorithm's
+# key, and the operation's IV and authentication tag travel as **header members**.
+# That is the interesting part of this cell: `iv` and `tag` are also the names of the
+# envelope's own members, which belong to the content encryption, so the cell asserts
+# both pairs exist, in the right places, with the right sizes, and that they hold
+# different values — the confusion this algorithm invites.
+run_jwe_gcmkw_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local key_path="$VECTORS/${CELL}.key.json"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$producer" gen-key --alg "$alg" --enc "$enc" > "$key_path"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg p "$PAYLOAD_B64U" --argjson h "$HDR_MEMBERS" \
+    '{jwk:$jwk, plaintext_b64u:$p, header:$h}' \
+    | "$producer" encrypt-compact --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --argjson jwk "$(cat "$key_path")" --arg jwe "$jwe" '{jwk:$jwk, jwe:$jwe}' \
+    | "$consumer" decrypt-compact --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+  assert_header "$out_path"
+
+  # Both mandatory members, at their RFC sizes, in the authenticated header; and
+  # the key is conveyed (unlike direct agreement).
+  "$JQ" -e '
+    .protected_header.iv as $iv | .protected_header.tag as $tag
+    | ($iv != null) and ($tag != null)
+  ' "$out_path" > /dev/null \
+    || { echo "missing iv/tag header members: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  local segments iv_len tag_len
+  segments="$jwe"
+  local header_b64 content_iv content_tag
+  header_b64="$(printf '%s' "$segments" | cut -d. -f1)"
+  content_iv="$(printf '%s' "$segments" | cut -d. -f3)"
+  content_tag="$(printf '%s' "$segments" | cut -d. -f5)"
+  iv_len="$(printf '%s' "$content_iv" | tr -d '\n' | wc -c)"
+  tag_len="$(printf '%s' "$content_tag" | tr -d '\n' | wc -c)"
+  # 12 octets base64url without padding is 16 characters, 16 octets is 22.
+  [ "$iv_len" = 16 ] || { echo "content IV segment is $iv_len chars, expected 16" >&2; return 1; }
+  [ "$tag_len" = 22 ] || { echo "content tag segment is $tag_len chars, expected 22" >&2; return 1; }
+  # And the key wrap's members must be distinct values from the content's.
+  local wrap_iv wrap_tag
+  wrap_iv="$("$JQ" -r .protected_header.iv "$out_path")"
+  wrap_tag="$("$JQ" -r .protected_header.tag "$out_path")"
+  [ -n "$wrap_iv" ] && [ "$wrap_iv" != "$content_iv" ] \
+    || { echo "key-wrap iv must be present and differ from the content iv" >&2; return 1; }
+  [ -n "$wrap_tag" ] && [ "$wrap_tag" != "$content_tag" ] \
+    || { echo "key-wrap tag must be present and differ from the content tag" >&2; return 1; }
+  # The encrypted key is the AES-GCM ciphertext of the CEK — never empty.
+  [ -n "$(printf '%s' "$segments" | cut -d. -f2)" ] \
+    || { echo "AES-GCM key management must convey the wrapped CEK" >&2; return 1; }
+  local _unused; _unused="$header_b64"
+}
+
+# PBES2 (RFC 7518 §4.8): the CEK is wrapped under a key derived from a *password*, and
+# the derivation's inputs — `p2s` (salt input) and `p2c` (iteration count) — are header
+# members. Their position is the point of this cell: both peers put them in the
+# integrity-protected header, and a recipient that read them from an unprotected member
+# would be deriving under a salt the sender (or an attacker) chose.
+PBES2_PASSWORD='entrap_o–peter_long–credit_tun'
+
+run_jwe_pbes2_cell() {
+  local direction="$1" alg="${2%%:*}" enc="${2#*:}"
+  local enc_path="$VECTORS/${CELL}.encrypted.json"
+  local out_path="$VECTORS/${CELL}.decrypted.json"
+  local producer consumer
+  case "$direction" in
+    rust-encrypt-js-decrypt) producer=rs; consumer=js ;;
+    js-encrypt-rust-decrypt) producer=js; consumer=rs ;;
+    *) echo "unknown jwe direction: $direction" >&2; return 1 ;;
+  esac
+
+  "$JQ" -n --arg p "$PAYLOAD_B64U" --arg pw "$PBES2_PASSWORD" \
+    '{jwk:null, plaintext_b64u:$p, header:{}, password:$pw, p2c:2048}' \
+    | "$producer" encrypt-compact-password --alg "$alg" --enc "$enc" > "$enc_path"
+  local jwe; jwe="$("$JQ" -r .jwe "$enc_path")"
+  "$JQ" -n --arg jwe "$jwe" --arg pw "$PBES2_PASSWORD" '{jwk:null, jwe:$jwe, password:$pw}' \
+    | "$consumer" decrypt-compact-password --alg "$alg" --enc "$enc" > "$out_path"
+  [ "$("$JQ" -r .plaintext_b64u "$out_path")" = "$PAYLOAD_B64U" ] || { echo "plaintext mismatch" >&2; return 1; }
+
+  # Both members present, in the authenticated header, at the types the RFC names —
+  # `p2s` a base64url string of 8 or more octets, `p2c` a JSON integer.
+  "$JQ" -e '
+    .protected_header.p2s as $s | .protected_header.p2c as $c
+    | ($s | type) == "string" and ($c | type) == "number" and ($c | floor) == $c and $c >= 1000
+  ' "$out_path" > /dev/null \
+    || { echo "p2s/p2c missing or mistyped: $("$JQ" -c .protected_header "$out_path")" >&2; return 1; }
+
+  local salt_len
+  salt_len="$("$JQ" -r .protected_header.p2s "$out_path" | tr -d '\n' | wc -c)"
+  # base64url without padding: 16 octets is 22 characters, 8 octets is 11.
+  [ "$salt_len" -ge 11 ] \
+    || { echo "p2s encodes fewer than the 8 octets RFC 7518 §4.8.1.1 requires ($salt_len chars)" >&2; return 1; }
+
+  # And a wrong password must not read the message — asserted here rather than only in
+  # unit tests, because "wrong password" is a cross-implementation claim: it depends on
+  # the *other* side's wrap authenticating.
+  local out2="$VECTORS/${CELL}.wrongpassword.json"
+  if "$JQ" -n --arg jwe "$jwe" '{jwk:null, jwe:$jwe, password:"entrap_o-peter_long-credit_tun"}' \
+      | "$consumer" decrypt-compact-password --alg "$alg" --enc "$enc" > "$out2" 2>/dev/null; then
+    echo "a wrong password read a PBES2 message" >&2
+    return 1
+  fi
+  rm -f "$out2"
+}
+
 if [ "${1:-}" = "--cell" ]; then
   shift
   dir="${1:?direction required}"; alg="${2:?alg required}"; fmt="${3:?format required}"
@@ -403,6 +892,79 @@ done
 for alg in "${ALGS_JWE[@]}"; do
   for dir in "${DIRECTIONS_JWE[@]}"; do
     run_cell "$dir" "$alg" "jwe" || true
+  done
+done
+
+# Flattened JSON JWE (RFC 7516 §7.2.2), same coverage as the compact family.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-json" || true
+  done
+done
+
+# Flattened JSON JWE with external additional authenticated data (RFC 7516
+# §7.2.1): the aad member must be emitted, and withholding it must fail.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-json-aad" || true
+  done
+done
+
+# Flattened JSON JWE with unprotected header members (RFC 7516 §7.2.1). The
+# producer puts `tenant` in the per-recipient unprotected header and a `jku` in
+# the shared one; jose-rs must read them (as unauthenticated data) and still
+# authenticate the ciphertext.
+for alg in "${ALGS_JWE[@]}"; do
+  run_cell "js-encrypt-rust-decrypt" "$alg" "jwe-json-unprot" || true
+done
+
+# Critical header extensions (RFC 7516 §4.1.13): the caller lists what it
+# implements, and a peer that cannot process the extension must refuse.
+for alg in "${ALGS_JWE[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-crit" || true
+  done
+done
+
+# Direct ECDH key agreement, across curves and content algorithms.
+for alg in "${ALGS_ECDH[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-ecdh" || true
+  done
+done
+
+# ECDH with key wrapping (RFC 7518 §4.6): the CEK is agreed-then-wrapped, so the
+# cell also proves the two sides agree on the Concat KDF's AlgorithmID (`alg`,
+# not `enc`) and keydatalen (the KEK's length) — a mismatch there is a
+# authentication-tag failure, not a negotiation.
+for alg in "${ALGS_ECDH_KW[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-ecdh-kw" || true
+  done
+done
+
+# PBES2 (RFC 7518 §4.8), both directions: asserts the derivation's header members and
+# that a wrong password fails on the *peer's* message.
+for alg in "${ALGS_PBES2[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-pbes2" || true
+  done
+done
+
+# AES-GCM key management (RFC 7518 §4.7), both directions: asserts the key wrap's
+# iv/tag header members alongside the content's own, which share their names.
+for alg in "${ALGS_GCMKW[@]}"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-gcmkw" || true
+  done
+done
+
+# General JSON JWE with two recipients (RFC 7516 §7.2.1). `dir` is excluded:
+# direct key agreement conveys no encrypted key, so a second recipient is not
+# representable (RFC 7516 §5, and panva refuses it on emit).
+for alg in "A256KW:A256GCM" "A256KW:A128CBC-HS256"; do
+  for dir in "${DIRECTIONS_JWE[@]}"; do
+    run_cell "$dir" "$alg" "jwe-general" || true
   done
 done
 

@@ -36,7 +36,8 @@ pub fn encode_with_options(
     claims: &Claims,
     opts: &crate::jws::SignOptions,
 ) -> Result<String> {
-    let payload = serde_json::to_vec(claims)?;
+    // The claims' own path: it refuses to emit a duplicate member (ADR 0029).
+    let payload = claims.to_json_vec()?;
     crate::jws::compact::sign_with_options(signer, &payload, header, opts)
 }
 
@@ -53,7 +54,8 @@ pub fn decode(
 ) -> Result<Claims> {
     let payload = crate::jws::compact::verify(verifier, token)?;
     let header = crate::jws::compact::decode_header(token)?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     validation.validate_with_header(&claims, &header)?;
     Ok(claims)
 }
@@ -186,7 +188,8 @@ pub fn encode_with_jwk_options(
     claims: &Claims,
     opts: &crate::jws::SignOptions,
 ) -> Result<String> {
-    let payload = serde_json::to_vec(claims)?;
+    // The claims' own path: it refuses to emit a duplicate member (ADR 0029).
+    let payload = claims.to_json_vec()?;
     crate::jws::compact::sign_with_jwk_options(jwk, &payload, header, opts)
 }
 
@@ -276,7 +279,8 @@ pub fn decode_with_jwk(
 ) -> Result<Claims> {
     let payload = crate::jws::compact::verify_with_jwk(jwk, token)?;
     let header = crate::jws::compact::decode_header(token)?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     validation.validate_with_header(&claims, &header)?;
     Ok(claims)
 }
@@ -346,6 +350,111 @@ pub fn decode_with_jwkset(
         .unwrap_or_else(|| JoseError::InvalidToken("no key in the set verified the token".into())))
 }
 
+/// Decode and validate a JWT using a JWK Set under an explicit selection policy.
+///
+/// Same as [`decode_with_jwkset`] except that key selection goes through
+/// [`crate::jwk::selection::select`]: the caller states a
+/// [`SelectionPolicy`](crate::jwk::selection::SelectionPolicy) (attempt budget,
+/// fallback rules, whether a `kid` is required) instead of inheriting one, and the refusal
+/// messages name the `kid` and the budget that fired.
+///
+/// [`decode_with_jwkset`] is **not** redefined in terms of this function. Its behaviour —
+/// including unbounded try-every-key fallback on kid-less sets — is what existing callers have,
+/// and a budget appearing quietly in a working verification path is exactly the kind of change
+/// that needs its own release rather than a refactor.
+///
+/// ```
+/// use jose_rs::jwk::{self, JwkSet};
+/// use jose_rs::jwk::selection::{Fallback, SelectionPolicy};
+/// use jose_rs::jwt::{self, Validation};
+/// use jose_rs::JoseHeader;
+///
+/// let mut signer = jwk::generate_ed25519()?;
+/// signer.alg = Some("EdDSA".into());
+/// signer.kid = Some("current".into());
+/// // The header states the kid the policy will look for: a JWK's `kid` is identity,
+/// /// never an instruction about what the header should say.
+/// let mut header = JoseHeader::new("EdDSA");
+/// header.kid = Some("current".into());
+/// let token = jwt::encode_with_jwk(&signer, &header, &jwt::Claims::default())?;
+///
+/// let set = JwkSet { keys: vec![signer.to_public_jwk()] };
+/// let policy = SelectionPolicy {
+///     max_candidates: 4,
+///     fallback: Fallback::Refuse,
+///     require_kid: true,
+/// };
+/// let claims = jwt::decode_with_jwkset_policy(&set, &token, &Validation::default(), &policy)?;
+/// let _ = claims;
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`decode_with_jwkset`], plus the selection errors of
+/// [`select`](crate::jwk::selection::select) — including a candidate-budget refusal.
+pub fn decode_with_jwkset_policy(
+    set: &crate::jwk::JwkSet,
+    token: &str,
+    validation: &Validation,
+    policy: &crate::jwk::selection::SelectionPolicy,
+) -> Result<Claims> {
+    let header = crate::jws::compact::decode_header(token)?;
+    // Either source of the requirement is enough: `Validation::require_kid` is the
+    // caller's token-level rule, `SelectionPolicy::require_kid` the key-level one.
+    let effective = if validation.require_kid && !policy.require_kid {
+        crate::jwk::selection::SelectionPolicy {
+            require_kid: true,
+            ..policy.clone()
+        }
+    } else {
+        policy.clone()
+    };
+    let selection = set.select(header.kid.as_deref(), &effective)?;
+
+    let attempts = selection.attempts();
+    let matched_kid = selection.matched_kid.clone();
+    let mut failures: Vec<String> = Vec::new();
+    for candidate in selection.candidates {
+        match decode_with_jwk(candidate, token, validation) {
+            Ok(claims) => return Ok(claims),
+            Err(err) => failures.push(err.to_string()),
+        }
+    }
+    // The aggregate message carries the kid and the attempt count: "no key in the set
+    // verified the token" is a shrug, while "3 candidates tried for kid "old"" is a
+    // sentence an operator can act on.
+    Err(JoseError::InvalidToken(format!(
+        "no key in the set verified the token ({} candidate(s) tried{}): {}",
+        attempts,
+        matched_kid
+            .as_deref()
+            .map(|kid| format!(", kid {kid:?}"))
+            .unwrap_or_default(),
+        failures
+            .last()
+            .map(String::as_str)
+            .unwrap_or("no candidates were attempted")
+    )))
+}
+
+/// Decode and validate a JWT, returning the claims *with* the protected header the
+/// signature authenticated.
+///
+/// Same checks as [`decode_with_jwk`]. The returned [`Authenticated`](crate::Authenticated)(crate::Authenticated)
+/// carries the verified header and the (clearly labelled) unauthenticated metadata, so a
+/// caller that needs `kid`, `typ`, `cty` or a `crit` parameter reads the copy the signature
+/// covered instead of re-parsing and hoping it picked the right object.
+pub fn decode_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+    validation: &Validation,
+) -> Result<crate::Authenticated<Claims>> {
+    let claims = decode_with_jwk(jwk, token, validation)?;
+    let protected = crate::jws::compact::decode_header(token)?;
+    Ok(crate::Authenticated::new(claims, protected, Vec::new()))
+}
+
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).
 ///
 /// Emits a deprecation warning at every call site. The function is kept
@@ -362,7 +471,8 @@ pub fn decode_unverified(token: &str) -> Result<(JoseHeader, Claims)> {
         return Err(JoseError::InvalidToken("expected 3 parts".into()));
     }
     let payload = crate::base64url::decode(parts[1])?;
-    let claims: Claims = serde_json::from_slice(&payload)?;
+    // The claims' own path: size bound plus duplicate-member rejection (ADR 0029).
+    let claims = Claims::from_json_bytes(&payload)?;
     Ok((header, claims))
 }
 

@@ -538,7 +538,7 @@ pub fn verify_with_options(
         .map_err(JoseError::Crypto)?;
     if !valid {
         return Err(JoseError::InvalidToken(
-            "signature verification failed".into(),
+            crate::SIGNATURE_VERIFICATION_FAILED.into(),
         ));
     }
     // Decode the payload only after the signature verifies; still rejects an
@@ -575,6 +575,49 @@ pub fn sign_with_jwk_options(
     header: &JoseHeader,
     opts: &SignOptions,
 ) -> Result<String> {
+    let signer = signer_from_jwk(jwk, header)?;
+
+    // Standard sign — applies the full phase-4 sign-side binding.
+    sign_with_options(&signer, payload, header, opts)
+}
+
+/// Verify a JWS Compact Serialization string using a JWK directly.
+///
+/// This is the safer one-shot API: it decodes the token's protected
+/// header, derives the JWS algorithm from it, enforces `Jwk::check_op`
+/// for `Verify`, requires any pinned `jwk.alg` to match, constructs the
+/// appropriate `kryptering::SoftwareVerifier` internally, and runs
+/// verification. The caller does not need to pick an algorithm, build
+/// a verifier, or remember to check `use`/`key_ops`.
+/// HMAC key selection and minimum length are checked against the token's
+/// algorithm even when `jwk.alg` is absent. AKP keys still require `alg`.
+///
+/// Returns the decoded payload on success. All the usual JWS-layer
+/// hardening (alg-header binding, `alg: "none"` rejection, non-empty
+/// `crit` rejection, `MAX_TOKEN_BYTES` cap) applies transitively.
+pub fn verify_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
+    // Read the token's header to determine the algorithm.
+    let header = decode_header(token)?;
+    let verifier = verifier_from_jwk(jwk, &header.alg)?;
+
+    // Standard verify — applies the full JWS-layer binding.
+    verify(&verifier, token)
+}
+
+/// Build a signer from a JWK for a given protected header.
+///
+/// This is the whole JWK-aware signing rule set, shared verbatim with the JSON serialization
+/// paths (plan L2): the algorithm comes from `jwk.alg` (which must be set), the header `alg` must
+/// agree with it, `use`/`key_ops` are enforced for [`JwkOp::Sign`], and the key is converted with
+/// the algorithm's strength rules applied (`jwk_to_signature_key`). Nothing here signs anything;
+/// the caller hands the result to [`sign`], which keeps its own header bindings.
+///
+/// The rule set is a function rather than a copy because "the compact and JSON paths enforce the
+/// same key rules" is not a property you can maintain in two places.
+pub(crate) fn signer_from_jwk(
+    jwk: &crate::jwk::Jwk,
+    header: &JoseHeader,
+) -> Result<kryptering::SoftwareSigner> {
     // 1. Derive the algorithm from the JWK.
     let jwk_alg_str = jwk
         .alg
@@ -596,51 +639,80 @@ pub fn sign_with_jwk_options(
 
     // 4. Convert to SoftwareKey and build the signer.
     let sw_key = crate::jwk::jwk_to_signature_key(jwk, jwk_alg, crate::jwk::JwkOp::Sign)?;
-    let signer = kryptering::SoftwareSigner::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
-
-    // 5. Standard sign — applies the full phase-4 sign-side binding.
-    sign_with_options(&signer, payload, header, opts)
+    kryptering::SoftwareSigner::new(sig_alg, sw_key).map_err(JoseError::Crypto)
 }
 
-/// Verify a JWS Compact Serialization string using a JWK directly.
+/// Build a verifier from a JWK for an algorithm named by an *untrusted* header value.
 ///
-/// This is the safer one-shot API: it decodes the token's protected
-/// header, derives the JWS algorithm from it, enforces `Jwk::check_op`
-/// for `Verify`, requires any pinned `jwk.alg` to match, constructs the
-/// appropriate `kryptering::SoftwareVerifier` internally, and runs
-/// verification. The caller does not need to pick an algorithm, build
-/// a verifier, or remember to check `use`/`key_ops`.
-/// HMAC key selection and minimum length are checked against the token's
-/// algorithm even when `jwk.alg` is absent. AKP keys still require `alg`.
-///
-/// Returns the decoded payload on success. All the usual JWS-layer
-/// hardening (alg-header binding, `alg: "none"` rejection, non-empty
-/// `crit` rejection, `MAX_TOKEN_BYTES` cap) applies transitively.
-pub fn verify_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
-    // 1. Read the token's header to determine the algorithm.
-    let header = decode_header(token)?;
-    let header_alg = JwsAlgorithm::from_str(&header.alg)?;
-    let sig_alg = header_alg.to_crypto()?;
+/// The rules mirror [`signer_from_jwk`] with the direction reversed: the algorithm comes from the
+/// token, a `jwk.alg` pin must match it exactly if present, `use`/`key_ops` are enforced for
+/// [`JwkOp::Verify`], and the key is converted under that algorithm's strength rules — which is
+/// why an HS256 key is refused for an HS512 token even with no `alg` pinned, and why a short
+/// HMAC key cannot be talked into a weaker algorithm by editing the header.
+pub(crate) fn verifier_from_jwk(
+    jwk: &crate::jwk::Jwk,
+    header_alg: &str,
+) -> Result<kryptering::SoftwareVerifier> {
+    let parsed = JwsAlgorithm::from_str(header_alg)?;
+    let sig_alg = parsed.to_crypto()?;
 
-    // 2. If the JWK pins an alg, require exact agreement with the header.
+    // If the JWK pins an alg, require exact agreement with the header. Compared as the *wire*
+    // strings, not the parsed enums: `EdDSA` and `Ed25519` are distinct enum variants, and a pin
+    // is a statement about what the token may say, so spelling is what must match.
     if let Some(jwk_alg) = jwk.alg.as_deref() {
-        if jwk_alg != header.alg {
+        if jwk_alg != header_alg {
             return Err(JoseError::InvalidToken(format!(
-                "JWK alg {jwk_alg} does not match token header alg {}",
-                header.alg
+                "JWK alg {jwk_alg} does not match token header alg {header_alg}"
             )));
         }
     }
 
-    // 3. Enforce use / key_ops.
+    // Enforce use / key_ops.
     jwk.check_op(crate::jwk::JwkOp::Verify)?;
 
-    // 4. Convert to a SoftwareKey and build the verifier.
-    let sw_key = crate::jwk::jwk_to_signature_key(jwk, header_alg, crate::jwk::JwkOp::Verify)?;
-    let verifier = kryptering::SoftwareVerifier::new(sig_alg, sw_key).map_err(JoseError::Crypto)?;
+    let sw_key = crate::jwk::jwk_to_signature_key(jwk, parsed, crate::jwk::JwkOp::Verify)?;
+    kryptering::SoftwareVerifier::new(sig_alg, sw_key).map_err(JoseError::Crypto)
+}
 
-    // 5. Standard verify — applies the full JWS-layer binding.
-    verify(&verifier, token)
+/// Verify a JWS and return the payload *with the header that authenticated it*.
+///
+/// Same verification as [`verify_with_jwk`]; the difference is what comes back.
+/// [`Authenticated`](crate::Authenticated) carries the protected header the signature actually covered, so a
+/// caller does not re-parse (and cannot accidentally read an unauthenticated copy).
+/// A compact JWS carries no unprotected metadata, so `unprotected` is empty here by
+/// construction rather than by luck.
+///
+/// ```
+/// use jose_rs::jwk;
+/// use jose_rs::jws::compact;
+/// use jose_rs::JoseHeader;
+///
+/// let mut jwk = jwk::generate_ec("P-256")?;
+/// jwk.alg = Some("ES256".into());
+/// let token = compact::sign_with_jwk(&jwk, b"data", &JoseHeader::new("ES256"))?;
+/// let outcome = compact::verify_with_jwk_authenticated(&jwk, &token)?;
+/// assert_eq!(outcome.value, b"data");
+/// assert_eq!(outcome.algorithm(), "ES256");
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn verify_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify_with_jwk(jwk, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(payload, protected, Vec::new()))
+}
+
+/// [`verify_with_jwk_authenticated`] for the low-level verifier boundary (HSM-backed
+/// verifiers and the like).
+pub fn verify_authenticated(
+    verifier: &dyn kryptering::Verifier,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify(verifier, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(payload, protected, Vec::new()))
 }
 
 /// Decode the header from a JWS Compact Serialization without verifying.
@@ -716,9 +788,8 @@ mod tests {
     #[test]
     fn sign_verify_ed25519_roundtrip() {
         use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
-
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key =
+            SigningKey::generate(&mut getrandom::rand_core::UnwrapErr(getrandom::SysRng));
         let verifying_key = signing_key.verifying_key();
 
         use pkcs8::spki::EncodePublicKey;

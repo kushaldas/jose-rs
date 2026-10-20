@@ -147,7 +147,9 @@ fn flattened_general_and_detached_unencoded_payloads() {
 #[test]
 fn original_protected_bytes_are_authenticated() {
     use ed25519_dalek::Signer;
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut getrandom::rand_core::UnwrapErr(
+        getrandom::SysRng,
+    ));
     let key = jwk::Jwk::from_json(
         &serde_json::json!({
             "kty": "OKP", "crv": "Ed25519", "alg": "Ed25519",

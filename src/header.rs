@@ -70,7 +70,14 @@ pub(crate) fn is_registered_member(name: &str) -> bool {
 /// JOSE Header — the protected header used in JWS and JWE compact serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoseHeader {
-    /// Algorithm (`alg`). Required.
+    /// Algorithm (`alg`).
+    ///
+    /// Required by the compact serialization and by every emit path; absent
+    /// only in a JWE JSON Serialization protected header that conveys `alg` in
+    /// an unprotected header member (RFC 7516 §7.2.1). Code that needs the
+    /// algorithm checks this field explicitly rather than relying on the
+    /// parser to have demanded it.
+    #[serde(default)]
     pub alg: String,
 
     /// Encryption algorithm (`enc`). Used in JWE only.

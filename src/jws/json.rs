@@ -230,6 +230,64 @@ fn ensure_general_signature_count(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate encoded-field sizes and protected/unprotected name disjointness before
+/// allocating results, constructing keys, or attempting a signature.
+fn preflight_flattened_structure(jws: &FlattenedJws) -> Result<()> {
+    crate::jws::compact::ensure_token_size(&jws.protected)?;
+    crate::jws::compact::ensure_token_size(&jws.signature)?;
+    if let Some(payload) = &jws.payload {
+        crate::jws::compact::ensure_token_size(payload)?;
+    }
+    validate_inbound_header_pair(&jws.protected, jws.header.as_ref())
+}
+
+/// General-JWS structural preflight shared by raw-verifier and JWK-aware APIs.
+fn preflight_general_structure(jws: &GeneralJws) -> Result<()> {
+    ensure_general_signature_count(jws.signatures.len())?;
+    if let Some(payload) = &jws.payload {
+        crate::jws::compact::ensure_token_size(payload)?;
+    }
+    for entry in &jws.signatures {
+        crate::jws::compact::ensure_token_size(&entry.protected)?;
+        crate::jws::compact::ensure_token_size(&entry.signature)?;
+        validate_inbound_header_pair(&entry.protected, entry.header.as_ref())?;
+    }
+    Ok(())
+}
+
+/// Enforce RFC 7515 §7.2.1 over the original protected JSON member names.
+///
+/// Parsing directly into [`crate::member_map::MemberMap`] is intentional: converting to
+/// [`JoseHeader`] and serializing it again can erase a present member whose value is
+/// `null`, allowing that name to collide with an attacker-controlled unprotected value.
+fn validate_inbound_header_pair(
+    protected_segment: &str,
+    unprotected: Option<&serde_json::Value>,
+) -> Result<()> {
+    let Some(unprotected) = unprotected else {
+        return Ok(());
+    };
+    let unprotected = unprotected.as_object().ok_or_else(|| {
+        JoseError::InvalidHeader("unprotected header must be a JSON object".into())
+    })?;
+    let protected_bytes = base64url::decode(protected_segment)?;
+    let mut protected: crate::member_map::MemberMap = serde_json::from_slice(&protected_bytes)?;
+    let protected_names = protected
+        .drain_leftovers()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::HashSet<_>>();
+    for name in unprotected.keys() {
+        if protected_names.contains(name) {
+            return Err(JoseError::InvalidHeader(format!(
+                "unprotected header member {name} also appears in the protected header \
+                 (RFC 7515 §7.2.1)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_payload_for_verify<'a>(
     embedded: Option<&'a str>,
     detached: Option<&'a [u8]>,
@@ -367,11 +425,7 @@ pub fn verify_flattened_opts(
     detached_payload: Option<&[u8]>,
     opts: &VerifyOptions,
 ) -> Result<Vec<u8>> {
-    crate::jws::compact::ensure_token_size(&jws.protected)?;
-    crate::jws::compact::ensure_token_size(&jws.signature)?;
-    if let Some(p) = &jws.payload {
-        crate::jws::compact::ensure_token_size(p)?;
-    }
+    preflight_flattened_structure(jws)?;
     let b64 = validate_header_opts(&jws.protected, verifier, opts)?;
     let (payload_segment, payload_source) =
         resolve_payload_for_verify(jws.payload.as_deref(), detached_payload, b64)?;
@@ -380,7 +434,7 @@ pub fn verify_flattened_opts(
     let valid = verifier.verify(&input, &sig).map_err(JoseError::Crypto)?;
     if !valid {
         return Err(JoseError::InvalidToken(
-            "signature verification failed".into(),
+            crate::SIGNATURE_VERIFICATION_FAILED.into(),
         ));
     }
     payload_source.decode(b64)
@@ -597,16 +651,10 @@ fn verify_general_inner(
     opts: &VerifyOptions,
     stop_on_first_valid: bool,
 ) -> Result<(Vec<SignatureResult>, Option<Vec<u8>>)> {
-    ensure_general_signature_count(jws.signatures.len())?;
-
-    if let Some(p) = &jws.payload {
-        crate::jws::compact::ensure_token_size(p)?;
-    }
+    preflight_general_structure(jws)?;
 
     let mut shared_b64: Option<bool> = None;
     for entry in &jws.signatures {
-        crate::jws::compact::ensure_token_size(&entry.protected)?;
-        crate::jws::compact::ensure_token_size(&entry.signature)?;
         let Ok(b64) = validate_header_b64_opts(&entry.protected, opts) else {
             continue;
         };
@@ -682,7 +730,7 @@ fn verify_general_inner(
                 any_verified = true;
             }
             Ok(false) => {
-                result.error = Some("signature verification failed".into());
+                result.error = Some(crate::SIGNATURE_VERIFICATION_FAILED.into());
             }
             Err(e) => {
                 result.error = Some(format!("verifier error: {e}"));
@@ -707,6 +755,499 @@ fn verify_general_inner(
         None
     };
     Ok((results, resolved_payload))
+}
+
+// ---------------------------------------------------------------------------
+// JWK-aware convenience APIs (plan L2)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of candidate keys the JWK-aware General-JWS verify paths will
+/// try per signature.
+///
+/// Trying keys is not free and not risk-free: each attempt is a signature
+/// verification over attacker-chosen bytes. The bound exists so a caller who
+/// hands over a JWK Set scraped from a network cannot turn "which key signed
+/// this?" into a cost multiplier. Selection *policy* (kid matching, fallback,
+/// ordering) is [L3](https://github.com/); this is only the ceiling.
+pub const MAX_CANDIDATE_KEYS: usize = 64;
+
+/// Create a Flattened JWS JSON using a JWK directly.
+///
+/// The signer is derived from the JWK by the same internal rule set that
+/// `compact::sign_with_jwk` uses — the same function,
+/// [`sign_with_jwk`](crate::jws::compact::sign_with_jwk) uses — so the key
+/// metadata rules are not a parallel copy: `jwk.alg` must be set and must match
+/// `header.alg`, `use`/`key_ops` are enforced for signing, and the key is
+/// converted under the algorithm's strength rules (an RSA key under 2048 bits or
+/// a short HMAC key is refused here, not at some later point).
+///
+/// ```
+/// use jose_rs::jwk;
+/// use jose_rs::jws::json;
+/// use jose_rs::JoseHeader;
+///
+/// let mut jwk = jwk::generate_ec("P-256")?;
+/// jwk.alg = Some("ES256".into());
+/// let flattened = json::sign_flattened_with_jwk(&jwk, b"payload", &JoseHeader::new("ES256"))?;
+/// let payload = json::verify_flattened_with_jwk(&jwk, &flattened)?;
+/// assert_eq!(payload, b"payload");
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn sign_flattened_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+) -> Result<FlattenedJws> {
+    sign_flattened_with_jwk_opts(jwk, payload, header, None, &SignOptions::new())
+}
+
+/// Verify a flattened JWS with a JWK, returning the payload with the header the
+/// signature authenticated and the unprotected metadata kept separate.
+///
+/// [`Authenticated::protected`](crate::Authenticated::protected) is the header that was covered by this signature;
+/// [`Authenticated::unprotected`](crate::Authenticated::unprotected) is the per-signature `header` member, verbatim and
+/// clearly labelled as not covered. They are not merged: a caller that reads `alg` or
+/// `kid` from the merged view cannot tell a forged value from an authenticated one.
+pub fn verify_flattened_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    jws: &FlattenedJws,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let payload = verify_flattened_with_jwk(jwk, jws)?;
+    let protected = decode_protected(&jws.protected)?;
+    let unprotected: Vec<serde_json::Value> = jws.header.clone().into_iter().collect();
+    Ok(crate::Authenticated::new(payload, protected, unprotected))
+}
+
+/// [`sign_flattened_with_jwk`] with the per-signature unprotected header and/// [`sign_flattened_with_jwk`] with the per-signature unprotected header and
+/// RFC 7797 / `crit` options.
+pub fn sign_flattened_with_jwk_opts(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+    unprotected: Option<serde_json::Value>,
+    opts: &SignOptions,
+) -> Result<FlattenedJws> {
+    let signer = crate::jws::compact::signer_from_jwk(jwk, header)?;
+    sign_flattened_opts(&signer, payload, header, unprotected, opts)
+}
+
+/// Create a **detached** Flattened JWS JSON using a JWK directly.
+pub fn sign_flattened_detached_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+) -> Result<FlattenedJws> {
+    sign_flattened_detached_with_jwk_opts(jwk, payload, header, None, &SignOptions::new())
+}
+
+/// Detached Flattened sign with a JWK and full options.
+pub fn sign_flattened_detached_with_jwk_opts(
+    jwk: &crate::jwk::Jwk,
+    payload: &[u8],
+    header: &JoseHeader,
+    unprotected: Option<serde_json::Value>,
+    opts: &SignOptions,
+) -> Result<FlattenedJws> {
+    let signer = crate::jws::compact::signer_from_jwk(jwk, header)?;
+    sign_flattened_detached_opts(&signer, payload, header, unprotected, opts)
+}
+
+/// Verify a Flattened JWS JSON using a JWK directly.
+///
+/// The algorithm comes from the JWS's own protected header and the verifier is
+/// built by the same internal rule set `compact::verify_with_jwk` uses — one function,
+/// [`verify_with_jwk`](crate::jws::compact::verify_with_jwk) uses: a pinned
+/// `jwk.alg` must match the token's `alg` spelling, `use`/`key_ops` are enforced
+/// for verification, and strength is checked against the *token's* algorithm —
+/// so an HS256-sized secret cannot be used for an HS512 token by editing the
+/// header, whether or not `alg` is pinned.
+pub fn verify_flattened_with_jwk(jwk: &crate::jwk::Jwk, jws: &FlattenedJws) -> Result<Vec<u8>> {
+    verify_flattened_with_jwk_opts(jwk, jws, None, &VerifyOptions::new())
+}
+
+/// Verify a **detached** Flattened JWS JSON using a JWK directly.
+pub fn verify_flattened_detached_with_jwk(
+    jwk: &crate::jwk::Jwk,
+    jws: &FlattenedJws,
+    detached_payload: &[u8],
+) -> Result<Vec<u8>> {
+    verify_flattened_with_jwk_opts(jwk, jws, Some(detached_payload), &VerifyOptions::new())
+}
+
+/// Flattened verify with a JWK, an optional detached payload and `crit` options.
+///
+/// `detached_payload` is the out-of-band payload; passing `None` requires the JWS
+/// to carry the `payload` member. This is the single JWK-aware flattened entry
+/// point; the two above are it with defaults.
+pub fn verify_flattened_with_jwk_opts(
+    jwk: &crate::jwk::Jwk,
+    jws: &FlattenedJws,
+    detached_payload: Option<&[u8]>,
+    opts: &VerifyOptions,
+) -> Result<Vec<u8>> {
+    preflight_flattened_structure(jws)?;
+    let header = decode_protected(&jws.protected)?;
+    let verifier = crate::jws::compact::verifier_from_jwk(jwk, &header.alg)?;
+    verify_flattened_opts(&verifier, jws, detached_payload, opts)
+}
+
+/// One entry of a JWK-aware General JWS signature list.
+///
+/// Mirrors [`GeneralSigner`] but holds a [`Jwk`](crate::jwk::Jwk) instead of a
+/// built signer, so the caller does not have to reimplement operation-aware key
+/// conversion (and get its rules subtly wrong) to use the General serialization.
+pub struct GeneralJwkSigner<'a> {
+    /// Signing key; its `alg` must be set and match `protected.alg`.
+    pub jwk: &'a crate::jwk::Jwk,
+    /// Protected header authenticated by this signature.
+    pub protected: &'a JoseHeader,
+    /// Optional unprotected per-signature header parameters.
+    /// Not integrity-protected: never select a key or make a trust decision from it.
+    pub unprotected: Option<serde_json::Value>,
+    /// Signing and critical-header validation options.
+    pub options: SignOptions,
+}
+
+impl<'a> GeneralJwkSigner<'a> {
+    /// Convenience constructor with default options and no unprotected header.
+    pub fn new(jwk: &'a crate::jwk::Jwk, protected: &'a JoseHeader) -> Self {
+        Self {
+            jwk,
+            protected,
+            unprotected: None,
+            options: SignOptions::new(),
+        }
+    }
+}
+
+/// Create a General JWS JSON from `(JWK, protected header)` pairs.
+pub fn sign_general_with_jwk_pairs(
+    entries: &[(&crate::jwk::Jwk, &JoseHeader)],
+    payload: &[u8],
+) -> Result<GeneralJws> {
+    let full: Vec<GeneralJwkSigner<'_>> = entries
+        .iter()
+        .map(|(jwk, header)| GeneralJwkSigner::new(jwk, header))
+        .collect();
+    sign_general_with_jwks(&full, payload, true)
+}
+
+/// Create a General JWS JSON from JWK entries, with per-signature unprotected
+/// headers, options, and the detached-payload switch.
+///
+/// Every entry's key rules are checked *before* any signature is produced
+/// (`sign_general_full` validates all headers up front), so a bad later entry
+/// cannot waste an earlier, possibly HSM-backed, signature.
+pub fn sign_general_with_jwks(
+    entries: &[GeneralJwkSigner<'_>],
+    payload: &[u8],
+    embed_payload: bool,
+) -> Result<GeneralJws> {
+    // Two passes on purpose: every key must clear the rule set before any signing
+    // starts, because a key-rule failure halfway through would leave the earlier
+    // signatures already spent (and, with an HSM-backed key, already billed).
+    let signers: Vec<kryptering::SoftwareSigner> = entries
+        .iter()
+        .map(|entry| crate::jws::compact::signer_from_jwk(entry.jwk, entry.protected))
+        .collect::<Result<Vec<_>>>()?;
+    let generals: Vec<GeneralSigner<'_>> = signers
+        .iter()
+        .zip(entries.iter())
+        .map(|(signer, entry)| GeneralSigner {
+            signer,
+            protected: entry.protected,
+            unprotected: entry.unprotected.clone(),
+            options: entry.options.clone(),
+        })
+        .collect();
+    sign_general_full(&generals, payload, embed_payload)
+}
+
+/// How a multi-key General-JWS verification decides success.
+///
+/// The choice is deliberately the caller's: "at least one of these keys signed
+/// it" and "every signature here is valid" are different security statements, and
+/// a library that picks one silently will eventually pick the wrong one for
+/// someone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignaturePolicy {
+    /// Success when at least one signature verifies.
+    Any,
+    /// Success only when every signature in the document verifies.
+    All,
+}
+
+/// Per-signature outcome of a JWK-aware General JWS verification.
+#[derive(Debug, Clone)]
+pub struct JwkSignatureResult {
+    /// Index within the `signatures` array.
+    pub index: usize,
+    /// Parsed protected header (`None` when it could not be decoded).
+    pub protected_header: Option<JoseHeader>,
+    /// The unprotected `header` member as carried. Not integrity-protected.
+    pub unprotected_header: Option<serde_json::Value>,
+    /// Whether this signature verified.
+    pub verified: bool,
+    /// Whether this signature was cryptographically attempted at all.
+    ///
+    /// With [`SignaturePolicy::Any`] the loop stops at the first valid signature, so a later
+    /// entry can be `verified: false, attempted: false` — "not attempted", not "failed". Without
+    /// this field a short-circuited report would claim a signature was checked and rejected,
+    /// which is a different (and wrong) statement about the document.
+    pub attempted: bool,
+    /// Index into the candidate list of the key that verified it, when one did.
+    ///
+    /// Reported so a caller can act on *which* key signed (rotation, tenancy,
+    /// audit) instead of re-deriving it.
+    pub key_index: Option<usize>,
+    /// Why it did not verify, if applicable.
+    pub error: Option<String>,
+}
+
+/// Outcome of a JWK-aware General JWS verification.
+#[derive(Debug, Clone)]
+pub struct GeneralVerifyReport {
+    /// Per-signature outcomes, in document order.
+    pub results: Vec<JwkSignatureResult>,
+    /// Payload bytes, present only when the policy was satisfied. Never
+    /// populated for bytes nothing authenticated.
+    pub payload: Option<Vec<u8>>,
+}
+
+impl GeneralVerifyReport {
+    /// `true` when the policy was satisfied (equivalently, `payload.is_some()`).
+    pub fn satisfied(&self) -> bool {
+        self.payload.is_some()
+    }
+}
+
+/// Verify a General JWS against a list of candidate JWKs under an explicit
+/// success policy.
+///
+/// For each signature the candidate keys are tried in list order; the first key
+/// that verifies is recorded in [`JwkSignatureResult::key_index`]. Attempts are
+/// bounded by [`MAX_CANDIDATE_KEYS`] keys and [`MAX_GENERAL_SIGNATURES`]
+/// signatures, because key discovery over attacker-chosen bytes is work an
+/// attacker gets to size.
+///
+/// Keys that cannot even be considered for a signature's algorithm (a pinned
+/// `alg` mismatch, a `use: enc` key, an HMAC secret of the wrong size) are
+/// recorded as *reasons*, not silently skipped: `results[i].error` explains why
+/// nothing matched, which is the difference between a diagnosable outage and a
+/// mystery.
+///
+/// # Errors
+///
+/// [`JoseError::InvalidToken`] for whole-document problems (no signatures, too
+/// many candidates, payload resolution failure). Individual signature failures
+/// are reported in `results`, and the error variant for an unsatisfied policy is
+/// also `InvalidToken` — inspect `results` to see why.
+pub fn verify_general_with_jwks(
+    jwks: &[&crate::jwk::Jwk],
+    jws: &GeneralJws,
+    detached_payload: Option<&[u8]>,
+    opts: &VerifyOptions,
+    policy: SignaturePolicy,
+) -> Result<GeneralVerifyReport> {
+    if jws.signatures.is_empty() {
+        return Err(JoseError::InvalidToken("no signatures present".into()));
+    }
+    if jwks.is_empty() {
+        return Err(JoseError::Key("no candidate keys supplied".into()));
+    }
+    if jwks.len() > MAX_CANDIDATE_KEYS {
+        return Err(JoseError::InvalidToken(format!(
+            "{} candidate keys exceeds the {MAX_CANDIDATE_KEYS} key limit",
+            jwks.len()
+        )));
+    }
+    preflight_general_structure(jws)?;
+
+    let mut results: Vec<JwkSignatureResult> = Vec::with_capacity(jws.signatures.len());
+    for (index, entry) in jws.signatures.iter().enumerate() {
+        let protected_header = match base64url::decode(&entry.protected) {
+            Ok(bytes) => serde_json::from_slice::<JoseHeader>(&bytes).ok(),
+            Err(_) => None,
+        };
+        results.push(JwkSignatureResult {
+            index,
+            protected_header,
+            unprotected_header: entry.header.clone(),
+            verified: false,
+            attempted: false,
+            key_index: None,
+            error: None,
+        });
+    }
+
+    // Reasons are kept in two tiers, because "the only thing wrong with this signature is that
+    // you tried it with the wrong kind of key" is not the message a caller needs while a real
+    // failure is also on the table. `failures` holds complaints from a verifier whose algorithm
+    // *did* match the signature — the informative kind. `notes` holds everything else: a key that
+    // the algorithm or the key's own metadata excludes, which is what the loop falls back to when
+    // nothing better was learned.
+    let mut failures: Vec<Option<String>> = vec![None; results.len()];
+    let mut notes: Vec<Option<String>> = vec![None; results.len()];
+
+    let mut payload: Option<Vec<u8>> = None;
+    let mut any_verified = false;
+
+    // The algorithms present, deduplicated by *spelling*: `EdDSA` and `Ed25519` are distinct
+    // variants with distinct key requirements, and collapsing their names would let a pinned key
+    // be applied to the wrong one.
+    let mut present_algs: Vec<String> = Vec::new();
+    for entry in &jws.signatures {
+        let Ok(header) = decode_protected(&entry.protected) else {
+            continue;
+        };
+        if !present_algs.iter().any(|existing| existing == &header.alg) {
+            present_algs.push(header.alg.clone());
+        }
+    }
+
+    'keys: for (key_index, jwk) in jwks.iter().enumerate() {
+        for alg in &present_algs {
+            let verifier = match crate::jws::compact::verifier_from_jwk(jwk, alg) {
+                Ok(verifier) => verifier,
+                Err(err) => {
+                    // This key cannot serve this algorithm at all. Record *why* against the
+                    // signatures that asked for it: a caller whose JWKS is full of `use: enc`
+                    // keys deserves "key not usable for verification" over a generic failure.
+                    let reason = err.to_string();
+                    for result in &mut results {
+                        if result
+                            .protected_header
+                            .as_ref()
+                            .is_some_and(|header| &header.alg == alg)
+                            && notes[result.index].is_none()
+                        {
+                            notes[result.index] = Some(reason.clone());
+                        }
+                    }
+                    continue;
+                }
+            };
+
+            // `?` on purpose: a whole-document failure (payload encoding, mismatched `b64`
+            // between entries) is not a per-key problem, so it applies to every candidate and is
+            // reported as itself rather than attributed to whichever key was being tried.
+            let (per_signature, maybe_payload) =
+                verify_general_all(&verifier, jws, detached_payload, opts)?;
+
+            for single in per_signature {
+                let result = &mut results[single.index];
+                // Only signatures with this verifier's algorithm count as genuinely attempted;
+                // the rest were skipped by the shared verify core, which reports the algorithm
+                // mismatch for them.
+                let matched = result
+                    .protected_header
+                    .as_ref()
+                    .is_some_and(|header| &header.alg == alg);
+                if matched {
+                    result.attempted = true;
+                }
+
+                if !single.verified {
+                    if matched && failures[single.index].is_none() {
+                        failures[single.index] = Some(single.error.unwrap_or_default());
+                    } else if !matched && notes[single.index].is_none() {
+                        notes[single.index] = single.error;
+                    }
+                    continue;
+                }
+
+                any_verified = true;
+                if !result.verified {
+                    result.verified = true;
+                    result.key_index = Some(key_index);
+                    result.error = None;
+                }
+                if payload.is_none() {
+                    payload = maybe_payload.clone();
+                }
+            }
+
+            // `Any`: stop at the first authenticated document. Remaining candidates add nothing
+            // and every one of them costs a verification over attacker-chosen bytes.
+            if matches!(policy, SignaturePolicy::Any) && any_verified {
+                break 'keys;
+            }
+        }
+    }
+
+    // Best available reason per signature, then the policy decision.
+    for (index, result) in results.iter_mut().enumerate() {
+        if result.verified {
+            continue;
+        }
+        let reason = failures[index]
+            .take()
+            .or_else(|| notes[index].take())
+            .filter(|reason| !reason.is_empty());
+        result.error = Some(match (reason, result.attempted) {
+            (Some(reason), true) => reason,
+            // Both halves matter here: the reason the only applicable attempt failed *and* the
+            // fact that no candidate which could have matched was ever reached. Reporting just the
+            // first reads as "this signature is bad" when the truth is "we stopped early".
+            (Some(reason), false) => format!(
+                "{reason}; and no further candidate was tried (the any-signature policy was \
+                 already satisfied)"
+            ),
+            (None, true) => "no candidate key verified this signature".into(),
+            (None, false) => "not attempted: the any-signature policy was already satisfied".into(),
+        });
+    }
+
+    let satisfied = match policy {
+        SignaturePolicy::Any => any_verified,
+        // `All`: every signature must have verified. A document that only some of its signers
+        // signed is not the document this caller asked to accept.
+        SignaturePolicy::All => results.iter().all(|result| result.verified),
+    };
+    if !satisfied {
+        return Err(JoseError::InvalidToken(match policy {
+            SignaturePolicy::Any => "no candidate key verified any signature".into(),
+            SignaturePolicy::All => {
+                let failed: Vec<usize> = results
+                    .iter()
+                    .filter(|result| !result.verified)
+                    .map(|result| result.index)
+                    .collect();
+                format!(
+                    "all-signatures policy not satisfied: signature(s) {failed:?} did not verify"
+                )
+            }
+        }));
+    }
+
+    Ok(GeneralVerifyReport { results, payload })
+}
+
+/// [`verify_general_with_jwks`] with the [`SignaturePolicy::Any`] policy and
+/// default verify options.
+pub fn verify_general_with_jwk_any(jwks: &[&crate::jwk::Jwk], jws: &GeneralJws) -> Result<Vec<u8>> {
+    let report =
+        verify_general_with_jwks(jwks, jws, None, &VerifyOptions::new(), SignaturePolicy::Any)?;
+    report
+        .payload
+        .ok_or_else(|| JoseError::InvalidToken("no signature verified".into()))
+}
+
+/// [`verify_general_with_jwks`] with the [`SignaturePolicy::All`] policy and
+/// default verify options.
+pub fn verify_general_with_jwk_all(jwks: &[&crate::jwk::Jwk], jws: &GeneralJws) -> Result<Vec<u8>> {
+    let report =
+        verify_general_with_jwks(jwks, jws, None, &VerifyOptions::new(), SignaturePolicy::All)?;
+    report
+        .payload
+        .ok_or_else(|| JoseError::InvalidToken("not every signature verified".into()))
+}
+
+/// Decode a base64url protected header segment.
+fn decode_protected(segment: &str) -> Result<JoseHeader> {
+    crate::jws::compact::ensure_token_size(segment)?;
+    let bytes = base64url::decode(segment)?;
+    serde_json::from_slice(&bytes).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1095,6 +1636,35 @@ mod tests {
         };
         let result = verify_flattened(&hmac_verifier(KEY_A), &jws);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn inbound_protected_and_unprotected_names_must_be_disjoint() {
+        let flattened = FlattenedJws {
+            payload: Some(base64url::encode(b"p")),
+            // `kid: null` is present in the original protected object even though a typed
+            // JoseHeader would turn it into `None` and omit it if serialized again.
+            protected: base64url::encode(br#"{"alg":"HS256","kid":null}"#),
+            header: Some(serde_json::json!({"kid": "attacker"})),
+            signature: base64url::encode(b"not-reached"),
+        };
+        let err = verify_flattened(&hmac_verifier(KEY_A), &flattened)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid") && err.contains("also appears"), "{err}");
+
+        let general = GeneralJws {
+            payload: flattened.payload.clone(),
+            signatures: vec![JwsSignature {
+                protected: flattened.protected,
+                header: flattened.header,
+                signature: flattened.signature,
+            }],
+        };
+        let err = verify_general(&hmac_verifier(KEY_A), &general)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kid") && err.contains("also appears"), "{err}");
     }
 
     /// J-03 regression: Flattened verify rejects alg=none.

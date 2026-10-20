@@ -1,29 +1,24 @@
 //! JWE Compact Serialization (RFC 7516 Section 3.1).
 //!
 //! Format: `BASE64URL(header).BASE64URL(encrypted_key).BASE64URL(iv).BASE64URL(ciphertext).BASE64URL(tag)`
+//!
+//! This module owns only the *wire shape*: splitting and joining the five
+//! base64url parts, plus the public one-shot APIs. Header policy, algorithm
+//! allow-lists, size limits and all cryptography live in the crate-private
+//! `jwe::internal` and `jwe::content` modules, so the JSON serializations
+//! built on the same core cannot drift from it.
 
 use crate::algorithm::{JweAlgorithm, JweEncryption};
 use crate::base64url;
 use crate::error::{JoseError, Result};
 use crate::header::JoseHeader;
 
-use rand::RngCore;
-use zeroize::Zeroizing;
+use crate::jwe::internal::{
+    self, all_enc_algorithms, ensure_token_size, jwe_alg_decrypt_op, jwe_alg_encrypt_op,
+    parse_envelope, recipient_key, recover_cek, KeyMaterial,
+};
 
-fn ensure_token_size(token: &str) -> Result<()> {
-    if token.len() > crate::MAX_TOKEN_BYTES {
-        return Err(JoseError::InvalidToken(format!(
-            "token size {} exceeds MAX_TOKEN_BYTES ({})",
-            token.len(),
-            crate::MAX_TOKEN_BYTES
-        )));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+pub use crate::jwe::internal::{JweDecryptOptions, JweEncryptOptions};
 
 /// Encrypt plaintext and produce a JWE Compact Serialization string.
 ///
@@ -38,49 +33,6 @@ pub fn encrypt(
     enc: JweEncryption,
 ) -> Result<String> {
     encrypt_with_header(JoseHeader::for_jwe(alg, enc), key, plaintext, alg, enc)
-}
-
-/// Options controlling JWE encryption with a caller-supplied protected
-/// header ([`encrypt_with_header_options`], [`encrypt_with_jwk_header_options`]).
-///
-/// [`Default`] / [`JweEncryptOptions::new`] is the strict policy used by
-/// [`encrypt_with_header`] and [`encrypt_with_jwk_header`].
-///
-/// The struct is `#[non_exhaustive]` so new policy switches can be added
-/// without breaking callers: start from [`JweEncryptOptions::new`] and use
-/// the `with_*` builders.
-///
-/// ```
-/// use jose_rs::jwe::JweEncryptOptions;
-///
-/// let opts = JweEncryptOptions::new().with_key_reference_headers(true);
-/// assert!(opts.allow_key_reference_headers);
-/// ```
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct JweEncryptOptions {
-    /// Permit the key-reference members `jku`, `jwk`, `x5u` and `x5c`
-    /// ([`crate::header::KEY_REFERENCE_MEMBERS`]) in the protected header.
-    /// Defaults to `false`.
-    ///
-    /// RFC 7516 §4.1.4-4.1.7 uses these to identify the recipient's key.
-    /// This crate never reads them, but a peer may dereference or trust
-    /// them, so they are refused unless the caller opts in.
-    pub allow_key_reference_headers: bool,
-}
-
-impl JweEncryptOptions {
-    /// Strict defaults: no key-reference header members.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set [`allow_key_reference_headers`](Self::allow_key_reference_headers).
-    #[must_use]
-    pub fn with_key_reference_headers(mut self, allow: bool) -> Self {
-        self.allow_key_reference_headers = allow;
-        self
-    }
 }
 
 /// Encrypt plaintext with an explicit authenticated protected header.
@@ -141,185 +93,51 @@ pub fn encrypt_with_header_options(
     enc: JweEncryption,
     opts: &JweEncryptOptions,
 ) -> Result<String> {
-    if header.alg != alg.as_str() {
-        return Err(JoseError::InvalidHeader(format!(
-            "protected header alg {} does not match JWE algorithm {}",
-            header.alg,
-            alg.as_str()
-        )));
-    }
-    if header.enc.as_deref() != Some(enc.as_str()) {
-        return Err(JoseError::InvalidHeader(format!(
-            "protected header enc {:?} does not match JWE encryption {}",
-            header.enc,
-            enc.as_str()
-        )));
-    }
-    // alg/enc agree; now the JWE-specific member rules, then the shared
-    // duplicate / key-reference / size rules while serializing.
-    validate_encrypt_header(&header)?;
-    let header_b64 = header.to_protected_b64(opts.allow_key_reference_headers)?;
+    // RFC 7516 §7.1 defines no `aad` member, so this serialization cannot
+    // honour external AAD. Refusing beats encrypting under an AAD the
+    // recipient has no way to learn.
+    ensure_no_external_aad(opts.external_aad())?;
 
-    // The ciphertext is at least as long as the plaintext, so refuse before
-    // any key wrapping or encryption when the token cannot possibly fit.
-    crate::ensure_emit_size(header_b64.len() + base64url_len(plaintext.len()) + 4)?;
+    // Raw bytes can only mean a transported or wrapped key, so the key
+    // agreement algorithms are unreachable from here by construction; see
+    // [`KeyMaterial`].
+    encrypt_with_header_options_material(
+        header,
+        KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
 
-    // 1. Generate or use CEK, produce encrypted key.
-    let (cek, encrypted_key) = produce_cek(key, alg, enc)?;
+/// Shared compact-emit core for both key shapes.
+fn encrypt_with_header_options_material(
+    header: JoseHeader,
+    key: KeyMaterial,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<String> {
+    ensure_no_external_aad(opts.external_aad())?;
 
-    // 2. Content encryption.
-    // AAD = ASCII(BASE64URL(header)) per RFC 7516 Section 5.1 step 14.
-    let aad = header_b64.as_bytes();
-    let (iv, ciphertext, tag) = content_encrypt(enc, &cek, plaintext, aad)?;
+    // All emit-side policy lives in the shared core, which the JSON
+    // serializations call too; this function only joins the five parts.
+    let core = internal::encrypt_core(&header, key, plaintext, alg, enc, opts, None)?;
 
-    // 3. Assemble compact serialization.
-    let encrypted_key_b64 = base64url::encode(&encrypted_key);
-    let iv_b64 = base64url::encode(&iv);
-    let ciphertext_b64 = base64url::encode(&ciphertext);
-    let tag_b64 = base64url::encode(&tag);
+    let encrypted_key_b64 = base64url::encode(&core.encrypted_key);
+    let iv_b64 = base64url::encode(&core.iv);
+    let ciphertext_b64 = base64url::encode(&core.ciphertext);
+    let tag_b64 = base64url::encode(&core.tag);
 
-    let token = format!("{header_b64}.{encrypted_key_b64}.{iv_b64}.{ciphertext_b64}.{tag_b64}");
+    let token = format!(
+        "{}.{}.{}.{}.{}",
+        core.header_b64, encrypted_key_b64, iv_b64, ciphertext_b64, tag_b64
+    );
     // `decrypt` refuses tokens over MAX_TOKEN_BYTES.
     crate::ensure_emit_size(token.len())?;
     Ok(token)
-}
-
-/// Length of the unpadded base64url encoding of `n` bytes.
-fn base64url_len(n: usize) -> usize {
-    n.div_ceil(3) * 4 - (3 - n % 3) % 3
-}
-
-/// Registered header members this crate does not implement for JWE compact
-/// encryption, and so must not emit (RFC 7516 / RFC 7518 registry):
-///
-/// - `zip`: content compression (RFC 7516 §4.1.3); not implemented, and
-///   RFC 8725 §3.6 advises against compressing before encryption;
-/// - `b64`: RFC 7797 unencoded payload, a JWS-only member;
-/// - `epk`, `apu`, `apv`: ECDH-ES key agreement (RFC 7518 §4.6.1), parsed
-///   but not wired for encryption;
-/// - `p2s`, `p2c`: PBES2 (RFC 7518 §4.8.1), not wired;
-/// - `iv`, `tag`: AES-GCM key wrapping (RFC 7518 §4.7.1), not implemented.
-///
-/// Emitting any of these would describe processing that did not happen, so
-/// a peer that implements them would read the token differently.
-const UNIMPLEMENTED_JWE_MEMBERS: &[&str] =
-    &["zip", "b64", "epk", "apu", "apv", "p2s", "p2c", "iv", "tag"];
-
-/// Validate the JWE-specific content of a caller-supplied protected header
-/// before it is serialized and used as additional authenticated data.
-///
-/// Callers must already have checked that `header.alg` / `header.enc` match
-/// the algorithms actually used. The shared rules (duplicate members,
-/// key-reference members, size) are applied afterwards by
-/// [`JoseHeader::to_protected_b64`]. Rules enforced here:
-///
-/// 1. `extra` must not contain an [`UNIMPLEMENTED_JWE_MEMBERS`] entry; for
-///    `zip` the check and message match [`decrypt_with_options`], so a
-///    token this crate emits is always one it can decrypt.
-/// 2. `crit` must be absent. No JWE critical extensions are implemented, and
-///    an empty `crit` array is invalid (RFC 7515 §4.1.11).
-///
-/// # Errors
-///
-/// Returns [`JoseError::InvalidHeader`] naming the first rule violated.
-fn validate_encrypt_header(header: &JoseHeader) -> Result<()> {
-    // Rule 1. `extra["crit"]` is not handled here: it duplicates a typed
-    // field, which `to_protected_b64` rejects before anything is emitted.
-    if header.extra.contains_key("zip") {
-        return Err(JoseError::InvalidHeader(
-            "unsupported zip header: content compression is not supported".into(),
-        ));
-    }
-    if let Some(name) = UNIMPLEMENTED_JWE_MEMBERS
-        .iter()
-        .find(|name| header.extra.contains_key(**name))
-    {
-        return Err(JoseError::InvalidHeader(format!(
-            "unsupported JWE header member {name}: not implemented for JWE compact encryption"
-        )));
-    }
-
-    // Rule 2: any `crit` is unsupported; distinguish the empty case so the
-    // error points at the RFC violation rather than an unknown extension.
-    if let Some(crit) = &header.crit {
-        return Err(JoseError::InvalidHeader(if crit.is_empty() {
-            "crit header must not be empty (RFC 7515 §4.1.11)".into()
-        } else {
-            format!("unsupported crit extensions: {crit:?}")
-        }));
-    }
-
-    Ok(())
-}
-
-/// Determine which `JwkOp` governs a JWE alg on the encrypt side.
-///
-/// `Dir` uses the key directly for content encryption (`Encrypt`);
-/// key-transport (`A*KW`, `RSA-OAEP*`) wraps a CEK (`WrapKey`).
-fn jwe_alg_encrypt_op(alg: JweAlgorithm) -> crate::jwk::JwkOp {
-    match alg {
-        JweAlgorithm::Dir => crate::jwk::JwkOp::Encrypt,
-        _ => crate::jwk::JwkOp::WrapKey,
-    }
-}
-
-/// Determine which `JwkOp` governs a JWE alg on the decrypt side.
-fn jwe_alg_decrypt_op(alg: JweAlgorithm) -> crate::jwk::JwkOp {
-    match alg {
-        JweAlgorithm::Dir => crate::jwk::JwkOp::Decrypt,
-        _ => crate::jwk::JwkOp::UnwrapKey,
-    }
-}
-
-/// Convert a JWK to the raw key-material form that [`encrypt`] /
-/// [`decrypt`] expect for the given JWE algorithm.
-///
-/// - For `dir`, `A*KW`: returns the `k` bytes of an `oct` JWK.
-/// - For `RSA-OAEP*` on the encrypt side: returns SPKI DER of the public key.
-/// - For `RSA-OAEP*` on the decrypt side: returns PKCS#8 DER of the private key.
-fn jwk_to_jwe_key_bytes(
-    jwk: &crate::jwk::Jwk,
-    alg: JweAlgorithm,
-    for_decrypt: bool,
-) -> Result<Zeroizing<Vec<u8>>> {
-    match alg {
-        JweAlgorithm::Dir | JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
-            if jwk.kty.as_str() != "oct" {
-                return Err(JoseError::Key(format!(
-                    "JWE alg {} requires kty oct, got {}",
-                    alg.as_str(),
-                    jwk.kty.as_str()
-                )));
-            }
-            let k = jwk
-                .k
-                .as_deref()
-                .ok_or_else(|| JoseError::Key("JWK is missing `k`".into()))?;
-            Ok(Zeroizing::new(base64url::decode(k)?))
-        }
-        JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
-        #[cfg(feature = "deprecated")]
-        JweAlgorithm::RsaOaep => rsa_jwk_to_der(jwk, for_decrypt),
-        _ => Err(JoseError::UnsupportedAlgorithm(format!(
-            "JWE alg {} not supported via JWK one-shot API",
-            alg.as_str()
-        ))),
-    }
-}
-
-fn rsa_jwk_to_der(jwk: &crate::jwk::Jwk, for_decrypt: bool) -> Result<Zeroizing<Vec<u8>>> {
-    let sw = crate::jwk::jwk_to_software_key(jwk)?;
-    if sw.algorithm() != kryptering::KeyAlgorithm::Rsa {
-        return Err(JoseError::Key("RSA JWK expected".into()));
-    }
-    if for_decrypt {
-        if !sw.has_private_key() {
-            return Err(JoseError::Key("JWK lacks RSA private components".into()));
-        }
-        sw.export_private().map_err(Into::into)
-    } else {
-        Ok(Zeroizing::new(sw.export_spki_der()?))
-    }
 }
 
 /// Encrypt plaintext using a JWK directly — the one-shot JWE encrypt API.
@@ -339,18 +157,35 @@ pub fn encrypt_with_jwk(
         .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_with_header(
+    encrypt_with_header_options_material(
         JoseHeader::for_jwe(alg, enc),
-        &key_bytes,
+        recipient_key(jwk, alg, false)?,
         plaintext,
         alg,
         enc,
+        &JweEncryptOptions::new(),
     )
 }
 
 /// Encrypt plaintext using a JWK and an explicit authenticated protected header.
 ///
+/// Refuse external additional authenticated data on the compact path.
+///
+/// The option is shared between serializations (`JweEncryptOptions` /
+/// `JweDecryptOptions` are used by both), so each front end has to say what it
+/// cannot do with it. Silent omission here would produce a token whose AAD
+/// input differs from the one the sender believed it authenticated.
+fn ensure_no_external_aad(external_aad: Option<&[u8]>) -> Result<()> {
+    if external_aad.is_some() {
+        return Err(JoseError::InvalidHeader(
+            "external additional authenticated data requires the JWE JSON serialization \u{2014} \
+             the compact form has no \"aad\" member (RFC 7516 \u{a7}7.1)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The key-management algorithm comes from `jwk.alg`, which must be set and
 /// match `header.alg`; `header.enc` must match `enc`. Enforces `Encrypt` for
 /// `dir` and `WrapKey` for AES key wrap and RSA-OAEP. All serialized protected
@@ -393,8 +228,179 @@ pub fn encrypt_with_jwk_header_options(
         .ok_or_else(|| JoseError::Key("JWK alg must be set for encrypt_with_jwk".into()))?;
     let alg = JweAlgorithm::from_str(jwk_alg_str)?;
     jwk.check_op(jwe_alg_encrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, false)?;
-    encrypt_with_header_options(header, &key_bytes, plaintext, alg, enc, opts)
+    encrypt_with_header_options_material(
+        header,
+        recipient_key(jwk, alg, false)?,
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
+
+/// The three PBES2 algorithms, as an allow-list.
+///
+/// A password has nothing that can pin an algorithm: a JWK carries `alg` and a password
+/// carries nothing, so the token header would otherwise name the key-management mode and
+/// that alone decides how the password is consumed. Restricting the list to the
+/// password family is what makes the substitution attack on `alg` structurally
+/// impossible here: a message claiming `dir` or `A128KW` is refused before the password
+/// reaches anything, because a password must never be handed to an algorithm that would
+/// use its bytes as a key.
+pub(crate) fn pbes2_algorithms() -> Vec<JweAlgorithm> {
+    vec![
+        JweAlgorithm::Pbes2Hs256A128kw,
+        JweAlgorithm::Pbes2Hs384A192kw,
+        JweAlgorithm::Pbes2Hs512A256kw,
+    ]
+}
+
+/// Encrypt a JWE Compact Serialization with a password (RFC 7518 §4.8).
+///
+/// `alg` must be one of the three PBES2 algorithms; anything else is refused rather
+/// than reinterpreted, because the alternatives would use the password's bytes directly
+/// as a key.
+///
+/// The iteration count is
+/// [`PBES2_DEFAULT_ITERATIONS`](crate::jwe::password::PBES2_DEFAULT_ITERATIONS) unless
+/// [`JweEncryptOptions::with_pbes2_iterations`] changes it — see that method for why
+/// raising it is spending someone else's CPU. The salt input is fresh per message and
+/// 16 octets long.
+///
+/// ```no_run
+/// use jose_rs::algorithm::{JweAlgorithm, JweEncryption};
+/// use jose_rs::jwe::{compact, Password};
+///
+/// let token = compact::encrypt_with_password(
+///     &Password::from_utf8("a passphrase"),
+///     b"payload",
+///     JweAlgorithm::Pbes2Hs256A128kw,
+///     JweEncryption::A128GCM,
+/// )
+/// .unwrap();
+/// ```
+///
+/// # Errors
+///
+/// [`crate::JoseError::Key`] for a non-PBES2 `alg` or an empty password,
+/// [`crate::JoseError::InvalidHeader`] for an iteration count below the floor, and the
+/// usual header/serialization errors.
+pub fn encrypt_with_password(
+    password: &crate::jwe::password::Password,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<String> {
+    encrypt_with_password_options(password, plaintext, alg, enc, &JweEncryptOptions::new())
+}
+
+/// [`encrypt_with_password`] with the caller's [`JweEncryptOptions`].
+pub fn encrypt_with_password_options(
+    password: &crate::jwe::password::Password,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<String> {
+    let header = JoseHeader::for_jwe(alg, enc);
+    encrypt_with_password_header_options(password, header, plaintext, alg, enc, opts)
+}
+
+/// [`encrypt_with_password`] with a caller-supplied header.
+///
+/// `p2s` and `p2c` are generated by the library and a header carrying either is refused,
+/// as they are for every algorithm: the salt is a nonce and the count is the recipient's
+/// work budget.
+pub fn encrypt_with_password_header(
+    password: &crate::jwe::password::Password,
+    header: JoseHeader,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+) -> Result<String> {
+    encrypt_with_password_header_options(
+        password,
+        header,
+        plaintext,
+        alg,
+        enc,
+        &JweEncryptOptions::new(),
+    )
+}
+
+/// [`encrypt_with_password_header`] with the caller's [`JweEncryptOptions`].
+pub fn encrypt_with_password_header_options(
+    password: &crate::jwe::password::Password,
+    header: JoseHeader,
+    plaintext: &[u8],
+    alg: JweAlgorithm,
+    enc: JweEncryption,
+    opts: &JweEncryptOptions,
+) -> Result<String> {
+    encrypt_with_header_options_material(
+        header,
+        internal::password_key(password, alg)?,
+        plaintext,
+        alg,
+        enc,
+        opts,
+    )
+}
+
+/// Decrypt a JWE Compact Serialization with a password.
+///
+/// The key-management algorithm cannot be pinned to the secret here (a password has no
+/// `alg`), so the pin is provided by the type instead: the allow-list is the three PBES2
+/// algorithms, so a message naming `dir`, `A128KW`, `RSA-OAEP-256` or an ECDH mode is
+/// refused before the password is offered to anything. Pass
+/// [`decrypt_with_password_options`] a narrower list to pin a single PBES2 variant.
+///
+/// A wrong password fails at the wrapped key's integrity check and is reported as such —
+/// PBES2 has no implicit rejection to preserve, since RFC 3394's wrap authenticates.
+///
+/// # Errors
+///
+/// As for [`decrypt_with_jwk`], plus the work-budget refusal: a `p2c` above
+/// [`JweDecryptOptions::pbes2_max_iterations`] is rejected before any derivation, so a
+/// sender cannot bill this process for CPU.
+pub fn decrypt_with_password(
+    password: &crate::jwe::password::Password,
+    token: &str,
+) -> Result<Vec<u8>> {
+    // Pin to the password family, and let nothing else in: the header's `alg` selects
+    // which PBES2 variant runs, which is harmless (each derives a different key), while
+    // a byte-key algorithm reaching a password is not harmless and is refused here.
+    let options = JweDecryptOptions::new(pbes2_algorithms(), all_enc_algorithms());
+    decrypt_with_password_options(password, token, &options)
+}
+
+/// [`decrypt_with_password`] with the caller's [`JweDecryptOptions`].
+///
+/// The options' algorithm allow-list is honoured as given, but a list containing
+/// anything outside the PBES2 family is narrowed to the family: this function's whole
+/// purpose is that a password is only ever consumed by a password-based algorithm.
+pub fn decrypt_with_password_options(
+    password: &crate::jwe::password::Password,
+    token: &str,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
+    let header = decode_header(token)?;
+    let alg = JweAlgorithm::from_str(&header.alg)?;
+    if !pbes2_algorithms().contains(&alg) {
+        return Err(JoseError::Key(format!(
+            "{} is not a password-based algorithm, so no password is offered to it; use the \
+             key APIs (RFC 7518 \u{a7}4.8)",
+            alg.as_str()
+        )));
+    }
+    // `options` is honoured exactly as the caller set it — content allow-list, plaintext
+    // limit, external AAD, `crit`, work budget. Nothing here narrows it, because the
+    // boundary does not need narrowing to hold: `alg` was just checked against the
+    // password family, `password_key` refuses a non-PBES2 algorithm, and `recover_cek`
+    // accepts a password only for PBES2. Three independent layers, none of them a
+    // silently overridden caller setting.
+    let key = internal::password_key(password, alg)?;
+    decrypt_with_options_material(&key, token, options)
 }
 
 /// Decrypt a JWE token using a JWK directly — the one-shot JWE decrypt API.
@@ -426,13 +432,29 @@ pub fn decrypt_with_jwk(jwk: &crate::jwk::Jwk, token: &str) -> Result<Vec<u8>> {
     }
 
     jwk.check_op(jwe_alg_decrypt_op(alg))?;
-    let key_bytes = jwk_to_jwe_key_bytes(jwk, alg, true)?;
+    let key = recipient_key(jwk, alg, true)?;
 
     // Pin the key-management algorithm to the JWK's alg. Content encryption
     // (`enc`) stays flexible — its key length is bound to the CEK size and
-    // re-validated in `recover_cek` — so we permit every supported `enc`.
+    // re-validated in the key-management layer — so we permit every supported
+    // `enc`.
     let options = JweDecryptOptions::new(vec![alg], all_enc_algorithms());
-    decrypt_with_options(&key_bytes, token, &options)
+    decrypt_with_options_material(&key, token, &options)
+}
+
+/// Decrypt a JWE and return the plaintext with the header the AEAD tag authenticated.
+///
+/// The protected header is included in the AEAD additional-authenticated-data, so the
+/// copy returned here is the one the tag covered — the distinction matters most when a
+/// caller is deciding *what the plaintext may be used for* from `zip`, `cty` or a
+/// private member, and a forged unprotected value would otherwise steer that decision.
+pub fn decrypt_with_jwk_authenticated(
+    jwk: &crate::jwk::Jwk,
+    token: &str,
+) -> Result<crate::Authenticated<Vec<u8>>> {
+    let plaintext = decrypt_with_jwk(jwk, token)?;
+    let protected = decode_header(token)?;
+    Ok(crate::Authenticated::new(plaintext, protected, Vec::new()))
 }
 
 /// Decrypt a JWE Compact Serialization string and return the plaintext.
@@ -449,113 +471,6 @@ pub fn decrypt(key: &[u8], token: &str) -> Result<Vec<u8>> {
     decrypt_with_options(key, token, &JweDecryptOptions::permissive())
 }
 
-/// Algorithm policy and plaintext-size limit for [`decrypt_with_options`].
-///
-/// Use [`JweDecryptOptions::new`] to pin an explicit allow-list of key
-/// management algorithms and content encryption algorithms. Tokens whose
-/// header advertises anything outside the allow-list are rejected before
-/// any cryptographic operation — the canonical defence against
-/// algorithm-substitution attacks when one key is reused across configs.
-#[derive(Debug, Clone, Default)]
-pub struct JweDecryptOptions {
-    allowed_alg: Vec<JweAlgorithm>,
-    allowed_enc: Vec<JweEncryption>,
-    allow_all: bool,
-    max_plaintext: Option<usize>,
-}
-
-impl JweDecryptOptions {
-    /// Construct options pinning an explicit allow-list.
-    pub fn new(allowed_alg: Vec<JweAlgorithm>, allowed_enc: Vec<JweEncryption>) -> Self {
-        Self {
-            allowed_alg,
-            allowed_enc,
-            allow_all: false,
-            max_plaintext: None,
-        }
-    }
-
-    /// Permit every algorithm the library supports. Used internally by
-    /// [`decrypt`] for backwards compatibility — new code should prefer
-    /// [`JweDecryptOptions::new`].
-    pub fn permissive() -> Self {
-        Self {
-            allowed_alg: Vec::new(),
-            allowed_enc: Vec::new(),
-            allow_all: true,
-            max_plaintext: None,
-        }
-    }
-
-    /// Limit returned plaintext to at most `bytes` bytes (inclusive).
-    ///
-    /// Zero permits only empty plaintext. By default there is no additional
-    /// plaintext limit; [`crate::MAX_TOKEN_BYTES`] still bounds the token.
-    /// This does not enable compression or change the algorithm policy.
-    /// Oversized ciphertext is rejected before decoding or key operations
-    /// when its length proves the plaintext cannot fit. CBC padding requires
-    /// up to one extra 16-byte block and an exact post-authentication check.
-    /// This bounds plaintext, not total process memory or key-operation cost.
-    ///
-    /// ```
-    /// use jose_rs::{jwe::{self, JweDecryptOptions}, JweAlgorithm, JweEncryption};
-    /// let options = JweDecryptOptions::new(
-    ///     vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM],
-    /// ).with_max_plaintext(1024);
-    /// let key = [7_u8; 32]; // Example only; generate a secret key in production.
-    /// let token = jwe::encrypt(&key, b"message", JweAlgorithm::Dir, JweEncryption::A256GCM)?;
-    /// assert_eq!(jwe::decrypt_with_options(&key, &token, &options)?, b"message");
-    /// # Ok::<(), jose_rs::JoseError>(())
-    /// ```
-    #[must_use]
-    pub fn with_max_plaintext(mut self, bytes: usize) -> Self {
-        self.max_plaintext = Some(bytes);
-        self
-    }
-
-    fn check_plaintext_size(&self, bytes: usize) -> Result<()> {
-        if self.max_plaintext.is_some_and(|limit| bytes > limit) {
-            return Err(JoseError::InvalidToken(
-                "plaintext exceeds configured maximum size".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn check(&self, alg: JweAlgorithm, enc: JweEncryption) -> Result<()> {
-        if self.allow_all {
-            return Ok(());
-        }
-        if !self.allowed_alg.contains(&alg) {
-            return Err(JoseError::UnsupportedAlgorithm(format!(
-                "JWE alg {} is not in the caller's allow-list",
-                alg.as_str()
-            )));
-        }
-        if !self.allowed_enc.contains(&enc) {
-            return Err(JoseError::UnsupportedAlgorithm(format!(
-                "JWE enc {} is not in the caller's allow-list",
-                enc.as_str()
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// Every content-encryption algorithm the library supports. Used by the
-/// JWK-first decrypt path, which pins `alg` to the JWK but leaves `enc`
-/// flexible (the CEK length is bound to `enc` and re-validated downstream).
-fn all_enc_algorithms() -> Vec<JweEncryption> {
-    vec![
-        JweEncryption::A128CbcHs256,
-        JweEncryption::A192CbcHs384,
-        JweEncryption::A256CbcHs512,
-        JweEncryption::A128GCM,
-        JweEncryption::A192GCM,
-        JweEncryption::A256GCM,
-    ]
-}
-
 /// Decrypt a JWE Compact Serialization token, enforcing the caller's
 /// algorithm allow-list.
 ///
@@ -568,7 +483,29 @@ pub fn decrypt_with_options(
     token: &str,
     options: &JweDecryptOptions,
 ) -> Result<Vec<u8>> {
+    decrypt_with_options_material(
+        &KeyMaterial::Bytes(zeroize::Zeroizing::new(key.to_vec())),
+        token,
+        options,
+    )
+}
+
+/// Shared compact-decrypt core for both key shapes.
+///
+/// The protected header is kept (not discarded as the raw-key path used to do)
+/// because key agreement reads the peer value `epk` from it — the
+/// integrity-protected one, which is the only place a peer key is believed.
+fn decrypt_with_options_material(
+    key: &KeyMaterial,
+    token: &str,
+    options: &JweDecryptOptions,
+) -> Result<Vec<u8>> {
     ensure_token_size(token)?;
+    // Symmetric with the emit side: a compact token cannot carry external
+    // additional authenticated data, so options that supply it mean the caller
+    // is holding the wrong serialization, not that the tag will simply fail.
+    ensure_no_external_aad(options.external_aad())?;
+
     // 1. Parse compact serialization.
     let parts: Vec<&str> = token.splitn(6, '.').collect();
     if parts.len() != 5 {
@@ -577,76 +514,40 @@ pub fn decrypt_with_options(
         ));
     }
 
-    let header_b64 = parts[0];
-    let encrypted_key_b64 = parts[1];
-    let iv_b64 = parts[2];
-    let ciphertext_b64 = parts[3];
-    let tag_b64 = parts[4];
+    let (header_b64, encrypted_key_b64, iv_b64, ciphertext_b64, tag_b64) =
+        (parts[0], parts[1], parts[2], parts[3], parts[4]);
 
-    // 2. Decode header.
-    let header_json = base64url::decode(header_b64)?;
-    let header: JoseHeader = serde_json::from_slice(&header_json)?;
+    // 2. Decode the protected header, apply the shared header policy, and
+    //    decode the remaining parts. The verbatim `header_b64` is kept for
+    //    use as additional authenticated data.
+    // The compact serialization exposes no header to the caller, so the
+    // parsed protected header is discarded here; the JSON serializations
+    // return it as authenticated metadata.
+    // RFC 7516 §7.1 defines no unprotected header member, so `alg` cannot
+    // legitimately come from anywhere but the protected header here.
+    let (envelope, protected) = parse_envelope(
+        header_b64,
+        None,
+        encrypted_key_b64,
+        iv_b64,
+        ciphertext_b64,
+        tag_b64,
+        options,
+    )?;
 
-    // RFC 7516 §4.1.3: the library does not implement content compression.
-    // Reject tokens declaring a `zip` member instead of silently returning
-    // the still-compressed bytes as plaintext.
-    if header.extra.contains_key("zip") {
-        return Err(JoseError::InvalidHeader(
-            "unsupported zip header: content compression is not supported".into(),
-        ));
-    }
+    // 3. Recover CEK.
+    let cek = recover_cek(
+        key,
+        envelope.alg,
+        envelope.enc,
+        &envelope.encrypted_key,
+        &protected,
+        options.pbes2_max_iterations(),
+    )?;
 
-    // RFC 7516 §4.1.13 / RFC 7515 §4.1.11: `crit` must be non-empty and may
-    // name only extensions the library understands — none are supported.
-    if let Some(crit) = &header.crit {
-        if crit.is_empty() {
-            return Err(JoseError::InvalidHeader(
-                "crit header must not be empty (RFC 7515 §4.1.11)".into(),
-            ));
-        }
-        return Err(JoseError::InvalidHeader(format!(
-            "unsupported crit extensions: {crit:?}"
-        )));
-    }
-
-    let alg = JweAlgorithm::from_str(&header.alg)?;
-    let enc_str = header
-        .enc
-        .as_deref()
-        .ok_or_else(|| JoseError::InvalidHeader("missing enc field".into()))?;
-    let enc = JweEncryption::from_str(enc_str)?;
-
-    // Enforce caller's allow-list before touching any key material.
-    options.check(alg, enc)?;
-
-    // For valid unpadded base64url this is the exact decoded length. Invalid
-    // encodings still fail in decode below. MAX_TOKEN_BYTES bounds arithmetic.
-    let ciphertext_len = ciphertext_b64.len() * 3 / 4;
-    let minimum_plaintext_len = match enc {
-        JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => ciphertext_len,
-        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
-            ciphertext_len.saturating_sub(16)
-        }
-    };
-    options.check_plaintext_size(minimum_plaintext_len)?;
-
-    // 3. Decode parts.
-    let encrypted_key = base64url::decode(encrypted_key_b64)?;
-    let iv = base64url::decode(iv_b64)?;
-    let ciphertext = base64url::decode(ciphertext_b64)?;
-    let tag = base64url::decode(tag_b64)?;
-
-    // 4. Recover CEK.
-    let cek = recover_cek(key, alg, enc, &encrypted_key)?;
-
-    // 5. Content decryption.
-    // AAD = ASCII(BASE64URL(header)).
-    let aad = header_b64.as_bytes();
-    let mut plaintext = Zeroizing::new(content_decrypt(enc, &cek, &iv, &ciphertext, &tag, aad)?);
-    // Exact CBC length is known only after authenticated padding removal.
-    // On rejection, wipe the authenticated plaintext instead of returning it.
-    options.check_plaintext_size(plaintext.len())?;
-    Ok(std::mem::take(&mut *plaintext))
+    // 4. Content decryption; AAD = ASCII(BASE64URL(header)).
+    let aad = envelope.header_b64.as_bytes();
+    internal::finish_decrypt(&envelope, &cek, aad, options)
 }
 
 /// Decode the protected header from a JWE compact token without decrypting.
@@ -660,718 +561,6 @@ pub fn decode_header(token: &str) -> Result<JoseHeader> {
     serde_json::from_slice(&header_json).map_err(Into::into)
 }
 
-// ---------------------------------------------------------------------------
-// Key management: produce CEK (encrypt side)
-// ---------------------------------------------------------------------------
-
-/// Returns `(cek, encrypted_key)`. For `dir`, `encrypted_key` is empty.
-///
-/// The CEK is returned wrapped in `Zeroizing` so its heap buffer is
-/// wiped when it goes out of scope — key material never lingers in
-/// the allocator after the encryption completes.
-fn produce_cek(
-    key: &[u8],
-    alg: JweAlgorithm,
-    enc: JweEncryption,
-) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
-    let cek_len = enc.cek_size();
-
-    match alg {
-        // Direct: the provided key *is* the CEK.
-        JweAlgorithm::Dir => {
-            if key.len() != cek_len {
-                return Err(JoseError::Key(format!(
-                    "dir: key length {} does not match required CEK size {}",
-                    key.len(),
-                    cek_len
-                )));
-            }
-            Ok((Zeroizing::new(key.to_vec()), Vec::new()))
-        }
-
-        // AES Key Wrap.
-        JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
-            check_kek_size(alg, key)?;
-            let kw_alg = jwe_alg_to_keywrap(alg)?;
-            let cek = Zeroizing::new(random_bytes(cek_len));
-            let wrapped =
-                kryptering::keywrap::wrap(kw_alg, key, &cek).map_err(JoseError::Crypto)?;
-            Ok((cek, wrapped))
-        }
-
-        // RSA-OAEP.
-        JweAlgorithm::RsaOaep256 => {
-            let pub_key = parse_rsa_public_key(key)?;
-            let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = Zeroizing::new(random_bytes(cek_len));
-            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                .map_err(JoseError::Crypto)?;
-            Ok((cek, encrypted))
-        }
-
-        #[cfg(feature = "deprecated")]
-        JweAlgorithm::RsaOaep => {
-            let pub_key = parse_rsa_public_key(key)?;
-            let kt_alg = jwe_alg_to_keytransport(alg)?;
-            let cek = Zeroizing::new(random_bytes(cek_len));
-            let encrypted = kryptering::keytransport::kt_encrypt(kt_alg, &pub_key, &cek, None)
-                .map_err(JoseError::Crypto)?;
-            Ok((cek, encrypted))
-        }
-
-        _ => Err(JoseError::UnsupportedAlgorithm(format!(
-            "key management algorithm {} not yet implemented",
-            alg.as_str()
-        ))),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Key management: recover CEK (decrypt side)
-// ---------------------------------------------------------------------------
-
-fn recover_cek(
-    key: &[u8],
-    alg: JweAlgorithm,
-    enc: JweEncryption,
-    encrypted_key: &[u8],
-) -> Result<Zeroizing<Vec<u8>>> {
-    let cek_len = enc.cek_size();
-
-    match alg {
-        JweAlgorithm::Dir => {
-            if !encrypted_key.is_empty() {
-                return Err(JoseError::InvalidToken(
-                    "dir: encrypted key must be empty".into(),
-                ));
-            }
-            if key.len() != cek_len {
-                return Err(JoseError::Key(format!(
-                    "dir: key length {} does not match required CEK size {}",
-                    key.len(),
-                    cek_len
-                )));
-            }
-            Ok(Zeroizing::new(key.to_vec()))
-        }
-
-        JweAlgorithm::A128KW | JweAlgorithm::A192KW | JweAlgorithm::A256KW => {
-            check_kek_size(alg, key)?;
-            let kw_alg = jwe_alg_to_keywrap(alg)?;
-            let cek = Zeroizing::new(
-                kryptering::keywrap::unwrap(kw_alg, key, encrypted_key)
-                    .map_err(JoseError::Crypto)?,
-            );
-            if cek.len() != cek_len {
-                return Err(JoseError::Key(format!(
-                    "unwrapped CEK length {} does not match expected {}",
-                    cek.len(),
-                    cek_len
-                )));
-            }
-            Ok(cek)
-        }
-
-        JweAlgorithm::RsaOaep256 => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
-
-        #[cfg(feature = "deprecated")]
-        JweAlgorithm::RsaOaep => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
-
-        _ => Err(JoseError::UnsupportedAlgorithm(format!(
-            "key management algorithm {} not yet implemented",
-            alg.as_str()
-        ))),
-    }
-}
-
-/// Shared RSA-OAEP CEK recovery (used by both RSA-OAEP-256 and the deprecated
-/// SHA-1 RSA-OAEP variant).
-///
-/// A random fallback CEK is generated before attempting the unwrap. Invalid
-/// OAEP ciphertexts and incorrectly sized results use that fallback so they
-/// continue through content authentication instead of returning early. This
-/// implicit-rejection pattern prevents callers from distinguishing an OAEP
-/// failure from a valid unwrap followed by failed content authentication.
-/// Trusted-key parsing and algorithm-configuration errors remain explicit.
-fn rsa_oaep_recover_cek(
-    key: &[u8],
-    alg: JweAlgorithm,
-    encrypted_key: &[u8],
-    cek_len: usize,
-) -> Result<Zeroizing<Vec<u8>>> {
-    let priv_key = parse_rsa_private_key(key)?;
-    let kt_alg = jwe_alg_to_keytransport(alg)?;
-
-    // Generate this unconditionally so successful and failed unwraps perform
-    // the same random-number generation work. It is zeroized if unused.
-    let fallback_cek = Zeroizing::new(random_bytes(cek_len));
-    let recovered = kryptering::keytransport::kt_decrypt(kt_alg, &priv_key, encrypted_key, None)
-        .map(Zeroizing::new);
-
-    match recovered {
-        Ok(cek) if cek.len() == cek_len => Ok(cek),
-        // `cek`, when present with the wrong length, and the fallback are both
-        // `Zeroizing`, so neither recovered nor dummy key material lingers.
-        Ok(_) | Err(_) => Ok(fallback_cek),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Content encryption
-// ---------------------------------------------------------------------------
-
-/// Encrypt plaintext and return `(iv, ciphertext, tag)`.
-fn content_encrypt(
-    enc: JweEncryption,
-    cek: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    match enc {
-        JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => {
-            aes_gcm_encrypt(cek, plaintext, aad)
-        }
-        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
-            aes_cbc_hs_encrypt(enc, cek, plaintext, aad)
-        }
-    }
-}
-
-/// Decrypt and return plaintext.
-fn content_decrypt(
-    enc: JweEncryption,
-    cek: &[u8],
-    iv: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>> {
-    match enc {
-        JweEncryption::A128GCM | JweEncryption::A192GCM | JweEncryption::A256GCM => {
-            aes_gcm_decrypt(cek, iv, ciphertext, tag, aad)
-        }
-        JweEncryption::A128CbcHs256 | JweEncryption::A192CbcHs384 | JweEncryption::A256CbcHs512 => {
-            aes_cbc_hs_decrypt(enc, cek, iv, ciphertext, tag, aad)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AES-GCM content encryption (RFC 7518 Section 5.3)
-// ---------------------------------------------------------------------------
-
-fn aes_gcm_encrypt(
-    cek: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    use aes_gcm::aead::AeadInPlace;
-    use aes_gcm::{KeyInit, Nonce};
-
-    let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let mut buffer = plaintext.to_vec();
-
-    let gcm_err =
-        |e: aes_gcm::Error| JoseError::Crypto(kryptering::Error::Crypto(format!("AES-GCM: {e}")));
-    let key_err = |e| JoseError::Key(format!("AES-GCM key init: {e}"));
-
-    let tag_bytes = match cek.len() {
-        16 => {
-            let cipher = aes_gcm::Aes128Gcm::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
-                .map_err(gcm_err)?
-        }
-        24 => {
-            use aes_gcm::aead::consts::U12;
-            let cipher =
-                aes_gcm::AesGcm::<aes::Aes192, U12>::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
-                .map_err(gcm_err)?
-        }
-        32 => {
-            let cipher = aes_gcm::Aes256Gcm::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .encrypt_in_place_detached(nonce, aad, &mut buffer)
-                .map_err(gcm_err)?
-        }
-        other => {
-            return Err(JoseError::Key(format!("invalid AES-GCM key size: {other}")));
-        }
-    };
-
-    Ok((nonce_bytes.to_vec(), buffer, tag_bytes.to_vec()))
-}
-
-fn aes_gcm_decrypt(
-    cek: &[u8],
-    iv: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>> {
-    use aes_gcm::aead::AeadInPlace;
-    use aes_gcm::{KeyInit, Nonce, Tag};
-
-    if iv.len() != 12 {
-        return Err(JoseError::InvalidToken(format!(
-            "AES-GCM IV must be 12 bytes, got {}",
-            iv.len()
-        )));
-    }
-    if tag.len() != 16 {
-        return Err(JoseError::InvalidToken(format!(
-            "AES-GCM tag must be 16 bytes, got {}",
-            tag.len()
-        )));
-    }
-
-    let nonce = Nonce::from_slice(iv);
-    let auth_tag = Tag::from_slice(tag);
-    let mut buffer = ciphertext.to_vec();
-
-    let auth_fail = || {
-        JoseError::Crypto(kryptering::Error::Crypto(
-            "AES-GCM authentication failed".into(),
-        ))
-    };
-    let key_err = |e| JoseError::Key(format!("AES-GCM key init: {e}"));
-
-    match cek.len() {
-        16 => {
-            let cipher = aes_gcm::Aes128Gcm::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
-                .map_err(|_| auth_fail())?;
-        }
-        24 => {
-            use aes_gcm::aead::consts::U12;
-            let cipher =
-                aes_gcm::AesGcm::<aes::Aes192, U12>::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
-                .map_err(|_| auth_fail())?;
-        }
-        32 => {
-            let cipher = aes_gcm::Aes256Gcm::new_from_slice(cek).map_err(key_err)?;
-            cipher
-                .decrypt_in_place_detached(nonce, aad, &mut buffer, auth_tag)
-                .map_err(|_| auth_fail())?;
-        }
-        other => {
-            return Err(JoseError::Key(format!("invalid AES-GCM key size: {other}")));
-        }
-    }
-
-    Ok(buffer)
-}
-
-// ---------------------------------------------------------------------------
-// AES-CBC-HS content encryption (RFC 7518 Section 5.2)
-// ---------------------------------------------------------------------------
-
-/// Returns `(aes_key_size_bytes, hmac_tag_truncation_bytes)` for each variant.
-fn cbc_hs_params(enc: JweEncryption) -> (usize, usize) {
-    match enc {
-        JweEncryption::A128CbcHs256 => (16, 16), // AES-128, HMAC-SHA-256, tag = 16
-        JweEncryption::A192CbcHs384 => (24, 24), // AES-192, HMAC-SHA-384, tag = 24
-        JweEncryption::A256CbcHs512 => (32, 32), // AES-256, HMAC-SHA-512, tag = 32
-        _ => unreachable!(),
-    }
-}
-
-fn aes_cbc_hs_encrypt(
-    enc: JweEncryption,
-    cek: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let (aes_key_size, tag_len) = cbc_hs_params(enc);
-    let expected_cek_len = aes_key_size * 2; // CEK = MAC_KEY || ENC_KEY
-
-    if cek.len() != expected_cek_len {
-        return Err(JoseError::Key(format!(
-            "AES-CBC-HS: expected {} byte CEK, got {}",
-            expected_cek_len,
-            cek.len()
-        )));
-    }
-
-    // Split CEK: first half is MAC key, second half is encryption key.
-    let mac_key = &cek[..aes_key_size];
-    let enc_key = &cek[aes_key_size..];
-
-    // Generate random 128-bit IV.
-    let mut iv = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut iv);
-
-    // PKCS#7 pad and encrypt with AES-CBC.
-    let ciphertext = aes_cbc_encrypt_raw(enc_key, &iv, plaintext)?;
-
-    // Compute HMAC tag: HMAC(AAD || IV || ciphertext || AAD_len_bits).
-    let tag = compute_cbc_hs_tag(enc, mac_key, aad, &iv, &ciphertext, tag_len)?;
-
-    Ok((iv.to_vec(), ciphertext, tag))
-}
-
-fn aes_cbc_hs_decrypt(
-    enc: JweEncryption,
-    cek: &[u8],
-    iv: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>> {
-    let (aes_key_size, tag_len) = cbc_hs_params(enc);
-    let expected_cek_len = aes_key_size * 2;
-
-    if cek.len() != expected_cek_len {
-        return Err(JoseError::Key(format!(
-            "AES-CBC-HS: expected {} byte CEK, got {}",
-            expected_cek_len,
-            cek.len()
-        )));
-    }
-
-    if iv.len() != 16 {
-        return Err(JoseError::InvalidToken(format!(
-            "AES-CBC IV must be 16 bytes, got {}",
-            iv.len()
-        )));
-    }
-
-    let mac_key = &cek[..aes_key_size];
-    let enc_key = &cek[aes_key_size..];
-
-    // Verify HMAC tag first (encrypt-then-MAC: verify before decrypting).
-    let expected_tag = compute_cbc_hs_tag(enc, mac_key, aad, iv, ciphertext, tag_len)?;
-
-    // Constant-time comparison.
-    if !constant_time_eq(tag, &expected_tag) {
-        return Err(JoseError::Crypto(kryptering::Error::Crypto(
-            "AES-CBC-HS authentication tag mismatch".into(),
-        )));
-    }
-
-    // Decrypt AES-CBC and remove PKCS#7 padding.
-    aes_cbc_decrypt_raw(enc_key, iv, ciphertext)
-}
-
-/// Compute the HMAC authentication tag for AES-CBC-HS (RFC 7518 Section 5.2.2).
-///
-/// Input to HMAC: AAD || IV || ciphertext || AAD_len_in_bits (big-endian u64).
-fn compute_cbc_hs_tag(
-    enc: JweEncryption,
-    mac_key: &[u8],
-    aad: &[u8],
-    iv: &[u8],
-    ciphertext: &[u8],
-    tag_len: usize,
-) -> Result<Vec<u8>> {
-    use hmac::Mac;
-
-    // AAD length in bits as big-endian u64.
-    let aad_len_bits = (aad.len() as u64) * 8;
-    let al = aad_len_bits.to_be_bytes();
-
-    let full_mac = match enc {
-        JweEncryption::A128CbcHs256 => {
-            let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(mac_key)
-                .map_err(|e| JoseError::Key(format!("HMAC init: {e}")))?;
-            mac.update(aad);
-            mac.update(iv);
-            mac.update(ciphertext);
-            mac.update(&al);
-            mac.finalize().into_bytes().to_vec()
-        }
-        JweEncryption::A192CbcHs384 => {
-            let mut mac = hmac::Hmac::<sha2::Sha384>::new_from_slice(mac_key)
-                .map_err(|e| JoseError::Key(format!("HMAC init: {e}")))?;
-            mac.update(aad);
-            mac.update(iv);
-            mac.update(ciphertext);
-            mac.update(&al);
-            mac.finalize().into_bytes().to_vec()
-        }
-        JweEncryption::A256CbcHs512 => {
-            let mut mac = hmac::Hmac::<sha2::Sha512>::new_from_slice(mac_key)
-                .map_err(|e| JoseError::Key(format!("HMAC init: {e}")))?;
-            mac.update(aad);
-            mac.update(iv);
-            mac.update(ciphertext);
-            mac.update(&al);
-            mac.finalize().into_bytes().to_vec()
-        }
-        _ => unreachable!(),
-    };
-
-    // Authentication tag = first tag_len bytes of HMAC output.
-    Ok(full_mac[..tag_len].to_vec())
-}
-
-// ---------------------------------------------------------------------------
-// Raw AES-CBC helpers (PKCS#7 padding)
-// ---------------------------------------------------------------------------
-
-fn aes_cbc_encrypt_raw(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
-
-    let padded = pkcs7_pad(plaintext, 16);
-    let padded_len = padded.len();
-    let mut buf = padded;
-
-    macro_rules! do_encrypt {
-        ($aes:ty) => {{
-            let enc = cbc::Encryptor::<$aes>::new_from_slices(key, iv)
-                .map_err(|e| JoseError::Key(format!("AES-CBC init: {e}")))?;
-            enc.encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
-                .map_err(|e| {
-                    JoseError::Crypto(kryptering::Error::Crypto(format!("AES-CBC encrypt: {e}")))
-                })?;
-        }};
-    }
-
-    match key.len() {
-        16 => do_encrypt!(aes::Aes128),
-        24 => do_encrypt!(aes::Aes192),
-        32 => do_encrypt!(aes::Aes256),
-        other => {
-            return Err(JoseError::Key(format!("invalid AES key size: {other}")));
-        }
-    }
-
-    Ok(buf)
-}
-
-fn aes_cbc_decrypt_raw(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-
-    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
-        return Err(JoseError::InvalidToken(
-            "AES-CBC ciphertext length must be a multiple of 16".into(),
-        ));
-    }
-
-    let mut buf = ciphertext.to_vec();
-
-    macro_rules! do_decrypt {
-        ($aes:ty) => {{
-            let dec = cbc::Decryptor::<$aes>::new_from_slices(key, iv)
-                .map_err(|e| JoseError::Key(format!("AES-CBC init: {e}")))?;
-            dec.decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
-                .map_err(|e| {
-                    JoseError::Crypto(kryptering::Error::Crypto(format!("AES-CBC decrypt: {e}")))
-                })?;
-        }};
-    }
-
-    match key.len() {
-        16 => do_decrypt!(aes::Aes128),
-        24 => do_decrypt!(aes::Aes192),
-        32 => do_decrypt!(aes::Aes256),
-        other => {
-            return Err(JoseError::Key(format!("invalid AES key size: {other}")));
-        }
-    }
-
-    pkcs7_unpad(&buf)
-}
-
-/// Apply PKCS#7 padding.
-fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
-    let pad_len = block_size - (data.len() % block_size);
-    let mut padded = Vec::with_capacity(data.len() + pad_len);
-    padded.extend_from_slice(data);
-    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
-    padded
-}
-
-/// Remove PKCS#7 padding.
-///
-/// The padding bytes are validated in constant time over a fixed 16-byte
-/// window — the decision about padding validity does not branch on the
-/// trailing-byte value once the input length is known. Mitigated further
-/// upstream by encrypt-then-MAC (HMAC is verified before this function
-/// runs), but kept constant-time as defence in depth.
-fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
-    use subtle::ConstantTimeEq;
-
-    const BLOCK: usize = 16;
-
-    // Structural checks on the *length* of the buffer are not secret-dependent
-    // (the attacker already controls the ciphertext length) and are safe to
-    // branch on.
-    if data.is_empty() || !data.len().is_multiple_of(BLOCK) {
-        return Err(JoseError::Crypto(kryptering::Error::Crypto(
-            "invalid PKCS#7 padding".into(),
-        )));
-    }
-
-    let pad_byte = *data.last().unwrap();
-    let pad_len_u = pad_byte as u16;
-
-    // `good` accumulates validity as 0xFF (valid) or 0x00 (invalid).
-    let mut good: u8 = 0xFF;
-
-    // Branch-free length check. pad_len is valid iff 1 <= pad_byte <= BLOCK.
-    //   is_zero_bit : 1 iff pad_byte == 0     (from top bit of (p - 1))
-    //   over_block_bit : 1 iff pad_byte > BLOCK  (top bit of ((BLOCK + 1) - 1 - p) after widening)
-    let is_zero_bit: u16 = pad_len_u.wrapping_sub(1) >> 15;
-    let over_block_bit: u16 = ((BLOCK as u16).wrapping_sub(pad_len_u)) >> 15;
-    let invalid_bit: u16 = is_zero_bit | over_block_bit;
-    let invalid_mask: u8 = 0u8.wrapping_sub(invalid_bit as u8);
-    good &= !invalid_mask;
-
-    // Compare every byte of the final block against pad_byte. For positions
-    // whose distance from the end is strictly less than pad_len, the byte
-    // MUST equal pad_byte; otherwise the comparison contributes nothing.
-    let last_block = &data[data.len() - BLOCK..];
-    for (i, &b) in last_block.iter().enumerate() {
-        // distance_from_end in [1, BLOCK].
-        let dist = (BLOCK - i) as u16;
-        // in_region mask: 0xFF iff dist <= pad_len, else 0x00. Branch-free:
-        // dist - pad_len - 1 underflows (top bit = 1) when dist <= pad_len.
-        let in_region_bit: u16 = (dist.wrapping_sub(pad_len_u).wrapping_sub(1)) >> 15;
-        let in_region: u8 = 0u8.wrapping_sub(in_region_bit as u8);
-
-        // ct_eq → Choice → 0/1 → full-byte mask.
-        let eq_bit = b.ct_eq(&pad_byte).unwrap_u8();
-        let eq_mask: u8 = 0u8.wrapping_sub(eq_bit);
-
-        // Contribution is 0xFF unless we're in the region AND the byte disagrees.
-        let contribution = !in_region | eq_mask;
-        good &= contribution;
-    }
-
-    if good != 0xFF {
-        return Err(JoseError::Crypto(kryptering::Error::Crypto(
-            "invalid PKCS#7 padding".into(),
-        )));
-    }
-    Ok(data[..data.len() - pad_byte as usize].to_vec())
-}
-
-// ---------------------------------------------------------------------------
-// Algorithm mapping helpers
-// ---------------------------------------------------------------------------
-
-/// Verify that the supplied Key Encryption Key is exactly the size
-/// demanded by the declared AES Key Wrap algorithm.
-///
-/// Prevents silent acceptance of a 32-byte key for `A128KW` (or similar
-/// mis-sized KEKs) if the underlying crypto backend does not validate
-/// strictly.
-fn check_kek_size(alg: JweAlgorithm, key: &[u8]) -> Result<()> {
-    let expected = match alg {
-        JweAlgorithm::A128KW => 16,
-        JweAlgorithm::A192KW => 24,
-        JweAlgorithm::A256KW => 32,
-        _ => return Ok(()),
-    };
-    if key.len() != expected {
-        return Err(JoseError::Key(format!(
-            "{}: KEK must be {} bytes, got {}",
-            alg.as_str(),
-            expected,
-            key.len()
-        )));
-    }
-    Ok(())
-}
-
-fn jwe_alg_to_keywrap(alg: JweAlgorithm) -> Result<kryptering::KeyWrapAlgorithm> {
-    use kryptering::{AesKeySize, KeyWrapAlgorithm};
-    match alg {
-        JweAlgorithm::A128KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes128)),
-        JweAlgorithm::A192KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes192)),
-        JweAlgorithm::A256KW => Ok(KeyWrapAlgorithm::AesKw(AesKeySize::Aes256)),
-        _ => Err(JoseError::UnsupportedAlgorithm(format!(
-            "{} is not a key wrap algorithm",
-            alg.as_str()
-        ))),
-    }
-}
-
-fn jwe_alg_to_keytransport(alg: JweAlgorithm) -> Result<kryptering::KeyTransportAlgorithm> {
-    use kryptering::{HashAlgorithm, KeyTransportAlgorithm, OaepConfig};
-    match alg {
-        #[cfg(feature = "deprecated")]
-        JweAlgorithm::RsaOaep => Ok(KeyTransportAlgorithm::RsaOaep(OaepConfig {
-            digest: HashAlgorithm::Sha1,
-            mgf_digest: HashAlgorithm::Sha1,
-        })),
-        JweAlgorithm::RsaOaep256 => Ok(KeyTransportAlgorithm::RsaOaep(OaepConfig {
-            digest: HashAlgorithm::Sha256,
-            mgf_digest: HashAlgorithm::Sha256,
-        })),
-        _ => Err(JoseError::UnsupportedAlgorithm(format!(
-            "{} is not a key transport algorithm",
-            alg.as_str()
-        ))),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RSA key parsing
-// ---------------------------------------------------------------------------
-
-fn parse_rsa_public_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
-    use rsa::pkcs8::DecodePublicKey;
-    use rsa::traits::PublicKeyParts;
-    let key = rsa::RsaPublicKey::from_public_key_der(der)
-        .map_err(|e| JoseError::Key(format!("failed to parse RSA public key DER: {e}")))?;
-    if key.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            key.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
-    kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
-}
-
-fn parse_rsa_private_key(der: &[u8]) -> Result<kryptering::SoftwareKey> {
-    use rsa::pkcs8::DecodePrivateKey;
-    use rsa::traits::PublicKeyParts;
-    let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
-        .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
-    if key.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            key.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
-    kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
-}
-
-// ---------------------------------------------------------------------------
-// Utility
-// ---------------------------------------------------------------------------
-
-fn random_bytes(len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut buf);
-    buf
-}
-
-/// Constant-time byte comparison to prevent timing attacks on HMAC tags.
-///
-/// Uses the audited `subtle` crate. The length-inequality branch is safe
-/// because HMAC tag lengths are fixed per `enc` algorithm — mismatched
-/// lengths indicate a malformed token, not a secret-dependent value.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    if a.len() != b.len() {
-        return false;
-    }
-    a.ct_eq(b).into()
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1380,6 +569,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::algorithm::{JweAlgorithm, JweEncryption};
+    use crate::jwe::internal::{jwe_alg_to_keytransport, parse_rsa_public_key};
 
     // -- dir + AES-GCM roundtrips --
 
@@ -1483,7 +673,7 @@ mod tests {
 
     fn generate_rsa_keypair() -> (Vec<u8>, Vec<u8>) {
         use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        let mut rng = rand::thread_rng();
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let public_key = rsa::RsaPublicKey::from(&private_key);
 
@@ -2000,54 +1190,6 @@ mod tests {
         let err = decrypt(&wrong_size, &token).unwrap_err().to_string();
         assert!(err.contains("A256KW"), "unexpected error: {err}");
         assert!(err.contains("32 bytes"), "unexpected error: {err}");
-    }
-
-    /// Phase 2: direct unit tests for the constant-time PKCS#7 unpad implementation.
-    #[test]
-    fn pkcs7_unpad_valid_cases() {
-        // Single block with one pad byte.
-        let mut block = [0u8; 16];
-        block[15] = 0x01;
-        assert_eq!(pkcs7_unpad(&block).unwrap().len(), 15);
-
-        // Single block, all padding (pad_len == 16).
-        let block = [16u8; 16];
-        assert_eq!(pkcs7_unpad(&block).unwrap(), b"");
-
-        // Two blocks, pad_len = 5.
-        let mut buf = [0xAAu8; 32];
-        for b in &mut buf[27..] {
-            *b = 5;
-        }
-        let out = pkcs7_unpad(&buf).unwrap();
-        assert_eq!(out.len(), 27);
-    }
-
-    #[test]
-    fn pkcs7_unpad_rejects_zero_pad() {
-        let block = [0u8; 16]; // pad_byte = 0 → pad_len = 0 → invalid
-        assert!(pkcs7_unpad(&block).is_err());
-    }
-
-    #[test]
-    fn pkcs7_unpad_rejects_pad_len_over_16() {
-        let mut block = [0u8; 16];
-        block[15] = 17; // claims pad_len 17 in a 16-byte block
-        assert!(pkcs7_unpad(&block).is_err());
-    }
-
-    #[test]
-    fn pkcs7_unpad_rejects_mismatched_padding() {
-        let mut block = [0u8; 16];
-        // Claim pad_len = 4 but only the last byte is 4; prior bytes are 0.
-        block[15] = 4;
-        assert!(pkcs7_unpad(&block).is_err());
-    }
-
-    #[test]
-    fn pkcs7_unpad_rejects_empty_and_non_block_aligned() {
-        assert!(pkcs7_unpad(&[]).is_err());
-        assert!(pkcs7_unpad(&[0u8; 15]).is_err());
     }
 
     /// J-09 regression: a JWE whose alg is not in the caller's allow-list is rejected.

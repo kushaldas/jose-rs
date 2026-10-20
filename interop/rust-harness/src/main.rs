@@ -5,7 +5,7 @@
 //!
 //! Subcommands:
 //!   gen-key        --alg <ALG> [--enc <ENC>] (stdin: -)      -> private JWK
-//!       (JWE: --alg A128KW|A192KW|A256KW, or --alg dir --enc <ENC>)
+//!       (JWE: --alg A128KW|A192KW|A256KW|A128GCMKW|..., or --alg dir --enc <ENC>)
 //!   export-pub                             (stdin: private JWK) -> public JWK
 //!   sign-compact   --alg <ALG>            (stdin: {jwk, payload_b64u, header?}) -> {jws}
 //!   verify-compact --alg <ALG>            (stdin: {jwk, jws}) -> {ok, payload_b64u, protected_header}
@@ -15,6 +15,21 @@
 //!       header with a duplicated member) that jose-rs's API cannot emit.
 //!   encrypt-compact --alg <ALG> --enc <ENC> (stdin: {jwk, plaintext_b64u, header?}) -> {jwe}
 //!   decrypt-compact --alg <ALG> --enc <ENC> (stdin: {jwk, jwe}) -> {ok, plaintext_b64u, protected_header}
+//!   encrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, plaintext_b64u, header?}) -> {jwe}
+//!       Like encrypt-compact but emits the RFC 7516 §7.2.2 flattened JSON
+//!       Serialization, as a JSON *string* in `jwe` (so the matrix plumbing is
+//!       identical for both formats).
+//!   decrypt-flattened --alg <ALG> --enc <ENC> (stdin: {jwk, jwe, aad_b64u?}) -> {ok, plaintext_b64u, protected_header}
+//!       `jwe` is the flattened JSON Serialization text. Both flattened
+//!       commands accept an optional `aad_b64u` (external additional
+//!       authenticated data, RFC 7516 §7.2.1).
+//!   encrypt-general  --alg <ALG> --enc <ENC> (stdin: {jwks, plaintext_b64u, header?, aad_b64u?}) -> {jwe}
+//!       RFC 7516 §7.2.1 general JSON Serialization, one recipient per entry of
+//!       `jwks`; `jwe` is again a JSON string.
+//!   decrypt-general  --alg <ALG> --enc <ENC> (stdin: {jwk, jwe, recipient?, aad_b64u?}) -> {ok, plaintext_b64u, recipient, protected_header, unprotected_header, recipient_count}
+//!       `recipient` names the array element to open; without it the harness
+//!       resolves the element from the key's own `kid`, which is what
+//!       `decrypt_general_with_jwk_by_kid` does.
 //!   sign-jwt       --alg <ALG>            (stdin: {jwk, claims}) -> JWT
 //!   verify-jwt     --alg <ALG>            (stdin: {jwk, jwt}) -> {ok, claims}
 //!
@@ -25,11 +40,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use jose_rs::algorithm::{JweAlgorithm, JweEncryption, JwsAlgorithm};
+use jose_rs::jwk::agreement::{agreement_key, peer_key};
 use jose_rs::jwk::Jwk;
 use jose_rs::jwt::{Claims, Validation};
 use jose_rs::JoseHeader;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 
 fn main() {
@@ -47,6 +63,11 @@ fn run() -> Result<()> {
         .clone();
     let mut alg: Option<String> = None;
     let mut enc: Option<String> = None;
+    let mut crv: Option<String> = None;
+    let mut pem_kind: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut iterations: Option<String> = None;
+    let mut hash: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -62,19 +83,76 @@ fn run() -> Result<()> {
         } else if a == "--enc" {
             enc = raw.get(i + 1).cloned();
             i += 2;
+        } else if let Some(rest) = a.strip_prefix("--crv=") {
+            crv = Some(rest.to_string());
+            i += 1;
+        } else if a == "--crv" {
+            crv = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--pem=") {
+            pem_kind = Some(rest.to_string());
+            i += 1;
+        } else if a == "--pem" {
+            pem_kind = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--password=") {
+            password = Some(rest.to_string());
+            i += 1;
+        } else if a == "--password" {
+            password = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--iterations=") {
+            iterations = Some(rest.to_string());
+            i += 1;
+        } else if a == "--iterations" {
+            iterations = raw.get(i + 1).cloned();
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--hash=") {
+            hash = Some(rest.to_string());
+            i += 1;
+        } else if a == "--hash" {
+            hash = raw.get(i + 1).cloned();
+            i += 2;
         } else {
             i += 1;
         }
     }
 
     match cmd.as_str() {
-        "gen-key" => gen_key(&require_alg(alg)?, enc.as_deref()),
+        "gen-key" => gen_key(&require_alg(alg)?, enc.as_deref(), crv.as_deref()),
         "export-pub" => export_pub(),
+        "agree" => agree(),
+        "derive-key" => derive_key(),
         "sign-compact" => sign_compact(&require_alg(alg)?),
         "verify-compact" => verify_compact(&require_alg(alg)?),
         "sign-compact-raw" => sign_compact_raw(&require_alg(alg)?),
         "encrypt-compact" => encrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
         "decrypt-compact" => decrypt_compact(&require_alg(alg)?, &require_enc(enc)?),
+        "encrypt-flattened" => encrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
+        "decrypt-flattened" => decrypt_flattened(&require_alg(alg)?, &require_enc(enc)?),
+        "encrypt-compact-password" => {
+            encrypt_compact_password(&require_alg(alg)?, &require_enc(enc)?)
+        }
+        "decrypt-compact-password" => {
+            decrypt_compact_password(&require_alg(alg)?, &require_enc(enc)?)
+        }
+        "encrypt-general" => encrypt_general(&require_alg(alg)?, &require_enc(enc)?),
+        "decrypt-general" => decrypt_general(&require_alg(alg)?, &require_enc(enc)?),
+        "import-pem" => import_pem(),
+        "thumbprint-uri" => thumbprint_uri(hash.as_deref()),
+        "import-cert" => import_cert(),
+        "import-pkcs8-encrypted" => import_pkcs8_encrypted(&require_password(password)?),
+        "export-pkcs8-encrypted" => {
+            export_pkcs8_encrypted(&require_password(password)?, iterations.as_deref())
+        }
+        "export-pem" => export_pem(&require_pem_kind(pem_kind)?),
+        "sign-pem" => sign_pem(&require_alg(alg)?),
+        "sign-flattened-jwk" => sign_flattened_jwk(&require_alg(alg)?),
+        "verify-flattened-jwk" => verify_flattened_jwk(),
+        "sign-general-jwk" => sign_general_jwk(),
+        "verify-general-jwk" => verify_general_jwk(),
+        "decode-jwkset-policy" => decode_jwkset_policy(),
+        "diagnose-jwks" => diagnose_jwks(),
         "sign-jwt" => sign_jwt(&require_alg(alg)?),
         "verify-jwt" => verify_jwt(&require_alg(alg)?),
         other => bail!("unknown subcommand: {other}"),
@@ -83,6 +161,10 @@ fn run() -> Result<()> {
 
 fn require_alg(alg: Option<String>) -> Result<String> {
     alg.ok_or_else(|| anyhow!("--alg is required"))
+}
+
+fn require_password(password: Option<String>) -> Result<String> {
+    password.ok_or_else(|| anyhow!("--password is required"))
 }
 
 fn require_enc(enc: Option<String>) -> Result<String> {
@@ -106,9 +188,11 @@ fn emit<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
-fn gen_key(alg: &str, enc: Option<&str>) -> Result<()> {
+fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
     let jwk: Jwk = match alg {
-        "A128KW" | "A192KW" | "A256KW" => jose_rs::jwk::generate_symmetric_for_alg(alg)?,
+        "A128KW" | "A192KW" | "A256KW" | "A128GCMKW" | "A192GCMKW" | "A256GCMKW" => {
+            jose_rs::jwk::generate_symmetric_for_alg(alg)?
+        }
         "dir" => {
             let enc = enc.ok_or_else(|| anyhow!("gen-key --alg dir requires --enc"))?;
             // generate_direct_symmetric pins alg="dir" and sizes k to the CEK.
@@ -136,8 +220,30 @@ fn gen_key(alg: &str, enc: Option<&str>) -> Result<()> {
             jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
         }
         "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
+        // RSA generation for the PEM checks: an RSA key is the one family whose PKCS#8
+        // export is long enough that a truncated armor read would still look plausible.
+        "RS256" => set_alg(jose_rs::jwk::generate_rsa(2048)?, "RS256"),
+        "ES256-RSA" => set_alg(jose_rs::jwk::generate_rsa(3072)?, "RS256"),
         "ES256" => set_alg(jose_rs::jwk::generate_ec("P-256")?, "ES256"),
         "ES384" => set_alg(jose_rs::jwk::generate_ec("P-384")?, "ES384"),
+        "ES512" => set_alg(jose_rs::jwk::generate_ec("P-521")?, "ES512"),
+        // An agreement recipient key: a key pair pinned for one of the ECDH-ES
+        // algorithms, with `use: enc` because RFC 7517 §4.2 says a key used for
+        // encryption must not claim `sig`. The curve is the caller's choice so one
+        // family covers several curves without new cell scaffolding, and the pin is
+        // what fixes the key-management mode. X25519 is the one curve whose key type
+        // differs (OKP rather than EC), so it needs its own generator.
+        "ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW" => {
+            let crv = crv.ok_or_else(|| anyhow!("gen-key --alg {alg} requires --crv"))?;
+            let mut jwk = if crv == "X25519" {
+                jose_rs::jwk::generate_x25519()?
+            } else {
+                jose_rs::jwk::generate_ec(crv)?
+            };
+            jwk.alg = Some(alg.to_string());
+            jwk.use_ = Some("enc".to_string());
+            jwk
+        }
         other => bail!("unsupported alg for gen-key: {other}"),
     };
     emit(&jwk)
@@ -153,6 +259,64 @@ fn export_pub() -> Result<()> {
     let jwk: Jwk = serde_json::from_str(&raw).context("parsing private JWK from stdin")?;
     let pubj = jwk.to_public_jwk();
     emit(&pubj)
+}
+
+#[derive(Deserialize)]
+struct AgreementInput {
+    /// Own half: must carry the private scalar.
+    own_jwk: Jwk,
+    /// Peer half: public material only.
+    peer_jwk: Jwk,
+    /// AlgorithmID for the Concat KDF (ASCII `enc` or `alg` value).
+    #[serde(default)]
+    alg_id: Option<String>,
+    #[serde(default)]
+    apu: Option<String>,
+    #[serde(default)]
+    apv: Option<String>,
+    /// Derived key length in octets; required with `alg_id`.
+    #[serde(default)]
+    key_len: Option<usize>,
+}
+
+/// Emit the raw ECDH shared secret `Z` for a key pair.
+///
+/// This exists so the Python side of the interop suite can compare this
+/// crate's agreement against another implementation's — RFC 7518 §C publishes
+/// both private keys and the resulting `Z`, so agreement, curve handling and
+/// point encoding all become comparable. It is a test probe, not a
+/// recommendation: `Z` is never a key, and `derive-key` below is what JOSE
+/// actually consumes.
+fn agree() -> Result<()> {
+    let input: AgreementInput =
+        serde_json::from_str(&read_stdin()?).context("parsing agreement input from stdin")?;
+    let own = agreement_key(&input.own_jwk).map_err(anyhow::Error::from)?;
+    let peer = peer_key(&input.peer_jwk).map_err(anyhow::Error::from)?;
+    let z = own.agree(&peer).map_err(anyhow::Error::from)?;
+    emit(&json!({
+        "z_b64u": URL_SAFE_NO_PAD.encode(z.as_slice()),
+        "curve": format!("{:?}", own.curve()),
+    }))
+}
+
+/// Run the JOSE Concat KDF (RFC 7518 §4.6.2) over an ECDH shared secret.
+fn derive_key() -> Result<()> {
+    let input: AgreementInput =
+        serde_json::from_str(&read_stdin()?).context("parsing derivation input from stdin")?;
+    let alg_id = input
+        .alg_id
+        .as_deref()
+        .context("derive-key needs alg_id (the ASCII enc or alg value)")?;
+    let key_len = input.key_len.context("derive-key needs key_len (octets)")?;
+    let own = agreement_key(&input.own_jwk).map_err(anyhow::Error::from)?;
+    let peer = peer_key(&input.peer_jwk).map_err(anyhow::Error::from)?;
+    let derived = own
+        .derive_key(&peer, alg_id, input.apu.as_deref(), input.apv.as_deref(), key_len)
+        .map_err(anyhow::Error::from)?;
+    emit(&json!({
+        "derived_b64u": URL_SAFE_NO_PAD.encode(derived.as_slice()),
+        "curve": format!("{:?}", own.curve()),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -272,6 +436,347 @@ fn verify_compact(alg: &str) -> Result<()> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// JWK-aware JSON serializations (flattened / general JWS)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SignFlattenedJwkInput {
+    jwk: Jwk,
+    payload_b64u: String,
+    /// Extra protected-header members (`kid`, `typ`, ...). `alg` comes from `--alg`.
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+    /// Per-signature unprotected `header` member. Not integrity-protected.
+    #[serde(default)]
+    unprotected: Option<Value>,
+    /// RFC 7797 unencoded payload: the caller supplies `b64: false` in `header`
+    /// and sets this flag so the option and the header cannot disagree.
+    #[serde(default)]
+    b64_false: bool,
+    /// Emit a detached JWS (no `payload` member).
+    #[serde(default)]
+    detach: bool,
+}
+
+#[derive(Serialize)]
+struct SignFlattenedOutput {
+    jws: jose_rs::jws::json::FlattenedJws,
+}
+
+fn sign_flattened_jwk(alg: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: SignFlattenedJwkInput = serde_json::from_str(&raw)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(input.payload_b64u.as_bytes())
+        .context("decoding payload_b64u")?;
+    let header = build_header(JoseHeader::new(alg), input.header)?;
+    let mut opts = jose_rs::jws::SignOptions::new();
+    if input.b64_false {
+        opts = opts.with_b64(false);
+    }
+    let jws = if input.detach {
+        jose_rs::jws::json::sign_flattened_detached_with_jwk_opts(
+            &input.jwk,
+            &payload,
+            &header,
+            input.unprotected,
+            &opts,
+        )?
+    } else {
+        jose_rs::jws::json::sign_flattened_with_jwk_opts(
+            &input.jwk,
+            &payload,
+            &header,
+            input.unprotected,
+            &opts,
+        )?
+    };
+    emit(&SignFlattenedOutput { jws })
+}
+
+#[derive(Deserialize)]
+struct VerifyFlattenedJwkInput {
+    jwk: Jwk,
+    jws: jose_rs::jws::json::FlattenedJws,
+    /// Out-of-band payload for a detached JWS.
+    #[serde(default)]
+    detached_payload_b64u: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VerifyPayloadOutput {
+    payload_b64u: String,
+}
+
+fn verify_flattened_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: VerifyFlattenedJwkInput = serde_json::from_str(&raw)?;
+    let detached = match &input.detached_payload_b64u {
+        Some(text) => Some(
+            URL_SAFE_NO_PAD
+                .decode(text.as_bytes())
+                .context("decoding detached_payload_b64u")?,
+        ),
+        None => None,
+    };
+    let payload = match detached {
+        Some(bytes) => jose_rs::jws::json::verify_flattened_detached_with_jwk(
+            &input.jwk,
+            &input.jws,
+            &bytes,
+        )?,
+        None => jose_rs::jws::json::verify_flattened_with_jwk(&input.jwk, &input.jws)?,
+    };
+    emit(&VerifyPayloadOutput {
+        payload_b64u: URL_SAFE_NO_PAD.encode(&payload),
+    })
+}
+
+#[derive(Deserialize)]
+struct GeneralJwkEntry {
+    jwk: Jwk,
+    /// The `alg` this signature's protected header carries; must match `jwk.alg`.
+    alg: String,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    unprotected: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct SignGeneralJwkInput {
+    entries: Vec<GeneralJwkEntry>,
+    payload_b64u: String,
+    #[serde(default)]
+    detach: bool,
+}
+
+#[derive(Serialize)]
+struct SignGeneralOutput {
+    jws: jose_rs::jws::json::GeneralJws,
+}
+
+fn sign_general_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: SignGeneralJwkInput = serde_json::from_str(&raw)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(input.payload_b64u.as_bytes())
+        .context("decoding payload_b64u")?;
+    // Headers must outlive the signer entries, so build them first and borrow.
+    let headers: Vec<JoseHeader> = input
+        .entries
+        .iter()
+        .map(|entry| build_header(JoseHeader::new(&entry.alg), entry.header.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    let entries: Vec<jose_rs::jws::json::GeneralJwkSigner<'_>> = input
+        .entries
+        .iter()
+        .zip(headers.iter())
+        .map(|(entry, header)| jose_rs::jws::json::GeneralJwkSigner {
+            jwk: &entry.jwk,
+            protected: header,
+            unprotected: entry.unprotected.clone(),
+            options: jose_rs::jws::SignOptions::new(),
+        })
+        .collect();
+    let jws = jose_rs::jws::json::sign_general_with_jwks(&entries, &payload, !input.detach)?;
+    emit(&SignGeneralOutput { jws })
+}
+
+#[derive(Deserialize)]
+struct VerifyGeneralJwkInput {
+    jwks: Vec<Jwk>,
+    jws: jose_rs::jws::json::GeneralJws,
+    #[serde(default)]
+    detached_payload_b64u: Option<String>,
+    /// "any" or "all" — the caller states the success policy, the library does not guess.
+    #[serde(default = "default_policy")]
+    policy: String,
+}
+
+fn default_policy() -> String {
+    "any".into()
+}
+
+#[derive(Serialize)]
+struct GeneralSignatureReport {
+    index: usize,
+    verified: bool,
+    attempted: bool,
+    key_index: Option<usize>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VerifyGeneralOutput {
+    payload_b64u: Option<String>,
+    results: Vec<GeneralSignatureReport>,
+}
+
+fn verify_general_jwk() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: VerifyGeneralJwkInput = serde_json::from_str(&raw)?;
+    let policy = match input.policy.as_str() {
+        "any" => jose_rs::jws::json::SignaturePolicy::Any,
+        "all" => jose_rs::jws::json::SignaturePolicy::All,
+        other => bail!("policy must be any or all, got {other:?}"),
+    };
+    let detached = match &input.detached_payload_b64u {
+        Some(text) => Some(
+            URL_SAFE_NO_PAD
+                .decode(text.as_bytes())
+                .context("decoding detached_payload_b64u")?,
+        ),
+        None => None,
+    };
+    let refs: Vec<&Jwk> = input.jwks.iter().collect();
+    let report = jose_rs::jws::json::verify_general_with_jwks(
+        &refs,
+        &input.jws,
+        detached.as_deref(),
+        &jose_rs::jws::VerifyOptions::new(),
+        policy,
+    )?;
+    emit(&VerifyGeneralOutput {
+        payload_b64u: report.payload.as_ref().map(|p| URL_SAFE_NO_PAD.encode(p)),
+        results: report
+            .results
+            .iter()
+            .map(|result| GeneralSignatureReport {
+                index: result.index,
+                verified: result.verified,
+                attempted: result.attempted,
+                key_index: result.key_index,
+                error: result.error.clone(),
+            })
+            .collect(),
+    })
+}
+
+
+// ---------------------------------------------------------------------------
+// JWK Set selection (bounded, explicit policy)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PolicyInput {
+    #[serde(default = "default_max_candidates")]
+    max_candidates: usize,
+    /// "refuse" | "try-when-unaddressable" | "try-all"
+    #[serde(default = "default_fallback")]
+    fallback: String,
+    #[serde(default)]
+    require_kid: bool,
+}
+
+fn default_max_candidates() -> usize {
+    64
+}
+
+fn default_fallback() -> String {
+    "try-when-unaddressable".into()
+}
+
+#[derive(Deserialize)]
+struct DecodeJwkSetPolicyInput {
+    jwks: jose_rs::jwk::JwkSet,
+    jwt: String,
+    #[serde(default)]
+    policy: Option<PolicyInput>,
+    #[serde(default)]
+    require_kid: bool,
+}
+
+#[derive(Serialize)]
+struct DecodeJwkSetOutput {
+    claims: jose_rs::jwt::Claims,
+}
+
+fn decode_jwkset_policy() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecodeJwkSetPolicyInput = serde_json::from_str(&raw)?;
+    let policy_input = input.policy.unwrap_or(PolicyInput {
+        max_candidates: default_max_candidates(),
+        fallback: default_fallback(),
+        require_kid: false,
+    });
+    let fallback = match policy_input.fallback.as_str() {
+        "refuse" => jose_rs::jwk::selection::Fallback::Refuse,
+        "try-when-unaddressable" => jose_rs::jwk::selection::Fallback::TryWhenUnaddressable,
+        "try-all" => jose_rs::jwk::selection::Fallback::TryAll,
+        other => bail!("unknown fallback policy {other:?}"),
+    };
+    let mut policy = jose_rs::jwk::selection::SelectionPolicy {
+        max_candidates: policy_input.max_candidates,
+        fallback,
+        require_kid: policy_input.require_kid,
+    };
+    if input.require_kid {
+        policy.require_kid = true;
+    }
+    let validation = jose_rs::jwt::Validation::default();
+    let claims = jose_rs::jwt::decode_with_jwkset_policy(
+        &input.jwks,
+        &input.jwt,
+        &validation,
+        &policy,
+    )?;
+    emit(&DecodeJwkSetOutput { claims })
+}
+
+#[derive(Deserialize)]
+struct DiagnoseJwksInput {
+    keys: Vec<Jwk>,
+}
+
+#[derive(Serialize)]
+struct EntryReport {
+    index: usize,
+    kid: Option<String>,
+    kty: Option<String>,
+    crv: Option<String>,
+    /// "usable" | "unsupported" | "invalid" — the three states, kept distinct.
+    status: String,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiagnoseJwksOutput {
+    entries: Vec<EntryReport>,
+}
+
+fn diagnose_jwks() -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DiagnoseJwksInput = serde_json::from_str(&raw)?;
+    let set = jose_rs::jwk::JwkSet { keys: input.keys };
+    let entries = set
+        .diagnostics()
+        .into_iter()
+        .map(|entry| {
+            let (status, reason) = match &entry.status {
+                jose_rs::jwk::selection::EntryStatus::Usable => ("usable", None),
+                jose_rs::jwk::selection::EntryStatus::Unsupported { reason } => {
+                    ("unsupported", Some(reason.clone()))
+                }
+                jose_rs::jwk::selection::EntryStatus::Invalid { reason } => {
+                    ("invalid", Some(reason.clone()))
+                }
+            };
+            EntryReport {
+                index: entry.index,
+                kid: entry.kid,
+                kty: entry.kty,
+                crv: entry.crv,
+                status: status.to_string(),
+                reason,
+            }
+        })
+        .collect();
+    emit(&DiagnoseJwksOutput { entries })
+}
+
+
 #[derive(Deserialize)]
 struct SignJwtInput {
     jwk: Jwk,
@@ -321,6 +826,13 @@ fn verify_jwt(alg: &str) -> Result<()> {
 struct EncryptCompactInput {
     jwk: Jwk,
     plaintext_b64u: String,
+    /// Optional external AAD (base64url), JSON serialization only.
+    #[serde(default)]
+    aad_b64u: Option<String>,
+    /// Private header parameters the caller implements, licensed to appear in
+    /// `crit` (ADR 0015).
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
     /// Optional extra protected-header members (e.g. `kid`, `tenant`).
     /// `alg` / `enc` are always taken from `--alg` / `--enc`.
     #[serde(default)]
@@ -351,9 +863,191 @@ fn encrypt_compact(alg: &str, enc: &str) -> Result<()> {
 }
 
 #[derive(Deserialize)]
+struct EncryptCompactPasswordInput {
+    password: String,
+    plaintext_b64u: String,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, serde_json::Value>>,
+    /// PBKDF2 iteration count to publish as `p2c`. Omitted means jose-rs's
+    /// default, which is far above the peer defaults and slow in a debug build; the
+    /// matrix passes a small value so the cell stays quick.
+    #[serde(default)]
+    p2c: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct DecryptCompactPasswordInput {
+    password: String,
+    jwe: String,
+}
+
+/// Encrypt with a password (RFC 7518 §4.8), compact serialization.
+///
+/// There is no `gen-key` counterpart: a password is not generated, it is supplied.
+/// The matrix therefore fixes one for both sides, exactly as the RFCs fix one for
+/// their examples.
+fn encrypt_compact_password(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptCompactPasswordInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    let enc_v = JweEncryption::from_str(enc)?;
+    let alg_v = JweAlgorithm::from_str(alg)?;
+    let header = build_header(JoseHeader::for_jwe(alg_v, enc_v), input.header)?;
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(p2c) = input.p2c {
+        opts = opts.with_pbes2_iterations(p2c);
+    }
+    let jwe = jose_rs::jwe::encrypt_with_password_header_options(
+        &jose_rs::jwe::Password::from_utf8(&input.password),
+        header,
+        &plaintext,
+        alg_v,
+        enc_v,
+        &opts,
+    )?;
+    emit(&EncryptCompactOutput { jwe })
+}
+
+/// Decrypt a password-protected compact JWE, reporting the protected header.
+///
+/// The header is the interesting output for these cells: `p2s` and `p2c` have to be
+/// *there* (authenticated) rather than in an unprotected member, and the matrix
+/// asserts their presence and types on the consuming side.
+fn decrypt_compact_password(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptCompactPasswordInput = serde_json::from_str(&raw)?;
+    let header = jose_rs::jwe::compact::decode_header(&input.jwe)?;
+    if header.alg != alg {
+        bail!("token alg {} does not match expected {alg}", header.alg);
+    }
+    if header.enc.as_deref() != Some(enc) {
+        bail!("token enc {:?} does not match expected {enc}", header.enc);
+    }
+    let plaintext = jose_rs::jwe::decrypt_with_password(
+        &jose_rs::jwe::Password::from_utf8(&input.password),
+        &input.jwe,
+    )?;
+    emit(&DecryptCompactOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        protected_header: header,
+        unprotected_header: None,
+    })
+}
+
+/// Encrypt into the flattened JSON Serialization (RFC 7516 §7.2.2).
+///
+/// Same header construction and same `jose_rs::jwe` policy as
+/// [`encrypt_compact`]; only the serialization differs, which is exactly the
+/// property the matrix is checking.
+fn encrypt_flattened(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptCompactInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    if input.jwk.alg.as_deref() != Some(alg) {
+        bail!("JWK alg {:?} does not match expected {alg}", input.jwk.alg);
+    }
+    let enc_v = JweEncryption::from_str(enc)?;
+    let header = build_header(
+        JoseHeader::for_jwe(JweAlgorithm::from_str(alg)?, enc_v),
+        input.header,
+    )?;
+    // External AAD, when the driver supplied any, is decoded once and handed
+    // to the encrypt options; the harness would otherwise have no way to prove
+    // the two implementations build the same AAD input.
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(aad_b64u) = &input.aad_b64u {
+        let aad = URL_SAFE_NO_PAD
+            .decode(aad_b64u.as_bytes())
+            .context("decoding aad_b64u")?;
+        opts = opts.with_external_aad(aad);
+    }
+    if let Some(crit) = &input.understood_crit {
+        opts = opts.with_understood_crit(crit.iter().cloned());
+    }
+    let jwe = jose_rs::jwe::json::encrypt_flattened_with_jwk_header_options(
+        &input.jwk, header, &plaintext, enc_v, &opts,
+    )?;
+    emit(&EncryptCompactOutput {
+        jwe: jwe.to_json()?,
+    })
+}
+
+/// Decrypt a flattened JSON Serialization.
+fn decrypt_flattened(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptCompactInput = serde_json::from_str(&raw)?;
+    let jwe = jose_rs::jwe::json::FlattenedJwe::from_json(&input.jwe)?;
+    let header = jose_rs::jwe::json::decode_header(&jwe)?
+        .ok_or_else(|| anyhow!("flattened JWE has no protected header"))?;
+    // RFC 7516 §7.2.1 lets `alg` ride in an unprotected member, so the harness
+    // sanity check looks at the union the recipient actually sees. jose-rs
+    // itself still demands the key's pinned `alg` matches; this only stops the
+    // driver blaming the wrong thing for a wiring mistake.
+    let reported_alg = match header.alg.as_str() {
+        "" => jwe.unprotected_alg().unwrap_or_default().to_string(),
+        other => other.to_string(),
+    };
+    if reported_alg != alg {
+        bail!("token alg {reported_alg} does not match expected {alg}");
+    }
+    if header.enc.as_deref() != Some(enc) {
+        bail!("token enc {:?} does not match expected {enc}", header.enc);
+    }
+    // With a caller-declared extension list the options API is the only one
+    // that can express it; without one, the plain entry point is used, so the
+    // harness exercises the same default policy a new caller would hit.
+    let plaintext = if let Some(crit) = &input.understood_crit {
+        let mut options = jose_rs::jwe::JweDecryptOptions::pinned_to_jwk(&input.jwk)?
+            .with_understood_crit(crit.iter().cloned());
+        if let Some(aad_b64u) = &input.aad_b64u {
+            options = options.with_external_aad(
+                URL_SAFE_NO_PAD
+                    .decode(aad_b64u.as_bytes())
+                    .context("decoding aad_b64u")?,
+            );
+        }
+        jose_rs::jwe::json::decrypt_flattened_with_jwk_options(&input.jwk, &jwe, &options)?
+    } else if let Some(aad_b64u) = &input.aad_b64u {
+        jose_rs::jwe::json::decrypt_flattened_with_jwk_and_aad(
+            &input.jwk,
+            &jwe,
+            &URL_SAFE_NO_PAD
+                .decode(aad_b64u.as_bytes())
+                .context("decoding aad_b64u")?,
+        )?
+    } else {
+        jose_rs::jwe::json::decrypt_flattened_with_jwk(&input.jwk, &jwe)?
+    };
+    let mut unprotected_header = serde_json::Map::new();
+    for location in [&jwe.unprotected, &jwe.header] {
+        if let Some(location) = location {
+            unprotected_header.extend(location.clone());
+        }
+    }
+    emit(&DecryptCompactOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        protected_header: header,
+        unprotected_header: (!unprotected_header.is_empty()).then_some(unprotected_header),
+    })
+}
+
+#[derive(Deserialize)]
 struct DecryptCompactInput {
     jwk: Jwk,
     jwe: String,
+    /// Optional external AAD (base64u), JSON serialization only.
+    #[serde(default)]
+    aad_b64u: Option<String>,
+    /// Private header parameters the caller implements, which `crit` may then
+    /// name (ADR 0015).
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -362,6 +1056,12 @@ struct DecryptCompactOutput {
     plaintext_b64u: String,
     /// The protected header as jose-rs parsed it (re-serialized).
     protected_header: JoseHeader,
+    /// The unprotected header members the message carried, merged
+    /// (`unprotected` then per-recipient `header`). Present only for a JSON
+    /// message that had them — the consumer read them as *data*, which is what
+    /// the `jwe-json-unprot` cells assert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unprotected_header: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
@@ -379,5 +1079,283 @@ fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
         ok: true,
         plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
         protected_header: header,
+        unprotected_header: None,
     })
+}
+
+
+// ---------------------------------------------------------------------------
+// General JWE JSON Serialization (RFC 7516 §7.2.1)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct EncryptGeneralInput {
+    jwks: Vec<Jwk>,
+    plaintext_b64u: String,
+    #[serde(default)]
+    aad_b64u: Option<String>,
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
+    #[serde(default)]
+    header: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct DecryptGeneralInput {
+    jwk: Jwk,
+    jwe: String,
+    /// Which `recipients` element to open. Absent means "resolve from the key's
+    /// own `kid`", exercising the library's kid selection.
+    #[serde(default)]
+    recipient: Option<usize>,
+    #[serde(default)]
+    aad_b64u: Option<String>,
+    #[serde(default)]
+    understood_crit: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct DecryptGeneralOutput {
+    ok: bool,
+    plaintext_b64u: String,
+    /// The element that was opened, so the driver can assert which recipient it
+    /// reached rather than trusting that the right one was chosen.
+    recipient: usize,
+    recipient_count: usize,
+    protected_header: JoseHeader,
+    /// The union of shared and per-recipient unprotected members that this
+    /// recipient computes its header from — reported as data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unprotected_header: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Encrypt to every key in `jwks`, each getting its own `recipients` element.
+fn encrypt_general(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: EncryptGeneralInput = serde_json::from_str(&raw)?;
+    let plaintext = URL_SAFE_NO_PAD
+        .decode(input.plaintext_b64u.as_bytes())
+        .context("decoding plaintext_b64u")?;
+    for jwk in &input.jwks {
+        if jwk.alg.as_deref() != Some(alg) {
+            bail!("JWK alg {:?} does not match expected {alg}", jwk.alg);
+        }
+    }
+    let enc_v = JweEncryption::from_str(enc)?;
+    let header = build_header(
+        JoseHeader::for_jwe(JweAlgorithm::from_str(alg)?, enc_v),
+        input.header,
+    )?;
+    let mut opts = jose_rs::jwe::JweEncryptOptions::new();
+    if let Some(aad_b64u) = &input.aad_b64u {
+        let aad = URL_SAFE_NO_PAD
+            .decode(aad_b64u.as_bytes())
+            .context("decoding aad_b64u")?;
+        opts = opts.with_external_aad(aad);
+    }
+    if let Some(crit) = &input.understood_crit {
+        opts = opts.with_understood_crit(crit.iter().cloned());
+    }
+    let refs: Vec<&Jwk> = input.jwks.iter().collect();
+    let jwe = jose_rs::jwe::general::encrypt_general_with_jwks_options(
+        &header, &refs, &plaintext, enc_v, &opts,
+    )?;
+    emit(&EncryptCompactOutput {
+        jwe: jwe.to_json()?,
+    })
+}
+
+/// Open one recipient of a general JSON Serialization.
+fn decrypt_general(alg: &str, enc: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: DecryptGeneralInput = serde_json::from_str(&raw)?;
+    let jwe = jose_rs::jwe::general::GeneralJwe::from_json(&input.jwe)?;
+
+    // Which element to open: the driver's choice, or the key's own `kid`.
+    let index = match input.recipient {
+        Some(index) => index,
+        None => jwe
+            .recipient_kids()
+            .iter()
+            .position(|kid| *kid == input.jwk.kid.as_deref())
+            .ok_or_else(|| anyhow!("no recipient carries this key's kid"))?,
+    };
+
+    // Wiring sanity for the driver only: jose-rs itself enforces the key's
+    // pinned `alg` against whatever the recipient's header claims.
+    let header = jwe
+        .peek_jose_header_for(index)?
+        .get("alg")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if header != alg {
+        bail!("recipient {index} alg {header} does not match expected {alg}");
+    }
+    let reported_enc = jwe
+        .peek_jose_header_for(index)?
+        .get("enc")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if reported_enc != enc {
+        bail!("recipient {index} enc {reported_enc} does not match expected {enc}");
+    }
+
+    let plaintext = if let Some(crit) = &input.understood_crit {
+        let mut options = jose_rs::jwe::JweDecryptOptions::pinned_to_jwk(&input.jwk)?
+            .with_understood_crit(crit.iter().cloned());
+        if let Some(aad_b64u) = &input.aad_b64u {
+            options = options.with_external_aad(
+                URL_SAFE_NO_PAD
+                    .decode(aad_b64u.as_bytes())
+                    .context("decoding aad_b64u")?,
+            );
+        }
+        jose_rs::jwe::general::decrypt_general_with_jwk_options(&input.jwk, &jwe, index, &options)?
+    } else if let Some(aad_b64u) = &input.aad_b64u {
+        jose_rs::jwe::general::decrypt_general_with_jwk_and_aad(
+            &input.jwk,
+            &jwe,
+            index,
+            &URL_SAFE_NO_PAD
+                .decode(aad_b64u.as_bytes())
+                .context("decoding aad_b64u")?,
+        )?
+    } else {
+        jose_rs::jwe::general::decrypt_general_with_jwk(&input.jwk, &jwe, index)?
+    };
+
+    let protected = jose_rs::jwe::general::decode_header(&jwe)?
+        .ok_or_else(|| anyhow!("general JWE carries no protected header"))?;
+    // Only the genuinely unauthenticated members, merged the way the recipient
+    // sees them: shared `unprotected` first, then this element's `header`.
+    let flat = jwe.flatten_for(index)?;
+    let mut merged = serde_json::Map::new();
+    if let Some(unprotected) = &flat.unprotected {
+        merged.extend(unprotected.clone());
+    }
+    if let Some(per_recipient) = &flat.header {
+        merged.extend(per_recipient.clone());
+    }
+    emit(&DecryptGeneralOutput {
+        ok: true,
+        plaintext_b64u: URL_SAFE_NO_PAD.encode(&plaintext),
+        recipient: index,
+        recipient_count: jwe.recipient_count(),
+        protected_header: protected,
+        unprotected_header: (!merged.is_empty()).then_some(merged),
+    })
+}
+
+/// Import a PEM document from stdin and print the resulting JWK as JSON.
+///
+/// The whole point of I0 interop is that the *label* decides the parse, so the harness
+/// does not take a format argument here either — it calls the same dispatching entry
+/// point a caller would.
+fn import_pem() -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::jwk_from_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("PEM import rejected: {e}"))?;
+    emit(&jwk)
+}
+
+/// Read a JWK from stdin and print it as PEM (`--pem=private` or `--pem=public`).
+fn export_pem(kind: &str) -> Result<()> {
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let text = match kind {
+        "private" => jose_rs::jwk::private_pem_from_jwk(&jwk),
+        "public" => jose_rs::jwk::public_pem_from_jwk(&jwk),
+        other => bail!("unknown --pem kind: {other}"),
+    }
+    .map_err(|e| anyhow!("PEM export refused: {e}"))?;
+    // Emitted verbatim: the library's PEM already ends in exactly one newline, and the
+    // byte-exact checks compare against other implementations' files.
+    print!("{text}");
+    Ok(())
+}
+
+/// Print the RFC 9278 thumbprint URI of a JWK read from stdin, verbatim.
+///
+/// Byte-for-byte comparison against `jose`'s `calculateJwkThumbprintUri` is the point, so this
+/// prints text rather than JSON: the URI *is* the artifact.
+fn thumbprint_uri(hash: Option<&str>) -> Result<()> {
+    use jose_rs::jwk::thumbprint::{ThumbprintHash, thumbprint_uri};
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let hash = match hash.unwrap_or("SHA-256") {
+        "SHA-256" | "sha-256" | "sha256" => ThumbprintHash::Sha256,
+        "SHA-384" | "sha-384" | "sha384" => ThumbprintHash::Sha384,
+        "SHA-512" | "sha-512" | "sha512" => ThumbprintHash::Sha512,
+        other => bail!("unknown --hash: {other}"),
+    };
+    print!("{}", thumbprint_uri(&jwk, hash)?);
+    Ok(())
+}
+
+/// Extract a certificate's subject public key from a PEM on stdin and print it as a JWK.
+///
+/// The peer script computes an RFC 7518 thumbprint from the printed JSON *itself*, in Python,
+/// so the comparison is independent of this crate's thumbprint code as well as of its DER walk.
+fn import_cert() -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::public_jwk_from_certificate_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("certificate extraction rejected: {e}"))?;
+    emit(&jwk)
+}
+
+/// Read an `ENCRYPTED PRIVATE KEY` PEM from stdin, decrypt with `--password`, print the JWK.
+///
+/// The password is a command-line argument because this is a test harness; a real CLI would
+/// prompt for it. The point of the command is that a key produced by another implementation's
+/// password-based exporter becomes a usable JWK here.
+fn import_pkcs8_encrypted(password: &str) -> Result<()> {
+    let text = read_stdin()?;
+    let jwk = jose_rs::jwk::jwk_from_encrypted_pkcs8_pem(
+        text.trim_end_matches('\n'),
+        &jose_rs::Password::from_utf8(password),
+    )
+    .map_err(|e| anyhow!("encrypted PKCS#8 import rejected: {e}"))?;
+    emit(&jwk)
+}
+
+/// Read a JWK from stdin and print it as an `ENCRYPTED PRIVATE KEY` PEM, verbatim.
+///
+/// `--iterations` overrides the (deliberately high) default count; peers are expected to
+/// compute whatever the file names, so raising it tests their patience rather than ours.
+fn export_pkcs8_encrypted(password: &str, iterations: Option<&str>) -> Result<()> {
+    let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
+    let scheme = match iterations {
+        Some(raw) => jose_rs::jwk::Pkcs8Encryption::Aes256CbcPbkdf2HmacSha256 {
+            iterations: raw.parse().map_err(|_| anyhow!("--iterations must be a number"))?,
+        },
+        None => jose_rs::jwk::Pkcs8Encryption::default(),
+    };
+    let text = jose_rs::jwk::encrypted_pkcs8_pem_from_jwk(
+        &jwk,
+        &jose_rs::Password::from_utf8(password),
+        &scheme,
+    )
+    .map_err(|e| anyhow!("encrypted PKCS#8 export refused: {e}"))?;
+    print!("{text}");
+    Ok(())
+}
+
+/// Import a private key from PEM, pin the caller's algorithm, sign stdin, print the JWS.
+///
+/// This is the check that matters for a key *file*: the bytes that came from another
+/// implementation's exporter have to work as a signing key, not merely parse.
+fn sign_pem(alg: &str) -> Result<()> {
+    let text = read_stdin()?;
+    let mut jwk = jose_rs::jwk::jwk_from_pem(text.trim_end_matches('\n'))
+        .map_err(|e| anyhow!("PEM import rejected: {e}"))?;
+    jwk.alg = Some(alg.to_string());
+    let header = jose_rs::JoseHeader::new(alg);
+    let token = jose_rs::jws::compact::sign_with_jwk(&jwk, b"pem interop", &header)
+        .map_err(|e| anyhow!("signing with an imported key failed: {e}"))?;
+    println!("{token}");
+    Ok(())
+}
+
+fn require_pem_kind(kind: Option<String>) -> Result<String> {
+    kind.ok_or_else(|| anyhow!("--pem=private|public is required"))
 }

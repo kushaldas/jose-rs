@@ -4,22 +4,22 @@ use crate::algorithm::JweEncryption;
 use crate::error::{JoseError, Result};
 use crate::jwk::convert::software_key_to_jwk;
 use crate::jwk::Jwk;
+use zeroize::Zeroizing;
+
+fn rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+    getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+}
 
 /// Generate an RSA key pair as a JWK.
 ///
 /// `bits` is the modulus size in bits (e.g. 2048, 3072, 4096). Must be at
-/// least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3.
+/// at least [`crate::MIN_RSA_BITS`] (2048) per RFC 7518 §3.3 and at most
+/// [`crate::MAX_RSA_BITS`] (8192) to bound key-generation work.
 pub fn generate_rsa(bits: usize) -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 
-    if bits < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "requested RSA key size {} bits is below the required minimum of {}",
-            bits,
-            crate::MIN_RSA_BITS
-        )));
-    }
-    let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits)
+    crate::ensure_rsa_bits(bits)?;
+    let private_key = rsa::RsaPrivateKey::new(&mut rng(), bits)
         .map_err(|e| JoseError::Key(format!("RSA keygen failed: {e}")))?;
     let der = private_key
         .to_pkcs8_der()
@@ -33,11 +33,12 @@ pub fn generate_rsa(bits: usize) -> Result<Jwk> {
 ///
 /// `curve` must be one of `"P-256"`, `"P-384"`, or `"P-521"`.
 pub fn generate_ec(curve: &str) -> Result<Jwk> {
+    use p256::elliptic_curve::Generate;
     use pkcs8::EncodePrivateKey;
 
     let sw = match curve {
         "P-256" => {
-            let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let der = sk
                 .to_pkcs8_der()
                 .map_err(|e| JoseError::Key(format!("P-256 PKCS#8 encode failed: {e}")))?;
@@ -47,7 +48,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
             )?
         }
         "P-384" => {
-            let sk = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p384::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let der = sk
                 .to_pkcs8_der()
                 .map_err(|e| JoseError::Key(format!("P-384 PKCS#8 encode failed: {e}")))?;
@@ -57,7 +58,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
             )?
         }
         "P-521" => {
-            let sk = p521::ecdsa::SigningKey::random(&mut rand::thread_rng());
+            let sk = p521::ecdsa::SigningKey::generate_from_rng(&mut rng());
             let secret = p521::SecretKey::from_slice(&sk.to_bytes())
                 .map_err(|e| JoseError::Key(format!("P-521 key conversion failed: {e}")))?;
             let der = secret
@@ -90,7 +91,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
 pub fn generate_ed25519() -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 
-    let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let sk = ed25519_dalek::SigningKey::generate(&mut rng());
     let der = sk
         .to_pkcs8_der()
         .map_err(|e| JoseError::Key(format!("Ed25519 PKCS#8 encode failed: {e}")))?;
@@ -99,13 +100,56 @@ pub fn generate_ed25519() -> Result<Jwk> {
     software_key_to_jwk(&sw)
 }
 
+/// Generate an X25519 key pair as an OKP JWK (RFC 8037 §2).
+///
+/// The public value is computed from the generated scalar rather than carried
+/// alongside it as an independent choice, so the pair this returns always passes
+/// the `d`-derives-`x` check that [`crate::jwk::jwk_to_software_key`] enforces on
+/// import. That asymmetry is deliberate: the check exists because agreement multiplies
+/// with `d` while a JWE publishes `x`, so a JWK with an inconsistent pair would
+/// publish one identity and agree with another.
+///
+/// # Errors
+///
+/// [`JoseError::Crypto`] if the scalar multiplication fails, which for a random
+/// scalar means the degenerate all-zero scalar (probability 2^-255) or a backend
+/// refusal of the operation.
+///
+/// ```
+/// # fn main() -> Result<(), jose_rs::JoseError> {
+/// let key = jose_rs::jwk::generate_x25519()?;
+/// assert_eq!(key.kty, "OKP");
+/// assert_eq!(key.crv.as_deref(), Some("X25519"));
+/// # Ok(())
+/// # }
+/// ```
+pub fn generate_x25519() -> Result<Jwk> {
+    // X25519 clamps the scalar internally, so no masking is applied here; the
+    // value must simply be uniformly random and 32 octets long.
+    let mut secret = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *secret).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
+    let public = kryptering::software::keyagreement::ecdh_x25519(
+        &crate::jwk::X25519_BASEPOINT,
+        &secret[..],
+    )?;
+    let sw = kryptering::SoftwareKey::from_x25519(Some(&secret[..]), &public)?;
+    software_key_to_jwk(&sw)
+}
+
 /// Generate a symmetric (oct) key as a JWK.
 ///
 /// `len` is the key length in bytes (e.g. 16 for AES-128, 32 for AES-256 / HS256).
 pub fn generate_symmetric(len: usize) -> Result<Jwk> {
-    use rand::RngCore;
     let mut key_bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
+    getrandom::fill(&mut key_bytes).map_err(|e| {
+        JoseError::Crypto(kryptering::Error::Crypto(format!(
+            "operating-system randomness failed: {e}"
+        )))
+    })?;
     let sw =
         kryptering::SoftwareKey::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &key_bytes)?;
     software_key_to_jwk(&sw)
@@ -121,9 +165,9 @@ pub fn generate_symmetric_for_alg(alg: &str) -> Result<Jwk> {
         "HS256" => (32, "sig"),
         "HS384" => (48, "sig"),
         "HS512" => (64, "sig"),
-        "A128KW" | "A128GCM" => (16, "enc"),
-        "A192KW" | "A192GCM" => (24, "enc"),
-        "A256KW" | "A256GCM" => (32, "enc"),
+        "A128KW" | "A128GCM" | "A128GCMKW" => (16, "enc"),
+        "A192KW" | "A192GCM" | "A192GCMKW" => (24, "enc"),
+        "A256KW" | "A256GCM" | "A256GCMKW" => (32, "enc"),
         "A128CBC-HS256" => (32, "enc"),
         "A192CBC-HS384" => (48, "enc"),
         "A256CBC-HS512" => (64, "enc"),
@@ -385,5 +429,219 @@ mod tests {
         let b = generate_mldsa(MlDsaVariant::MlDsa44).unwrap();
         assert_ne!(a.priv_, b.priv_);
         assert_ne!(a.pub_, b.pub_);
+    }
+}
+
+/// The EC curves this crate can generate, as a type rather than as a string.
+///
+/// The point of the enum is what it makes unrepresentable: there is no variant for secp256k1 or
+/// a Brainpool curve, so `KeyGeneration::Ec { curve: ... }` cannot *ask* for one and cannot
+/// silently fall back to P-256 when a caller typos one. Where a curve name arrives as text,
+/// `TryFrom<&str>` converts it and refuses naming what it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EcCurve {
+    /// NIST P-256 (`prime256v1`).
+    P256,
+    /// NIST P-384 (`secp384r1`).
+    P384,
+    /// NIST P-521 (`secp521r1`).
+    P521,
+}
+
+impl EcCurve {
+    /// The JWK `crv` value, which is also what [`generate_ec`] takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EcCurve::P256 => "P-256",
+            EcCurve::P384 => "P-384",
+            EcCurve::P521 => "P-521",
+        }
+    }
+}
+
+impl TryFrom<&str> for EcCurve {
+    type Error = JoseError;
+
+    /// Accept exactly the three supported names — case-sensitively, no aliases.
+    ///
+    /// `p256` and `P256` are refused rather than normalized: a caller who means a different
+    /// curve than they wrote should find out here, not in a signature failure later.
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        match value {
+            "P-256" => Ok(EcCurve::P256),
+            "P-384" => Ok(EcCurve::P384),
+            "P-521" => Ok(EcCurve::P521),
+            other => Err(JoseError::Key(format!(
+                "unsupported EC curve \"{other}\"; this crate generates P-256, P-384 and P-521"
+            ))),
+        }
+    }
+}
+
+/// A key to generate, as data.
+///
+/// The existing per-type functions ([`generate_rsa`], [`generate_ec`], [`generate_ed25519`],
+/// [`generate_x25519`], [`generate_symmetric`]) stay available and unchanged; this enum is for
+/// callers who carry the choice as configuration — a keystore, a CLI flag, a test matrix — and
+/// would otherwise write their own string dispatch.
+///
+/// It reuses those functions rather than reimplementing them, so every existing rule (the
+/// [`MIN_RSA_BITS`](crate::MIN_RSA_BITS) floor, the curve set, the `alg`/`use` pinning) applies
+/// here too. There is one addition: [`KeyGeneration::Oct`] accepts only key sizes that JOSE
+/// algorithms actually use, because "any length the caller typed" is not a policy.
+///
+/// There is deliberately **no post-quantum variant**. A variant behind `#[cfg(feature =
+/// "post-quantum")]` would make every caller's `match` non-exhaustive depending on a feature
+/// they may not control, which is a worse API than the two doors it would have unified;
+/// [`generate_mldsa`] remains the entry point for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyGeneration {
+    /// RSA key pair of the given modulus size in bits; at least 2048.
+    Rsa {
+        /// Modulus size in bits (2048, 3072, 4096, …).
+        bits: usize,
+    },
+    /// EC key pair on a supported curve.
+    Ec {
+        /// The curve.
+        curve: EcCurve,
+    },
+    /// Ed25519 key pair.
+    Ed25519,
+    /// X25519 key pair (key agreement; no signing).
+    X25519,
+    /// Symmetric key of a JOSE-sized length in bytes.
+    Oct {
+        /// 16, 24, 32, 48 or 64.
+        size: usize,
+    },
+}
+
+impl KeyGeneration {
+    /// The JWK `kty` the generated key will have.
+    pub fn key_type(&self) -> &'static str {
+        match self {
+            KeyGeneration::Rsa { .. } => "RSA",
+            KeyGeneration::Ec { .. } => "EC",
+            KeyGeneration::Ed25519 | KeyGeneration::X25519 => "OKP",
+            KeyGeneration::Oct { .. } => "oct",
+        }
+    }
+}
+
+/// Generate a key described by [`KeyGeneration`].
+///
+/// ```
+/// use jose_rs::jwk::{generate_key, EcCurve, KeyGeneration};
+///
+/// let key = generate_key(KeyGeneration::Ec {
+///     curve: EcCurve::try_from("P-256")?,
+/// })?;
+/// assert_eq!(key.kty, "EC");
+/// assert_eq!(key.crv.as_deref(), Some("P-256"));
+///
+/// // An unsupported size is refused, not rounded or truncated.
+/// let err = generate_key(KeyGeneration::Oct { size: 20 }).unwrap_err();
+/// assert!(err.to_string().contains("20"));
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for an RSA size below the minimum, or an `Oct` size outside
+/// 16/24/32/48/64, plus whatever the underlying generator reports.
+pub fn generate_key(options: KeyGeneration) -> Result<Jwk> {
+    match options {
+        KeyGeneration::Rsa { bits } => generate_rsa(bits),
+        KeyGeneration::Ec { curve } => generate_ec(curve.as_str()),
+        KeyGeneration::Ed25519 => generate_ed25519(),
+        KeyGeneration::X25519 => generate_x25519(),
+        KeyGeneration::Oct { size } => {
+            // The set is what JOSE's own algorithms use: AES-128/192/256 for key management and
+            // content encryption, and HMAC-SHA-384/512's MAC key sizes. Anything else would be a
+            // key no algorithm in this crate can use, so it is refused by name.
+            if !matches!(size, 16 | 24 | 32 | 48 | 64) {
+                return Err(JoseError::Key(format!(
+                    "symmetric key size {size} bytes is not one this crate can use (16, 24, 32, \
+                     48 or 64); generate_symmetric remains available if you deliberately need \
+                     another length"
+                )));
+            }
+            generate_symmetric(size)
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_generation_tests {
+    use super::*;
+
+    #[test]
+    fn curve_names_convert_exactly_or_not_at_all() {
+        assert_eq!(EcCurve::try_from("P-256").expect("ok"), EcCurve::P256);
+        assert_eq!(EcCurve::try_from("P-384").expect("ok"), EcCurve::P384);
+        assert_eq!(EcCurve::try_from("P-521").expect("ok"), EcCurve::P521);
+        // No aliases, no case folding: a near-miss is refused with the name it was given.
+        for bad in [
+            "p-256",
+            "P256",
+            "secp256k1",
+            "brainpoolP256r1",
+            "P-384 ",
+            "",
+        ] {
+            let err = EcCurve::try_from(bad).expect_err("must refuse");
+            assert!(err.to_string().contains(bad.trim()), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn every_variant_generates_the_key_type_it_promises() {
+        let cases = [
+            (KeyGeneration::Rsa { bits: 2048 }, "RSA", None),
+            (
+                KeyGeneration::Ec {
+                    curve: EcCurve::P256,
+                },
+                "EC",
+                Some("P-256"),
+            ),
+            (
+                KeyGeneration::Ec {
+                    curve: EcCurve::P384,
+                },
+                "EC",
+                Some("P-384"),
+            ),
+            (KeyGeneration::Ed25519, "OKP", Some("Ed25519")),
+            (KeyGeneration::X25519, "OKP", Some("X25519")),
+            (KeyGeneration::Oct { size: 32 }, "oct", None),
+        ];
+        for (options, kty, crv) in cases {
+            assert_eq!(options.key_type(), kty);
+            let key = generate_key(options).unwrap_or_else(|e| panic!("{options:?}: {e}"));
+            assert_eq!(key.kty, kty, "{options:?}");
+            assert_eq!(key.crv.as_deref(), crv, "{options:?}");
+            // Private material is present for the asymmetric types.
+            assert!(
+                key.d.is_some() || key.k.is_some() || key.priv_.is_some(),
+                "{options:?}: generated a key with no private part"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_sizes_are_refused_by_name() {
+        // Reuses generate_rsa's floor rather than restating a different one.
+        let err = generate_key(KeyGeneration::Rsa { bits: 1024 }).expect_err("too small");
+        assert!(err.to_string().contains("1024"), "{err}");
+        assert!(err.to_string().contains("2048"), "{err}");
+
+        for size in [0usize, 1, 15, 20, 31, 33, 65, 4096] {
+            let err = generate_key(KeyGeneration::Oct { size }).expect_err("bad size");
+            let message = err.to_string();
+            assert!(message.contains(&format!("{size}")), "{size}: {message}");
+            assert!(message.contains("generate_symmetric"), "{size}: {message}");
+        }
     }
 }

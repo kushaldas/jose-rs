@@ -13,10 +13,10 @@
 //! crate already signs/verifies with: RSA (RS/PS), EC (P-256/384/521 →
 //! ES256/384/512), and Ed25519 (EdDSA).
 
-use p521::elliptic_curve::sec1::ToEncodedPoint;
+use p521::elliptic_curve::sec1::ToSec1Point;
 use pkcs8::der::Decode;
 use pkcs8::spki::{DecodePublicKey, EncodePublicKey, SubjectPublicKeyInfoRef};
-use pkcs8::{DecodePrivateKey, EncodePrivateKey, ObjectIdentifier, PrivateKeyInfo};
+use pkcs8::{DecodePrivateKey, EncodePrivateKey, ObjectIdentifier, PrivateKeyInfoRef};
 use rsa::traits::PublicKeyParts;
 
 use crate::error::{JoseError, Result};
@@ -53,14 +53,7 @@ fn reject_pss_key(oid: ObjectIdentifier) -> Result<()> {
 }
 
 fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
-    if key.n().bits() < crate::MIN_RSA_BITS {
-        return Err(JoseError::Key(format!(
-            "RSA key size {} bits is below the required minimum of {}",
-            key.n().bits(),
-            crate::MIN_RSA_BITS
-        )));
-    }
-    Ok(())
+    crate::ensure_rsa_bits(key.n().bits() as usize)
 }
 
 /// Import a PKCS#8 DER-encoded private key into a [`Jwk`].
@@ -81,12 +74,16 @@ fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
 /// follow it with [`crate::jws::compact::sign_with_jwk`] after pinning
 /// `jwk.alg`.
 pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
-    let info = PrivateKeyInfo::from_der(der)
+    crate::ensure_key_der_size(der.len())?;
+    let info = PrivateKeyInfoRef::from_der(der)
         .map_err(|e| JoseError::Key(format!("invalid PKCS#8 DER: {e}")))?;
     let oid = info.algorithm.oid;
     reject_pss_key(oid)?;
 
     let sw = if oid == OID_RSA {
+        let raw = rsa::pkcs1::RsaPrivateKeyRef::from_der(info.private_key.as_bytes())
+            .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
+        crate::ensure_rsa_modulus_bytes(raw.modulus.as_bytes())?;
         let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
             .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
         let public = key.to_public_key();
@@ -132,6 +129,7 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
 /// follow it with [`crate::jws::compact::verify_with_jwk`] (which derives
 /// the algorithm from the token header) or build a verifier explicitly.
 pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
+    crate::ensure_key_der_size(der.len())?;
     let spki = SubjectPublicKeyInfoRef::from_der(der)
         .map_err(|e| JoseError::Key(format!("invalid SPKI DER: {e}")))?;
     let oid = spki.algorithm.oid;
@@ -165,6 +163,371 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
     };
 
     software_key_to_jwk(&sw)
+}
+
+/// Import a PKCS#1 (`RSAPrivateKey`) DER-encoded RSA private key into a [`Jwk`].
+///
+/// PKCS#1 (RFC 8017 §A.1.2) is the older, RSA-only sibling of PKCS#8 — still what
+/// `openssl genrsa` writes by default and what `SSH`'s `id_rsa` carries. It states no
+/// algorithm, because there is only one to state.
+///
+/// The bytes are not trusted for what they say. The DER is decoded, and then the key is
+/// **rebuilt and validated**: the primes must multiply to the modulus, `d·e ≡ 1 (mod p−1)`
+/// must hold for each prime, and the file's own CRT members (`exponent1`, `exponent2`,
+/// `coefficient`) must match what the key implies. A file whose CRT values disagree with
+/// its key is refused rather than quietly repaired, because a corrupt key that works after
+/// we substitute our own arithmetic is a corrupt key nobody notices. The result is then
+/// normalized to PKCS#8 and run through [`jwk_from_pkcs8_der`], so the modulus floor and
+/// the backend's own checks apply exactly as they do for any other RSA import — a PKCS#1
+/// file is not an easier way in.
+///
+/// **Multi-prime keys are refused by name.** PKCS#1 allows more than two primes (its
+/// `multiPrimeVersion`), RFC 7518's RSA JWK has `p` and `q` and no place for a third, and a
+/// JWK that silently dropped a prime factor would be a different key that verifies nothing.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, a multi-prime key, an internally inconsistent key,
+/// a modulus below [`crate::MIN_RSA_BITS`], and for any non-RSA input.
+pub fn jwk_from_pkcs1_der(der: &[u8]) -> Result<Jwk> {
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PrivateKeyParts;
+
+    crate::ensure_key_der_size(der.len())?;
+    let asn1 = rsa::pkcs1::RsaPrivateKeyRef::from_der(der)
+        .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSAPrivateKey DER: {e}")))?;
+    if asn1.other_prime_infos.is_some() {
+        return Err(JoseError::Key(
+            "multi-prime RSA keys are unsupported: RFC 7518 §6.3 gives an RSA JWK `p` and `q`              and no member for a third prime factor, so importing one would produce a different              key that verifies nothing"
+                .into(),
+        ));
+    }
+
+    crate::ensure_rsa_modulus_bytes(asn1.modulus.as_bytes())?;
+
+    let n = biguint(asn1.modulus.as_bytes());
+    let e = biguint(asn1.public_exponent.as_bytes());
+    let d = biguint(asn1.private_exponent.as_bytes());
+    let p = biguint(asn1.prime1.as_bytes());
+    let q = biguint(asn1.prime2.as_bytes());
+
+    // Rebuilding is the validation: `from_components` checks that the primes are prime
+    // factors of the modulus and that `d` is a valid inverse of `e` modulo each `p−1`,
+    // then recomputes the CRT members from the parts that survived.
+    let key = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| {
+        JoseError::Key(format!(
+            "PKCS#1 RSA key is not internally consistent ({err}); its members do not describe              one key"
+        ))
+    })?;
+    ensure_rsa_min_bits(&key.to_public_key())?;
+
+    // The file's own CRT members are checked against the rebuilt key instead of being
+    // trusted or discarded. Both alternatives lose information: trusting a wrong `dp`
+    // propagates it, and silently substituting a right one hides the corruption.
+    for (name, from_file, computed) in [
+        (
+            "exponent1 (dp)",
+            asn1.exponent1.as_bytes(),
+            key.dp().cloned(),
+        ),
+        (
+            "exponent2 (dq)",
+            asn1.exponent2.as_bytes(),
+            key.dq().cloned(),
+        ),
+        (
+            "coefficient (q^-1 mod p)",
+            asn1.coefficient.as_bytes(),
+            key.qinv().map(|qi| qi.retrieve()),
+        ),
+    ] {
+        let matches = match computed {
+            Some(value) => biguint(from_file) == value,
+            // The key we rebuilt has no CRT member to compare against only if it was built
+            // without precomputation, which `from_components` does not do. Treat its absence
+            // as a mismatch rather than as agreement.
+            None => false,
+        };
+        if !matches {
+            return Err(JoseError::Key(format!(
+                "PKCS#1 RSA key's {name} does not match its own key material; refusing to                  import a corrupt key or to substitute a computed one"
+            )));
+        }
+    }
+
+    let normalized = key
+        .to_pkcs8_der()
+        .map_err(|e| JoseError::Key(format!("PKCS#1 to PKCS#8 normalization failed: {e}")))?;
+    jwk_from_pkcs8_der(normalized.as_bytes())
+}
+
+/// Import a PKCS#1 (`RSAPublicKey`) DER-encoded RSA public key into a [`Jwk`].
+///
+/// The SPKI form (RFC 5280) wraps these same two integers in an `AlgorithmIdentifier`;
+/// PKCS#1 states them bare, which is why the entry point is separate — a bare
+/// `RSAPublicKey` carries no algorithm to dispatch on, and a caller who hands one to the
+/// SPKI importer should be told the difference rather than given a parse error.
+///
+/// The key is rebuilt (`RsaPublicKey::new`, which rejects an even or tiny public exponent)
+/// and then run through [`jwk_from_spki_der`] once wrapped, so the modulus floor and the
+/// backend's checks are the same ones every other RSA public import faces.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, an unusable public exponent, or a modulus below
+/// [`crate::MIN_RSA_BITS`].
+pub fn jwk_from_pkcs1_public_der(der: &[u8]) -> Result<Jwk> {
+    use rsa::pkcs8::EncodePublicKey;
+
+    crate::ensure_key_der_size(der.len())?;
+    let asn1 = rsa::pkcs1::RsaPublicKeyRef::from_der(der)
+        .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSAPublicKey DER: {e}")))?;
+    crate::ensure_rsa_modulus_bytes(asn1.modulus.as_bytes())?;
+    let key = rsa::RsaPublicKey::new(
+        biguint(asn1.modulus.as_bytes()),
+        biguint(asn1.public_exponent.as_bytes()),
+    )
+    .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSA public key: {e}")))?;
+    ensure_rsa_min_bits(&key)?;
+    let spki = key
+        .to_public_key_der()
+        .map_err(|e| JoseError::Key(format!("RSA SPKI wrapping failed: {e}")))?;
+    jwk_from_spki_der(spki.as_bytes())
+}
+
+/// A `BigUint` from big-endian octets, accepting the leading zero octet DER uses to keep
+/// a high bit from reading as a negative number.
+fn biguint(bytes: &[u8]) -> rsa::BoxedUint {
+    rsa::BoxedUint::from_be_slice_vartime(bytes)
+}
+
+/// Import a SEC1 (`ECPrivateKey`) DER-encoded EC private key into a [`Jwk`].
+///
+/// SEC1 (RFC 5915) is what `openssl ec -traditional` and many hardware tools write: the
+/// scalar, optionally the curve, optionally the public point. PKCS#8 wraps the same scalar
+/// and states the curve in an `AlgorithmIdentifier`, which is why the two need separate entry
+/// points — a SEC1 file's curve lives in a different place, and may not be in it at all.
+///
+/// Three refusals do the security work here, and all three are about not guessing:
+///
+/// * **No curve, no key.** `parameters` is OPTIONAL in this structure. A bare scalar with no
+///   curve is not a key, and the plausible-looking recovery — try each supported curve until
+///   one accepts the scalar — is exactly how a P-256 secret ends up being read as a P-384
+///   key. Such a file is refused.
+/// * **Explicit curve parameters are refused, not matched to the nearest named curve.**
+///   RFC 5915 lets a key carry the whole domain-parameter block (`field-id`, `a`, `b`, `base`,
+///   `order`, `cofactor`). Reading that as "close enough to P-256" would import a key whose
+///   curve is *asserted by the file* rather than named by an OID — and an anomalous or
+///   unsafely-generated curve is exactly what an attacker wants this crate to accept. Only
+///   named curves this crate supports are read.
+/// * **A supplied public point must match the scalar.** `publicKey` is OPTIONAL; when present
+///   it is compared against the point the secret derives. A file pairing a scalar with
+///   someone else's public point would yield a JWK whose public half verifies nothing, while
+///   both halves look valid in isolation.
+///
+/// What survives is normalized to PKCS#8 and run through [`jwk_from_pkcs8_der`], so curve
+/// dispatch, the backend's checks and JWK construction are the same code path every other EC
+/// import uses.
+///
+/// # Errors
+///
+/// [`JoseError::Key`] for malformed DER, absent or explicit curve parameters, an unsupported
+/// named curve, a scalar outside `[1, n−1]`, and a public point that disagrees with it.
+pub fn jwk_from_sec1_der(der: &[u8]) -> Result<Jwk> {
+    use sec1::der::Decode;
+    use sec1::EcParameters;
+
+    crate::ensure_key_der_size(der.len())?;
+    let parsed = sec1::EcPrivateKey::from_der(der).map_err(|err| sec1_decode_error(der, err))?;
+
+    let curve = match parsed.parameters {
+        Some(EcParameters::NamedCurve(oid)) => oid,
+        None => {
+            return Err(JoseError::Key(
+                "SEC1 EC private key carries no curve parameters; a scalar without its curve is                  not a key, and guessing one would silently change which key this is"
+                    .into(),
+            ));
+        }
+    };
+
+    // Per curve: build the scalar (which enforces the range and rejects zero), compare any
+    // public point the file asserts against the one it derives, then hand the normalized
+    // PKCS#8 form to the shared importer.
+    match curve {
+        OID_P256 => sec1_p256_import(der, parsed.public_key),
+        OID_P384 => sec1_p384_import(der, parsed.public_key),
+        OID_P521 => sec1_p521_import(der, parsed.public_key),
+        other => Err(JoseError::Key(format!(
+            "unsupported SEC1 curve OID {other}; this crate reads P-256, P-384 and P-521"
+        ))),
+    }
+}
+
+/// SEC1 import for one NIST curve, written concretely per curve rather than generically: the
+/// three bodies differ in which `SecretKey` type they use and how its public point is
+/// reached, and the generic form needed an `elliptic_curve` edge this crate does not have.
+macro_rules! sec1_import {
+    ($name:ident, $secret:ty, $point:path, $curve_name:literal) => {
+        fn $name(der: &[u8], asserted: Option<&[u8]>) -> Result<Jwk> {
+            use $point as _;
+
+            let secret = <$secret>::from_sec1_der(der).map_err(|e| {
+                // The decoder rejects an out-of-range scalar and an unusable embedded point
+                // through the same call, so the message names both possibilities rather than
+                // blaming the scalar for a point problem.
+                JoseError::Key(format!(
+                    "invalid SEC1 {} ECPrivateKey: the scalar must lie in [1, n-1] and any                      embedded public point must be a valid point on that curve ({e})",
+                    $curve_name
+                ))
+            })?;
+            // `to_sec1_der` round-trip: the scalar must survive re-encoding at its own
+            // width, which catches a representation the curve would otherwise silently
+            // reduce.
+            secret
+                .to_sec1_der()
+                .map_err(|e| JoseError::Key(format!("SEC1 scalar is not representable: {e}")))?;
+            ensure_point_matches(
+                secret.public_key().to_sec1_point(false).as_bytes(),
+                asserted,
+                $curve_name,
+            )?;
+            let normalized = secret.to_pkcs8_der().map_err(|e| {
+                JoseError::Key(format!(
+                    "SEC1 to PKCS#8 normalization failed for {}: {e}",
+                    $curve_name
+                ))
+            })?;
+            jwk_from_pkcs8_der(normalized.as_bytes())
+        }
+    };
+}
+
+sec1_import!(
+    sec1_p256_import,
+    p256::SecretKey,
+    p256::elliptic_curve::sec1::ToSec1Point,
+    "P-256"
+);
+sec1_import!(
+    sec1_p384_import,
+    p384::SecretKey,
+    p384::elliptic_curve::sec1::ToSec1Point,
+    "P-384"
+);
+
+/// P-521, whose key types need the same workaround the PKCS#8 importer uses for them.
+fn sec1_p521_import(der: &[u8], asserted: Option<&[u8]>) -> Result<Jwk> {
+    use p521::elliptic_curve::sec1::ToSec1Point;
+
+    let secret = p521::SecretKey::from_sec1_der(der).map_err(|e| {
+        JoseError::Key(format!(
+            "invalid SEC1 P-521 ECPrivateKey: the scalar must lie in [1, n-1] and any embedded              public point must be a valid point on that curve ({e})"
+        ))
+    })?;
+    let point = secret.public_key().to_sec1_point(false);
+    ensure_point_matches(point.as_bytes(), asserted, "P-521")?;
+    let normalized = secret.to_pkcs8_der().map_err(|e| {
+        JoseError::Key(format!(
+            "SEC1 to PKCS#8 normalization failed for P-521: {e}"
+        ))
+    })?;
+    jwk_from_pkcs8_der(normalized.as_bytes())
+}
+
+/// Compare the public point a file asserts with the one its scalar derives.
+fn ensure_point_matches(computed: &[u8], asserted: Option<&[u8]>, name: &str) -> Result<()> {
+    match asserted {
+        None => Ok(()),
+        Some(point) if point == computed => Ok(()),
+        Some(_) => Err(JoseError::Key(format!(
+            "{name} SEC1 key's public point does not match its private scalar; importing it              would produce a JWK whose public half verifies nothing"
+        ))),
+    }
+}
+
+/// Turn a SEC1 decode failure into the message that explains it.
+///
+/// `sec1` models only the named-curve form of `ECParameters`, so a file carrying RFC 5915's
+/// explicit domain-parameter block fails to decode as a generic ASN.1 error. This looks at the
+/// tag of the `parameters` member to say so — which can only ever turn a vague refusal into a
+/// specific one. Nothing is accepted here that the decoder did not accept.
+fn sec1_decode_error(der: &[u8], err: sec1::der::Error) -> JoseError {
+    if carries_explicit_parameters(der) {
+        return JoseError::Key(
+            "SEC1 keys with explicit curve parameters (RFC 5915's full domain-parameter block)              are unsupported: matching them to the nearest named curve would import a key whose              curve is asserted by the file rather than named by an OID. Export a named curve"
+                .into(),
+        );
+    }
+    JoseError::Key(format!("invalid SEC1 ECPrivateKey DER: {err}"))
+}
+
+/// Does the `parameters [0]` member hold a SEQUENCE (explicit parameters) rather than an OID?
+///
+/// A minimal walk over the top-level `ECPrivateKey` SEQUENCE, used *only* to classify a
+/// refusal it can already make. Anything it cannot read is reported as "not explicit
+/// parameters", so this function can never cause something to be accepted.
+fn carries_explicit_parameters(der: &[u8]) -> bool {
+    // ECPrivateKey ::= SEQUENCE { version, privateKey, parameters [0], publicKey [1] }
+    let Some(mut body) = der_sequence_body(der) else {
+        return false;
+    };
+    while !body.is_empty() {
+        let tag = body[0];
+        let Some((len, header)) = der_member_header(body) else {
+            return false;
+        };
+        // 0xa0 is the constructed `parameters [0]` member: an OID (named curve) or a
+        // SEQUENCE (explicit parameters) inside it.
+        if tag == 0xa0 {
+            return body
+                .get(header..header + len)
+                .is_some_and(|value| value.first() == Some(&0x30));
+        }
+        let Some(next) = header.checked_add(len) else {
+            return false;
+        };
+        let Some(rest) = body.get(next..) else {
+            return false;
+        };
+        body = rest;
+    }
+    false
+}
+
+/// The content of a DER `SEQUENCE`'s body, or `None` if this is not one.
+fn der_sequence_body(der: &[u8]) -> Option<&[u8]> {
+    if der.first() != Some(&0x30) {
+        return None;
+    }
+    let (len, header) = der_member_header(der)?;
+    der.get(header..header + len)
+}
+
+/// `(value length, header size)` of the DER member at the start of `buf`.
+///
+/// Only definite lengths are read; an indefinite length is not valid DER and is reported as
+/// unreadable, which the caller treats as "not explicit parameters".
+fn der_member_header(buf: &[u8]) -> Option<(usize, usize)> {
+    let (&_tag, rest) = buf.split_first()?;
+    let &first = rest.first()?;
+    if first & 0x80 == 0 {
+        return Some((first as usize, 2));
+    }
+    let octets = (first & 0x7f) as usize;
+    if octets == 0 || octets > 4 {
+        return None;
+    }
+    let len = read_length(rest.get(1..1 + octets)?)?;
+    Some((len, 2 + octets))
+}
+
+/// A length value from its big-endian length octets.
+fn read_length(octets: &[u8]) -> Option<usize> {
+    let mut acc: usize = 0;
+    for byte in octets {
+        acc = acc.checked_shl(8)?.checked_add(*byte as usize)?;
+    }
+    Some(acc)
 }
 
 // ── EC dispatch by named-curve OID ──────────────────────────────────────
@@ -230,7 +593,7 @@ fn ec_public_from_spki(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering
         OID_P521 => {
             let public = p521::PublicKey::from_public_key_der(der)
                 .map_err(|e| JoseError::Key(format!("invalid P-521 SPKI key: {e}")))?;
-            p521::ecdsa::VerifyingKey::from_sec1_bytes(public.to_encoded_point(false).as_bytes())
+            p521::ecdsa::VerifyingKey::from_sec1_bytes(public.to_sec1_point(false).as_bytes())
                 .map_err(|e| JoseError::Key(format!("invalid P-521 public point: {e}")))?;
             kryptering::SoftwareKey::from_spki_der(
                 kryptering::KeyAlgorithm::Ec(kryptering::EcCurve::P521),
@@ -245,6 +608,11 @@ fn ec_public_from_spki(der: &[u8], curve: ObjectIdentifier) -> Result<kryptering
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::elliptic_curve::Generate;
+
+    fn rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+        getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+    }
     use crate::header::JoseHeader;
     use pkcs8::spki::EncodePublicKey;
     use pkcs8::EncodePrivateKey;
@@ -271,7 +639,7 @@ mod tests {
 
     #[test]
     fn rsa_pkcs8_spki_roundtrip_rs256_and_ps256() {
-        let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let sk = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let pk = sk.to_public_key();
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = pk.to_public_key_der().unwrap();
@@ -284,7 +652,7 @@ mod tests {
 
     #[test]
     fn rsa_der_import_rejects_sub_2048_bits() {
-        let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap();
+        let sk = rsa::RsaPrivateKey::new(&mut rng(), 1024).unwrap();
         let pk = sk.to_public_key();
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = pk.to_public_key_der().unwrap();
@@ -306,28 +674,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rsa_pkcs8_rejects_an_oversized_modulus_before_key_validation() {
+        use pkcs8::der::{
+            asn1::{AnyRef, OctetStringRef, UintRef},
+            Encode,
+        };
+        use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfoRef};
+
+        // 1025 octets beginning with 1 is exactly 8193 significant bits. The
+        // remaining integers need not describe a valid key: the modulus policy must
+        // reject this borrowed ASN.1 view before RSA constructs or validates them.
+        let modulus = vec![1u8; crate::MAX_RSA_BITS / 8 + 1];
+        let one = [1u8];
+        let three = [3u8];
+        let raw = rsa::pkcs1::RsaPrivateKeyRef {
+            modulus: UintRef::new(&modulus).unwrap(),
+            public_exponent: UintRef::new(&three).unwrap(),
+            private_exponent: UintRef::new(&one).unwrap(),
+            prime1: UintRef::new(&one).unwrap(),
+            prime2: UintRef::new(&one).unwrap(),
+            exponent1: UintRef::new(&one).unwrap(),
+            exponent2: UintRef::new(&one).unwrap(),
+            coefficient: UintRef::new(&one).unwrap(),
+            other_prime_infos: None,
+        }
+        .to_der()
+        .unwrap();
+        let algorithm = AlgorithmIdentifierRef {
+            oid: OID_RSA,
+            parameters: Some(AnyRef::NULL),
+        };
+        let inner = OctetStringRef::new(&raw).unwrap();
+        let der = PrivateKeyInfoRef::new(algorithm, inner).to_der().unwrap();
+
+        let err = jwk_from_pkcs8_der(&der).unwrap_err().to_string();
+        assert!(err.contains("8193") && err.contains("maximum"), "{err}");
+    }
+
     /// Neither importer may silently discard the PSS-only identity or
     /// parameter restrictions, even when the inner RSA material is valid.
     #[test]
     fn rsa_pss_oid_wrapped_keys_rejected() {
         use pkcs8::der::{
-            asn1::{AnyRef, BitStringRef},
+            asn1::{AnyRef, BitStringRef, OctetStringRef},
             Encode,
         };
         use pkcs8::spki::SubjectPublicKeyInfoRef;
-        use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfo};
+        use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfoRef};
         use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 
-        let sk = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let sk = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
         let pk = sk.to_public_key();
 
         let pkcs1_priv = sk.to_pkcs1_der().unwrap();
         let pkcs1_pub = pk.to_pkcs1_der().unwrap();
-        let default_params = rsa::pkcs1::RsaPssParams::default().to_der().unwrap();
-        let sha256_params = rsa::pkcs1::RsaPssParams::new::<sha2::Sha256>(32)
+        let default_params = rsa::pkcs1::RsaPssParamsRef::default().to_der().unwrap();
+        let sha256_params = rsa::pkcs1::RsaPssParamsRef::new::<sha2::Sha256>(32)
             .to_der()
             .unwrap();
-        let sha512_params = rsa::pkcs1::RsaPssParams::new::<sha2::Sha512>(64)
+        let sha512_params = rsa::pkcs1::RsaPssParamsRef::new::<sha2::Sha512>(64)
             .to_der()
             .unwrap();
 
@@ -345,13 +751,10 @@ mod tests {
                 oid: OID_RSA_PSS,
                 parameters,
             };
-            let private = PrivateKeyInfo {
-                algorithm,
-                private_key: pkcs1_priv.as_bytes(),
-                public_key: None,
-            }
-            .to_der()
-            .unwrap();
+            let private_key = OctetStringRef::new(pkcs1_priv.as_bytes()).unwrap();
+            let private = PrivateKeyInfoRef::new(algorithm, private_key)
+                .to_der()
+                .unwrap();
             let public = SubjectPublicKeyInfoRef {
                 algorithm,
                 subject_public_key: BitStringRef::from_bytes(pkcs1_pub.as_bytes()).unwrap(),
@@ -371,7 +774,7 @@ mod tests {
 
     #[test]
     fn ec_p256_pkcs8_spki_roundtrip_es256() {
-        let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let sk = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = sk.verifying_key().to_public_key_der().unwrap();
         der_roundtrip("ES256", priv_der.as_bytes(), pub_der.as_bytes());
@@ -379,7 +782,7 @@ mod tests {
 
     #[test]
     fn ec_p384_pkcs8_spki_roundtrip_es384() {
-        let sk = p384::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let sk = p384::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = sk.verifying_key().to_public_key_der().unwrap();
         der_roundtrip("ES384", priv_der.as_bytes(), pub_der.as_bytes());
@@ -389,7 +792,7 @@ mod tests {
     fn ec_p521_pkcs8_spki_roundtrip_es512() {
         // p521 ECDSA keys don't implement the pkcs8/spki encoders directly;
         // round-trip the DER through the curve key types.
-        let secret = p521::SecretKey::random(&mut rand::thread_rng());
+        let secret = p521::SecretKey::generate_from_rng(&mut rng());
         let public = secret.public_key();
         let priv_der = secret.to_pkcs8_der().unwrap();
         let pub_der = public.to_public_key_der().unwrap();
@@ -399,7 +802,7 @@ mod tests {
     #[test]
     fn ed25519_pkcs8_spki_roundtrip_eddsa() {
         use pkcs8::EncodePrivateKey;
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let sk = ed25519_dalek::SigningKey::generate(&mut rng());
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = sk.verifying_key().to_public_key_der().unwrap();
         der_roundtrip("EdDSA", priv_der.as_bytes(), pub_der.as_bytes());
@@ -408,7 +811,7 @@ mod tests {
     /// A public-only JWK imported from SPKI must not carry private material.
     #[test]
     fn spki_import_has_no_private_material() {
-        let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let sk = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let pub_der = sk.verifying_key().to_public_key_der().unwrap();
         let jwk = jwk_from_spki_der(pub_der.as_bytes()).unwrap();
         assert!(jwk.d.is_none(), "SPKI import must not produce a private d");
@@ -419,7 +822,7 @@ mod tests {
     /// A PKCS#8 import carries the private scalar.
     #[test]
     fn pkcs8_import_has_private_material() {
-        let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let sk = p256::ecdsa::SigningKey::generate_from_rng(&mut rng());
         let priv_der = sk.to_pkcs8_der().unwrap();
         let jwk = jwk_from_pkcs8_der(priv_der.as_bytes()).unwrap();
         assert!(jwk.d.is_some(), "PKCS#8 import must produce a private d");

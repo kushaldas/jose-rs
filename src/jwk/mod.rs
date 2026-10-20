@@ -1,18 +1,44 @@
 //! JSON Web Key (JWK) types and serialization (RFC 7517).
 
+pub mod agreement;
+pub mod cert;
 pub mod convert;
+pub mod encrypted_pkcs8;
 pub mod generate;
 pub mod import;
+pub mod pem;
+pub mod selection;
 pub mod thumbprint;
 
+pub use cert::{
+    public_jwk_from_certificate_der, public_jwk_from_certificate_pem, MAX_CERTIFICATE_DER_BYTES,
+};
+/// The X25519 base point, shared by key generation and by the `d`-derives-`x`
+/// import check so the two cannot drift apart.
+pub(crate) use convert::X25519_BASEPOINT;
 pub use convert::{jwk_to_signature_key, jwk_to_software_key, software_key_to_jwk};
+pub use encrypted_pkcs8::{
+    encrypted_pkcs8_der_from_jwk, encrypted_pkcs8_pem_from_jwk, jwk_from_encrypted_pkcs8_der,
+    jwk_from_encrypted_pkcs8_der_with_options, jwk_from_encrypted_pkcs8_pem,
+    jwk_from_encrypted_pkcs8_pem_with_options, Pkcs8Encryption, Pkcs8ReadOptions,
+    PKCS8_DEFAULT_ITERATIONS, PKCS8_DEFAULT_MAX_ITERATIONS, PKCS8_MIN_ITERATIONS,
+};
 #[cfg(feature = "post-quantum")]
 pub use generate::{generate_composite_mldsa, generate_mldsa};
 pub use generate::{
-    generate_direct_symmetric, generate_ec, generate_ed25519, generate_rsa, generate_symmetric,
-    generate_symmetric_for_alg,
+    generate_direct_symmetric, generate_ec, generate_ed25519, generate_key, generate_rsa,
+    generate_symmetric, generate_symmetric_for_alg, generate_x25519, EcCurve, KeyGeneration,
 };
-pub use import::{jwk_from_pkcs8_der, jwk_from_spki_der};
+pub use import::{
+    jwk_from_pkcs1_der, jwk_from_pkcs1_public_der, jwk_from_pkcs8_der, jwk_from_sec1_der,
+    jwk_from_spki_der,
+};
+// The same type, reachable from the module that needs a password for it; see
+// `crate::password` for why it is shared.
+pub use crate::password::Password;
+pub use pem::{
+    jwk_from_pem, jwk_from_pkcs8_pem, jwk_from_spki_pem, private_pem_from_jwk, public_pem_from_jwk,
+};
 
 // Re-export JwkOp at the crate root pattern.
 
@@ -373,6 +399,61 @@ impl JwkSet {
     /// checks happen when a key is used. Malformed typed fields still fail.
     pub fn from_json(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(JoseError::from)
+    }
+
+    /// Parse a JWK Set under explicit import budgets.
+    ///
+    /// Identical to [`from_json`](Self::from_json) except that the document size is checked before
+    /// JSON parsing and the entry count is checked immediately after deserialization. The byte
+    /// limit is therefore the pre-allocation defence. The entry limit prevents an oversized set
+    /// from being returned or used, but the `Vec<Jwk>` has already been allocated by the time its
+    /// length is knowable; callers must set an appropriate byte limit to bound parsing memory.
+    ///
+    /// [`from_json`](Self::from_json) deliberately keeps its unbounded behaviour — a limit
+    /// that appears silently
+    /// is a breaking change wearing a compatibility mask. New code that ingests sets from
+    /// elsewhere should prefer this entry point.
+    ///
+    /// ```
+    /// use jose_rs::jwk::JwkSet;
+    /// use jose_rs::jwk::selection::SetLimits;
+    ///
+    /// let text = r#"{"keys":[{"kty":"oct","k":"AAAA"}]}"#;
+    /// let set = JwkSet::from_json_with_limits(text, &SetLimits::default())?;
+    /// assert_eq!(set.keys.len(), 1);
+    ///
+    /// let tiny = SetLimits { max_bytes: 8, ..Default::default() };
+    /// assert!(JwkSet::from_json_with_limits(text, &tiny).is_err());
+    /// # Ok::<(), jose_rs::JoseError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JoseError::Key`] when a budget is exceeded; otherwise as [`from_json`](Self::from_json).
+    pub fn from_json_with_limits(s: &str, limits: &selection::SetLimits) -> Result<Self> {
+        limits.check_bytes(s.len())?;
+        let set: Self = serde_json::from_str(s).map_err(JoseError::from)?;
+        limits.check_entries(set.keys.len())?;
+        Ok(set)
+    }
+
+    /// Describe every entry of this set, keeping identifiers and unusable entries.
+    ///
+    /// See [`selection::diagnostics`]; this is the same call as a method, because it is
+    /// something you ask *of* a set.
+    pub fn diagnostics(&self) -> Vec<selection::EntryDiagnostic> {
+        selection::diagnostics(self)
+    }
+
+    /// Resolve a token's `kid` into a bounded candidate list under a policy.
+    ///
+    /// See [`selection::select`].
+    pub fn select(
+        &self,
+        token_kid: Option<&str>,
+        policy: &selection::SelectionPolicy,
+    ) -> Result<selection::Selection<'_>> {
+        selection::select(self, token_kid, policy)
     }
 
     /// Serialize this JWK Set to a compact JSON string.

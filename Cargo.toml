@@ -1,49 +1,57 @@
 [package]
 name = "jose-rs"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
 repository = "https://github.com/kushaldas/jose-rs"
-homepage = "https://github.com/kushaldas/jose-rs"
 keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
 categories = ["cryptography", "authentication", "web-programming"]
 rust-version = "1.88"
+resolver = "3"
 exclude = ["examples/"]
 
 [features]
 default = ["pkcs11"]
-post-quantum = ["kryptering/post-quantum", "dep:ml-dsa", "dep:pkcs8-pq"]
+post-quantum = ["kryptering/post-quantum", "dep:ml-dsa"]
 deprecated = ["kryptering/legacy"]
 pkcs11 = ["kryptering/pkcs11"]
 
 [dependencies]
-kryptering = { version = "0.6", default-features = false, features = ["rustcrypto"] }
+kryptering = { version = "0.7", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 base64 = "0.22"
 thiserror = "2"
-aes-gcm = "0.10"
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-hmac = "0.12"
-sha2 = "0.10"
-rand = "0.8.6"
-rsa = "0.9"
-pkcs8 = "0.10"
-digest = "0.10"
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
-num-bigint-dig = { version = "0.8", features = ["prime"] }
-ecdsa = "0.16"
+aes-gcm = "0.11"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
+hmac = "0.13"
+sha2 = "0.11"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+rsa = "=0.10.0-rc.19"
+# `encryption` enables the PKCS#5 PBES2 path (I3). The dependency's own feature set is
+# this crate's scheme allow-list: PBKDF2-HMAC-SHA2 + AES-CBC, with SHA-1, DES and 3DES
+# each behind a separately named `-insecure`/`3des` feature we do not enable.
+pkcs8 = { version = "0.11", features = ["encryption"] }
+digest = "0.11"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+p521 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "3.0", features = ["pkcs8", "rand_core"] }
+ecdsa = "0.17"
 subtle = "2"
 zeroize = "1"
+# RFC 7468 PEM armour (I0). Already resolved in Cargo.lock as a dependency of
+# `der`/`pkcs8`, so this adds an explicit edge and no new package.
+pem-rfc7468 = { version = "1.0", features = ["alloc"] }
+# SEC1 `ECPrivateKey` (RFC 5915) structure (I2). Already resolved in Cargo.lock as a
+# dependency of the nist-curve crates, so this names an existing package rather than
+# adding one.
+sec1 = "0.8"
 
 # Post-quantum (optional)
 ml-dsa = { version = "0.1.0", features = ["pkcs8", "rand_core"], optional = true }
-pkcs8-pq = { package = "pkcs8", version = "0.11.0", optional = true }
 
 [[example]]
 name = "jwt_ml_dsa"
