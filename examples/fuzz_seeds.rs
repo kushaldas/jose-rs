@@ -235,6 +235,40 @@ fn key_file_seeds(root: &Path, out: &Path) -> Result<(), Box<dyn std::error::Err
     if let Ok(der) = fs::read(root.join("tests/fixtures/cert/rsa_cert.der")) {
         write_seed(out, "certificate_extract", "rsa-cert.der", &der)?;
     }
+
+    // Format-specific DER importers need successful inputs in their exact
+    // envelope. The source fixtures above are PKCS#8, so derive deterministic
+    // PKCS#1 and named-curve SEC1 encodings of those same public test keys.
+    // Without these, mutations only exercise the importers' format-mismatch
+    // exits and never reach component validation or normalization.
+    use pkcs8::DecodePrivateKey;
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+
+    if let Ok(rsa_pem) = fs::read_to_string(root.join("tests/fixtures/cert/rsa_key.pem")) {
+        let rsa_pkcs8 = pem_payload(&rsa_pem).ok_or("RSA fixture has no PEM payload")?;
+        let rsa_private = rsa::RsaPrivateKey::from_pkcs8_der(&rsa_pkcs8)?;
+        let rsa_private_der = rsa_private.to_pkcs1_der()?;
+        write_seed(
+            out,
+            "jwk_from_der",
+            "rsa-pkcs1-private.der",
+            rsa_private_der.as_bytes(),
+        )?;
+        let rsa_public_der = rsa::RsaPublicKey::from(&rsa_private).to_pkcs1_der()?;
+        write_seed(
+            out,
+            "jwk_from_der",
+            "rsa-pkcs1-public.der",
+            rsa_public_der.as_bytes(),
+        )?;
+    }
+
+    if let Ok(ec_pem) = fs::read_to_string(root.join("tests/fixtures/cert/ec256_key.pem")) {
+        let ec_pkcs8 = pem_payload(&ec_pem).ok_or("EC fixture has no PEM payload")?;
+        let ec_private = p256::SecretKey::from_pkcs8_der(&ec_pkcs8)?;
+        let ec_sec1 = ec_private.to_sec1_der()?;
+        write_seed(out, "jwk_from_der", "ec-p256-sec1.der", &ec_sec1)?;
+    }
     Ok(())
 }
 
@@ -497,18 +531,19 @@ fn jwe_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .replace("\"encrypted_key\":", "\"encrypted_key_x\":")
             .as_bytes(),
     )?;
-    // A general document whose shared header is duplicated into a recipient.
+    // A general document whose protected algorithm is duplicated into the
+    // recipient's unprotected `header`. This must reach the three-location
+    // collision check rather than becoming an ignored recipient member.
+    let mut recipient_collision = general.clone();
+    recipient_collision.recipients[0]
+        .header
+        .get_or_insert_default()
+        .insert("alg".into(), serde_json::Value::String("dir".into()));
     write_seed(
         out,
         "jwe_json_general",
         "recipient-unprotected-alg.json",
-        general_text
-            .replacen(
-                "\"recipients\":[{",
-                r#""recipients":[{"unprotected":{"alg":"dir"},"#,
-                1,
-            )
-            .as_bytes(),
+        recipient_collision.to_json()?.as_bytes(),
     )?;
     Ok(())
 }

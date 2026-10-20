@@ -492,6 +492,21 @@ fn replay_der_corpus() {
 }
 
 #[test]
+fn der_seeds_reach_pkcs1_and_sec1_importers() {
+    let rsa_private = named_seed("jwk_from_der", "rsa-pkcs1-private.der");
+    jose_rs::jwk::jwk_from_pkcs1_der(&rsa_private)
+        .expect("PKCS#1 private seed reaches its format-specific importer");
+
+    let rsa_public = named_seed("jwk_from_der", "rsa-pkcs1-public.der");
+    jose_rs::jwk::jwk_from_pkcs1_public_der(&rsa_public)
+        .expect("PKCS#1 public seed reaches its format-specific importer");
+
+    let ec_private = named_seed("jwk_from_der", "ec-p256-sec1.der");
+    jose_rs::jwk::jwk_from_sec1_der(&ec_private)
+        .expect("named-curve SEC1 seed reaches its format-specific importer");
+}
+
+#[test]
 fn replay_certificate_corpus() {
     let inputs = drive("certificate_extract", replay_certificate);
     assert!(inputs > 100, "only {inputs} inputs replayed");
@@ -606,6 +621,19 @@ fn general_jwe_valid_seed_reaches_authenticated_decryption() {
     let plaintext = jose_rs::jwe::general::decrypt_general_with_jwk(&dir_key_jwk(), &jwe, 0)
         .expect("general seed decrypts with the harness key");
     assert_eq!(plaintext, b"fuzz plaintext for the seed corpus");
+}
+
+#[test]
+fn general_jwe_recipient_collision_seed_is_rejected() {
+    let seed = named_seed("jwe_json_general", "recipient-unprotected-alg.json");
+    let text = std::str::from_utf8(&seed).expect("general collision seed is UTF-8");
+    let err =
+        GeneralJwe::from_json(text).expect_err("recipient alg must collide with the protected alg");
+    assert!(
+        err.to_string()
+            .contains("header parameter alg appears in both"),
+        "collision must be rejected for the intended reason: {err}"
+    );
 }
 
 #[test]
