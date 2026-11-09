@@ -246,7 +246,7 @@ fn key_file_seeds(root: &Path, out: &Path) -> Result<(), Box<dyn std::error::Err
 
     if let Ok(rsa_pem) = fs::read_to_string(root.join("tests/fixtures/cert/rsa_key.pem")) {
         let rsa_pkcs8 = pem_payload(&rsa_pem).ok_or("RSA fixture has no PEM payload")?;
-        let rsa_private = rsa::RsaPrivateKey::from_pkcs8_der(&rsa_pkcs8)?;
+        let rsa_private = rsa::PrivateKey::from_pkcs8_der(&rsa_pkcs8)?;
         let rsa_private_der = rsa_private.to_pkcs1_der()?;
         write_seed(
             out,
@@ -254,7 +254,7 @@ fn key_file_seeds(root: &Path, out: &Path) -> Result<(), Box<dyn std::error::Err
             "rsa-pkcs1-private.der",
             rsa_private_der.as_bytes(),
         )?;
-        let rsa_public_der = rsa::RsaPublicKey::from(&rsa_private).to_pkcs1_der()?;
+        let rsa_public_der = rsa::PublicKey::from(&rsa_private).to_pkcs1_der()?;
         write_seed(
             out,
             "jwk_from_der",

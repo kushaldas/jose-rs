@@ -674,8 +674,8 @@ mod tests {
     fn generate_rsa_keypair() -> (Vec<u8>, Vec<u8>) {
         use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
         let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public_key = rsa::RsaPublicKey::from(&private_key);
+        let private_key = rsa::PrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = rsa::PublicKey::from(&private_key);
 
         let pub_der = public_key.to_public_key_der().unwrap();
         let priv_der = private_key.to_pkcs8_der().unwrap();

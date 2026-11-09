@@ -4,6 +4,21 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-09
+
+### Changed
+
+- Raised the minimum supported Rust version from 1.88 to 1.89. Users on Rust
+  1.88 must stay on jose-rs 0.10.x. The new floor allows AES 0.9.4. See ADR 0041.
+- Updated Kryptering to 0.7.1, RSA to stable 0.10.0, base64 to 0.23.1,
+  and compatible direct and transitive dependencies. Updated the interop
+  harness lockfile to match.
+
+### Security
+
+- Updated `crypto-bigint` and `ctutils` to patched releases, clearing their
+  RustSec advisories. `cargo audit --deny warnings` passes with the existing
+  documented exception for the unresolved RSA timing advisory.
 
 ## [0.10.0] - 2026-10-20
 

@@ -414,7 +414,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.10.0", features = ["post-quantum"] }
+jose-rs = { version = "0.11.0", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the optional `ml-dsa` crate plus kryptering's

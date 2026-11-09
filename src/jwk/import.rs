@@ -52,8 +52,8 @@ fn reject_pss_key(oid: ObjectIdentifier) -> Result<()> {
     Ok(())
 }
 
-fn ensure_rsa_min_bits(key: &rsa::RsaPublicKey) -> Result<()> {
-    crate::ensure_rsa_bits(key.n().bits() as usize)
+fn ensure_rsa_min_bits(key: &rsa::PublicKey) -> Result<()> {
+    crate::ensure_rsa_bits(key.n().bit_width() as usize)
 }
 
 /// Import a PKCS#8 DER-encoded private key into a [`Jwk`].
@@ -84,7 +84,7 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
         let raw = rsa::pkcs1::RsaPrivateKeyRef::from_der(info.private_key.as_bytes())
             .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
         crate::ensure_rsa_modulus_bytes(raw.modulus.as_bytes())?;
-        let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
+        let key = rsa::PrivateKey::from_pkcs8_der(der)
             .map_err(|e| JoseError::Key(format!("invalid RSA PKCS#8 key: {e}")))?;
         let public = key.to_public_key();
         ensure_rsa_min_bits(&public)?;
@@ -136,7 +136,7 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
     reject_pss_key(oid)?;
 
     let sw = if oid == OID_RSA {
-        let key = rsa::RsaPublicKey::from_public_key_der(der)
+        let key = rsa::PublicKey::from_public_key_der(der)
             .map_err(|e| JoseError::Key(format!("invalid RSA SPKI key: {e}")))?;
         ensure_rsa_min_bits(&key)?;
         let normalized = key
@@ -214,7 +214,7 @@ pub fn jwk_from_pkcs1_der(der: &[u8]) -> Result<Jwk> {
     // Rebuilding is the validation: `from_components` checks that the primes are prime
     // factors of the modulus and that `d` is a valid inverse of `e` modulo each `p−1`,
     // then recomputes the CRT members from the parts that survived.
-    let key = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| {
+    let key = rsa::PrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| {
         JoseError::Key(format!(
             "PKCS#1 RSA key is not internally consistent ({err}); its members do not describe              one key"
         ))
@@ -268,7 +268,7 @@ pub fn jwk_from_pkcs1_der(der: &[u8]) -> Result<Jwk> {
 /// `RSAPublicKey` carries no algorithm to dispatch on, and a caller who hands one to the
 /// SPKI importer should be told the difference rather than given a parse error.
 ///
-/// The key is rebuilt (`RsaPublicKey::new`, which rejects an even or tiny public exponent)
+/// The key is rebuilt (`PublicKey::new`, which rejects an even or tiny public exponent)
 /// and then run through [`jwk_from_spki_der`] once wrapped, so the modulus floor and the
 /// backend's checks are the same ones every other RSA public import faces.
 ///
@@ -283,7 +283,7 @@ pub fn jwk_from_pkcs1_public_der(der: &[u8]) -> Result<Jwk> {
     let asn1 = rsa::pkcs1::RsaPublicKeyRef::from_der(der)
         .map_err(|e| JoseError::Key(format!("invalid PKCS#1 RSAPublicKey DER: {e}")))?;
     crate::ensure_rsa_modulus_bytes(asn1.modulus.as_bytes())?;
-    let key = rsa::RsaPublicKey::new(
+    let key = rsa::PublicKey::new(
         biguint(asn1.modulus.as_bytes()),
         biguint(asn1.public_exponent.as_bytes()),
     )
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn rsa_pkcs8_spki_roundtrip_rs256_and_ps256() {
-        let sk = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let sk = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let pk = sk.to_public_key();
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = pk.to_public_key_der().unwrap();
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn rsa_der_import_rejects_sub_2048_bits() {
-        let sk = rsa::RsaPrivateKey::new(&mut rng(), 1024).unwrap();
+        let sk = rsa::PrivateKey::new(&mut rng(), 1024).unwrap();
         let pk = sk.to_public_key();
         let priv_der = sk.to_pkcs8_der().unwrap();
         let pub_der = pk.to_public_key_der().unwrap();
@@ -724,7 +724,7 @@ mod tests {
         use pkcs8::{AlgorithmIdentifierRef, PrivateKeyInfoRef};
         use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 
-        let sk = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let sk = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let pk = sk.to_public_key();
 
         let pkcs1_priv = sk.to_pkcs1_der().unwrap();
