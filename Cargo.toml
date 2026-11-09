@@ -1,13 +1,13 @@
 [package]
 name = "jose-rs"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure-Rust JOSE library (JWS, JWE, JWK, JWT) with software and HSM key support"
 repository = "https://github.com/kushaldas/jose-rs"
 keywords = ["jose", "jwt", "jws", "jwe", "jwk"]
 categories = ["cryptography", "authentication", "web-programming"]
-rust-version = "1.88"
+rust-version = "1.89"
 resolver = "3"
 exclude = ["examples/"]
 
@@ -18,10 +18,10 @@ deprecated = ["kryptering/legacy"]
 pkcs11 = ["kryptering/pkcs11"]
 
 [dependencies]
-kryptering = { version = "0.7", default-features = false, features = ["rustcrypto"] }
+kryptering = { version = "0.7.1", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
-base64 = "0.22"
+base64 = "0.23"
 thiserror = "2"
 aes-gcm = "0.11"
 aes = "0.9"
@@ -29,7 +29,7 @@ cbc = { version = "0.2", features = ["alloc"] }
 hmac = "0.13"
 sha2 = "0.11"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-rsa = "=0.10.0-rc.19"
+rsa = "0.10"
 # `encryption` enables the PKCS#5 PBES2 path (I3). The dependency's own feature set is
 # this crate's scheme allow-list: PBKDF2-HMAC-SHA2 + AES-CBC, with SHA-1, DES and 3DES
 # each behind a separately named `-insecure`/`3des` feature we do not enable.

@@ -19,7 +19,7 @@ pub fn generate_rsa(bits: usize) -> Result<Jwk> {
     use pkcs8::EncodePrivateKey;
 
     crate::ensure_rsa_bits(bits)?;
-    let private_key = rsa::RsaPrivateKey::new(&mut rng(), bits)
+    let private_key = rsa::PrivateKey::new(&mut rng(), bits)
         .map_err(|e| JoseError::Key(format!("RSA keygen failed: {e}")))?;
     let der = private_key
         .to_pkcs8_der()

@@ -2242,9 +2242,9 @@ pub(crate) fn parse_rsa_public_key(der: &[u8]) -> Result<kryptering::SoftwareKey
     use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
     crate::ensure_key_der_size(der.len())?;
-    let key = rsa::RsaPublicKey::from_public_key_der(der)
+    let key = rsa::PublicKey::from_public_key_der(der)
         .map_err(|e| JoseError::Key(format!("failed to parse RSA public key DER: {e}")))?;
-    crate::ensure_rsa_bits(key.n().bits() as usize)?;
+    crate::ensure_rsa_bits(key.n().bit_width() as usize)?;
     kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 
@@ -2258,9 +2258,9 @@ pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Result<kryptering::SoftwareKe
     let raw = rsa::pkcs1::RsaPrivateKeyRef::from_der(info.private_key.as_bytes())
         .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
     crate::ensure_rsa_modulus_bytes(raw.modulus.as_bytes())?;
-    let key = rsa::RsaPrivateKey::from_pkcs8_der(der)
+    let key = rsa::PrivateKey::from_pkcs8_der(der)
         .map_err(|e| JoseError::Key(format!("failed to parse RSA private key PKCS#8 DER: {e}")))?;
-    crate::ensure_rsa_bits(key.n().bits() as usize)?;
+    crate::ensure_rsa_bits(key.n().bit_width() as usize)?;
     kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der).map_err(Into::into)
 }
 

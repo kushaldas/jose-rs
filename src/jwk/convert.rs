@@ -172,12 +172,12 @@ pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
     match key.algorithm() {
         KeyAlgorithm::Rsa => {
             let public_der = key.export_spki_der()?;
-            let public = rsa::RsaPublicKey::from_public_key_der(&public_der)
+            let public = rsa::PublicKey::from_public_key_der(&public_der)
                 .map_err(|e| JoseError::Key(format!("parse exported RSA SPKI: {e}")))?;
             let private = if key.has_private_key() {
                 let private_der = key.export_private()?;
                 Some(
-                    rsa::RsaPrivateKey::from_pkcs8_der(&private_der)
+                    rsa::PrivateKey::from_pkcs8_der(&private_der)
                         .map_err(|e| JoseError::Key(format!("parse exported RSA PKCS#8: {e}")))?,
                 )
             } else {
@@ -375,7 +375,7 @@ fn new_jwk(kty: &str) -> Jwk {
 // ── RSA ────────────────────────────────────────────────────────────────
 
 fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
-    use rsa::{traits::PublicKeyParts, BoxedUint, RsaPrivateKey, RsaPublicKey};
+    use rsa::{traits::PublicKeyParts, BoxedUint, PrivateKey, PublicKey};
 
     let n_bytes = require(jwk, "n")?;
     let e_bytes = require(jwk, "e")?;
@@ -399,10 +399,10 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
         return Err(JoseError::Key("RSA public exponent must be odd".into()));
     }
 
-    let public = RsaPublicKey::new(n.clone(), e.clone())
+    let public = PublicKey::new(n.clone(), e.clone())
         .map_err(|err| JoseError::Key(format!("invalid RSA public key: {err}")))?;
 
-    crate::ensure_rsa_bits(public.n().bits() as usize)?;
+    crate::ensure_rsa_bits(public.n().bit_width() as usize)?;
 
     let private = if jwk.d.is_some() {
         let d_bytes = Zeroizing::new(require(jwk, "d")?);
@@ -416,7 +416,7 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
             vec![]
         };
 
-        let private_key = RsaPrivateKey::from_components(n, e, d, primes)
+        let private_key = PrivateKey::from_components(n, e, d, primes)
             .map_err(|err| JoseError::Key(format!("invalid RSA private key: {err}")))?;
         Some(private_key)
     } else {
@@ -441,7 +441,7 @@ fn jwk_to_rsa(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     }
 }
 
-fn rsa_to_jwk(private: Option<&rsa::RsaPrivateKey>, public: &rsa::RsaPublicKey) -> Result<Jwk> {
+fn rsa_to_jwk(private: Option<&rsa::PrivateKey>, public: &rsa::PublicKey) -> Result<Jwk> {
     use rsa::traits::PublicKeyParts;
 
     let mut jwk = new_jwk("RSA");
@@ -1219,14 +1219,14 @@ mod tests {
         getrandom::rand_core::UnwrapErr(getrandom::SysRng)
     }
 
-    fn rsa_private_key(key: &rsa::RsaPrivateKey) -> kryptering::SoftwareKey {
+    fn rsa_private_key(key: &rsa::PrivateKey) -> kryptering::SoftwareKey {
         use pkcs8::EncodePrivateKey;
         let der = key.to_pkcs8_der().unwrap();
         kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
             .unwrap()
     }
 
-    fn rsa_public_key(key: &rsa::RsaPublicKey) -> kryptering::SoftwareKey {
+    fn rsa_public_key(key: &rsa::PublicKey) -> kryptering::SoftwareKey {
         use pkcs8::spki::EncodePublicKey;
         let der = key.to_public_key_der().unwrap();
         kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
@@ -1275,7 +1275,7 @@ mod tests {
 
     #[test]
     fn rsa_generate_to_jwk_roundtrip() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let private_key = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let sw = rsa_private_key(&private_key);
 
         // Convert to JWK
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[test]
     fn rsa_public_only_roundtrip() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let private_key = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let public_key = private_key.to_public_key();
         let sw = rsa_public_key(&public_key);
 
@@ -1586,8 +1586,8 @@ mod tests {
         let public_der = sw.export_spki_der().unwrap();
         use rsa::pkcs8::DecodePublicKey;
         use rsa::traits::PublicKeyParts;
-        let public = rsa::RsaPublicKey::from_public_key_der(&public_der).unwrap();
-        assert!(public.n().bits() >= 2040);
+        let public = rsa::PublicKey::from_public_key_der(&public_der).unwrap();
+        assert!(public.n().bit_width() >= 2040);
     }
 
     // ── EC public key parse ────────────────────────────────────────
@@ -1617,7 +1617,7 @@ mod tests {
     #[test]
     fn rsa_exponent_too_small_is_rejected() {
         // Build a valid 2048-bit modulus but with e=1.
-        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let private_key = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let n_b64 = {
             use rsa::traits::PublicKeyParts;
             base64url::encode(&private_key.n().to_be_bytes_trimmed_vartime())
@@ -1637,7 +1637,7 @@ mod tests {
     /// Phase 2: even RSA exponent (e.g. 4) must be rejected.
     #[test]
     fn rsa_exponent_even_is_rejected() {
-        let private_key = rsa::RsaPrivateKey::new(&mut rng(), 2048).unwrap();
+        let private_key = rsa::PrivateKey::new(&mut rng(), 2048).unwrap();
         let n_b64 = {
             use rsa::traits::PublicKeyParts;
             base64url::encode(&private_key.n().to_be_bytes_trimmed_vartime())
