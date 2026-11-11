@@ -45,3 +45,4 @@ history.
 | [0039](0039-jws-header-disjointness-uses-wire-members.md) | JWS header disjointness uses wire members | Accepted |
 | [0040](0040-transient-secrets-have-zeroizing-owners.md) | Transient secrets have zeroizing owners | Accepted |
 | [0041](0041-dependency-refresh-and-msrv-1-89.md) | Refresh dependencies and raise the compiler floor to Rust 1.89 | Accepted |
+| [0042](0042-daily-and-manual-security-audit.md) | Run dependency security audits daily and on demand | Accepted |
