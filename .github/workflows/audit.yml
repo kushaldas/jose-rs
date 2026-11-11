@@ -15,8 +15,9 @@ on:
       - '.cargo/audit.toml'
       - '.github/workflows/audit.yml'
   schedule:
-    # Weekly check catches newly disclosed advisories against pinned deps.
-    - cron: '0 6 * * 1'
+    # Daily check at 06:00 UTC catches newly disclosed advisories against pinned deps.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   cargo-audit:
