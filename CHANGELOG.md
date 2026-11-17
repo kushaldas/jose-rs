@@ -35,6 +35,8 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ### Fixed
 
+- Add blocking independent PBES2 vectors at 1 000 and 2 048 iterations for all
+  three PBES2 algorithms, plus bidirectional non-default-count peer checks.
 - Make the PBES2 timing-ratio check advisory so shared-runner timing noise cannot
   fail CI. Remove the misleading malformed-DER timing assertion; deterministic
   PBES2 and PKCS#8 work-budget regressions remain required (ADR 0048).

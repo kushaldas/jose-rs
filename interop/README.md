@@ -140,7 +140,11 @@ across RSA/EC/OKP keys — plus the parser refusing a padded or wrong-length
 
 ### PBES2 against jwcrypto (`jwe_pbes2_jwcrypto.py`)
 
-166 checks over all three PBES2 algorithms and four content algorithms. Beyond the
+Checks cover all three PBES2 algorithms and four content algorithms. Non-default
+counts of 1 000 and 2 048 are exercised in both directions for every PBES2 algorithm,
+with Python `hashlib` independently rederiving the KEK for Rust-produced tokens.
+Fixed independent vectors for the same counts also run in the blocking Rust CI
+suite (`tests/pbes2_iteration_vectors.rs`). Beyond the
 round-trips, the suite **re-derives the key in Python**: it reads `p2s`/`p2c` out of a
 jose-rs token's protected header, runs PBKDF2 over `UTF8(alg) || 0x00 || Salt Input`,
 unwraps the conveyed key with AES-KW, requires the result to be exactly the content

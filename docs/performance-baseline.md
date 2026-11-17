@@ -61,7 +61,11 @@ use broad slack factors to catch coarse regressions; PBES2 timing is advisory:
   and 8 192 iterations prints a diagnostic and passes. Whole-operation overhead and
   runner contention can flatten the ratio. Functional failures still fail the test.
   Deterministic budget and parameter checks remain in `tests/jwe_pbes2.rs` and
-  `tests/jwk_encrypted_pkcs8.rs` (ADR 0048).
+  `tests/jwk_encrypted_pkcs8.rs` (ADR 0048). Blocking tests in
+  `tests/pbes2_iteration_vectors.rs` additionally pin all three PRFs at non-default
+  counts of 1 000 and 2 048 against fixed Python/OpenSSL-derived KEKs and compact
+  tokens. Sender tests unwrap and authenticate fresh tokens using that validated
+  oracle outside the JOSE KDF glue, so a shared round-trip bug cannot pass.
 - **Oversized documents are refused before they are parsed**, self-calibrated against
   the cost of actually parsing a document the same budget admits.
 
