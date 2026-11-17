@@ -50,3 +50,4 @@ history.
 | [0044](0044-authenticated-jwks-and-discovery.md) | Discovery reads untrusted claims; verification returns a fresh result | Accepted |
 | [0045](0045-deterministic-custom-members.md) | Custom header and claim members serialize in sorted order | Accepted |
 | [0046](0046-explicit-validation-time-opt-outs.md) | Time checks can be disabled explicitly without changing defaults | Accepted |
+| [0047](0047-discovery-rejects-nested-duplicate-members.md) | Discovery rejects duplicate members before normalization | Accepted; extends 0044 |

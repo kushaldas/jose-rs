@@ -4,6 +4,12 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+### Security
+
+- Reject duplicate JSON members at every JWT discovery payload depth before
+  normalizing claims. Embedded key-policy ambiguity now fails before the
+  self-signed selector runs; ordinary JWT claims parsing is unchanged (ADR 0047).
+
 ## [0.12.0] - 2026-11-17
 
 ### Added

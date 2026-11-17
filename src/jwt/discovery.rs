@@ -5,6 +5,90 @@ use crate::{
     Authenticated, JoseError, JoseHeader, Result,
 };
 
+/// Validate raw discovery JSON without normalizing nested objects into Values.
+/// A selector may extract keys from any claim, so matching just `jwks` leaves
+/// alternate claim names and array positions open to the same parser differential.
+fn ensure_unique_members(bytes: &[u8]) -> Result<()> {
+    struct UniqueJson;
+
+    impl<'de> serde::Deserialize<'de> for UniqueJson {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct UniqueVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+                type Value = UniqueJson;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("JSON with unique object members")
+                }
+
+                fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+                where
+                    A: serde::de::MapAccess<'de>,
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    while let Some(name) = map.next_key::<String>()? {
+                        // Compare decoded names before reading their values, including
+                        // escaped equivalents. Prevent key-policy confusion from JSON
+                        // parser differentials (RFC 7517 §4).
+                        if !seen.insert(name.clone()) {
+                            return Err(serde::de::Error::custom(format!(
+                                "duplicate JSON member {name}"
+                            )));
+                        }
+                        map.next_value::<UniqueJson>()?;
+                    }
+                    Ok(UniqueJson)
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    while seq.next_element::<UniqueJson>()?.is_some() {}
+                    Ok(UniqueJson)
+                }
+
+                fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+
+                fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+
+                fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+
+                fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+
+                fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+
+                fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+                    Ok(UniqueJson)
+                }
+            }
+
+            deserializer.deserialize_any(UniqueVisitor)
+        }
+    }
+
+    // Streaming validation retains serde_json's recursion limit and EOF check.
+    // Numeric values are only traversed; the real Claims parse keeps their exact
+    // arbitrary-precision representation. The token-size check has already run.
+    serde_json::from_slice::<UniqueJson>(bytes)
+        .map(|_| ())
+        .map_err(|err| JoseError::InvalidClaims(err.to_string()))
+}
+
 /// A bounded JWT inspected solely to discover candidate verification keys.
 ///
 /// Header and claims are **untrusted**. Never use them for authorization,
@@ -28,14 +112,18 @@ impl std::fmt::Debug for UnverifiedJwt {
 impl UnverifiedJwt {
     /// Inspect a compact, base64url-encoded JWT for key discovery only.
     ///
-    /// Applies normal token bounds and duplicate-member checks. Parsing does
-    /// not validate signatures, claim policy, or trust in any key reference.
+    /// Applies normal token bounds and rejects duplicate members at every payload
+    /// object depth before normalization. Selectors may read nested key metadata
+    /// from any claim. Unlike ordinary claim parsing, discovery cannot safely
+    /// collapse those duplicates. Parsing does not validate signatures, claim
+    /// policy, or trust in any key reference.
     ///
     /// # Errors
     ///
     /// Returns [`JoseError::InvalidToken`] for bad compact shape or size,
-    /// [`JoseError::InvalidClaims`] for ambiguous claims, [`JoseError::Json`]
-    /// for malformed JSON, or [`JoseError::Base64`] for noncanonical encoding.
+    /// [`JoseError::InvalidClaims`] for ambiguous or malformed payload JSON,
+    /// [`JoseError::Json`] for malformed header JSON, or [`JoseError::Base64`]
+    /// for noncanonical encoding.
     /// RFC 7797 unencoded JWT payloads are refused.
     pub fn parse(token: &str) -> Result<Self> {
         let header = crate::jws::compact::decode_header(token)?;
@@ -58,7 +146,9 @@ impl UnverifiedJwt {
             ));
         }
         crate::base64url::decode(signature)?;
-        let claims = Claims::from_json_bytes(&crate::base64url::decode(payload)?)?;
+        let payload = crate::base64url::decode(payload)?;
+        ensure_unique_members(&payload)?;
+        let claims = Claims::from_json_bytes(&payload)?;
         Ok(Self {
             token: token.to_owned(),
             header,

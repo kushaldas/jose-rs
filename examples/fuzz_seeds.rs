@@ -315,6 +315,15 @@ fn token_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "ed448-self-signed.txt",
         token.as_bytes(),
     )?;
+    // Validly signed, deliberately ambiguous key metadata (ADR 0047).
+    let duplicate = br#"{"jwks":{"keys":[{"kty":"OKP","alg":"Ed448","alg":"EdDSA"}]}}"#;
+    let token = jose_rs::jws::compact::sign_with_jwk(&ed, duplicate, &JoseHeader::new("Ed448"))?;
+    write_seed(
+        out,
+        "jwt_decode_unverified",
+        "embedded-duplicate-alg.txt",
+        token.as_bytes(),
+    )?;
     let hmac = hmac_jwk(Some("hmac-a"))?;
     let payload = b"seed corpus payload";
     let claims = br#"{"iss":"https://issuer.example","sub":"fuzz-seed","exp":4100000000}"#;

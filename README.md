@@ -637,7 +637,10 @@ BSD-2-Clause
   `decode_with_jwkset_policy_authenticated` retain the authenticated header and
   report `verified_key_index()`. The latter enforces a candidate budget.
 - `UnverifiedJwt::parse` exposes explicitly untrusted header/claims for key
-  discovery. After application-owned async discovery, call `.verify_with(...)`.
+  discovery. Payload duplicates are rejected at every object depth before
+  normalization, including embedded JWKS/JWK data (ADR 0047). Ordinary JWT
+  claim parsing keeps its top-level-only duplicate policy.
+  After application-owned async discovery, call `.verify_with(...)`.
   `decode_self_signed` provides a synchronous selector. Self-signature proves
   key possession, not issuer identity; no trust establishment or fetching occurs.
 - `Validation::signature_only()` disables exp/nbf/future-iat checks. It still
