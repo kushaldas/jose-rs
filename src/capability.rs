@@ -284,7 +284,8 @@ pub fn jws_algorithms() -> Vec<Capability> {
             identifier: JwsAlgorithm::EdDSA.as_str(),
             availability: Availability::Supported,
             operations: SIGN_VERIFY,
-            note: "legacy alias for Ed25519; a distinct allowlist entry from `Ed25519`",
+            note:
+                "curve-dependent Ed25519 / Ed448; application allowlists keep wire names distinct",
         },
         Capability {
             kind: Kind::JwsAlgorithm,
@@ -292,6 +293,13 @@ pub fn jws_algorithms() -> Vec<Capability> {
             availability: Availability::Supported,
             operations: SIGN_VERIFY,
             note: "fully specified identifier (RFC 9864); same primitive as `EdDSA`",
+        },
+        Capability {
+            kind: Kind::JwsAlgorithm,
+            identifier: JwsAlgorithm::Ed448.as_str(),
+            availability: Availability::Supported,
+            operations: SIGN_VERIFY,
+            note: "fully specified pure Ed448; empty context (RFC 8037 / RFC 9864)",
         },
         Capability {
             kind: Kind::JwsAlgorithm,
@@ -339,7 +347,7 @@ pub fn jws_algorithms() -> Vec<Capability> {
         (
             "ML-DSA-87-Ed448",
             SIGN_VERIFY,
-            "composite; Ed448 is available inside it, but not as a standalone key type",
+            "composite, draft-ietf-jose-pq-composite-sigs",
         ),
     ];
     #[cfg(not(feature = "post-quantum"))]
@@ -530,7 +538,7 @@ pub fn jwe_algorithms() -> Vec<Capability> {
 /// is checked by performing the operation. (`ML-DSA-87-Ed448` was the case that proved it — the
 /// table guessed "recognized, unsupported" on the theory that the backend has no standalone
 /// Ed448, and the executable test answered by signing and verifying successfully. The composite
-/// carries Ed448 internally; only the standalone key type is missing, which is its own row.)
+/// carries Ed448 internally; standalone Ed448 is also supported, in its own row.)
 #[cfg(feature = "post-quantum")]
 fn pq_availability(_identifier: &str) -> Availability {
     Availability::Supported
@@ -607,7 +615,7 @@ pub fn key_formats() -> Vec<Capability> {
             identifier: "PKCS#8 DER / \"PRIVATE KEY\"",
             availability: Availability::Supported,
             operations: IMPORT_EXPORT,
-            note: "RSA, EC P-256/P-384/P-521, Ed25519, X25519; export emits the narrower \
+            note: "RSA, EC P-256/P-384/P-521, Ed25519, Ed448, X25519; export emits the narrower \
                    OneAsymmetricKey form (ADR 0022)",
         },
         Capability {
@@ -739,12 +747,17 @@ pub fn key_types() -> Vec<Capability> {
         },
         Capability {
             kind: Kind::KeyType,
-            identifier: "OKP Ed448 / X448",
+            identifier: "OKP Ed448",
+            availability: Availability::Supported,
+            operations: USE,
+            note: "EdDSA / Ed448; pure Ed448, empty context; PKCS#8 and SPKI",
+        },
+        Capability {
+            kind: Kind::KeyType,
+            identifier: "OKP X448",
             availability: Availability::RecognizedNotSupported,
             operations: &[],
-            note:
-                "not exposed by the backend; the composite ML-DSA-87-Ed448 scheme is a separate, \
-                   feature-gated construction",
+            note: "backend primitive exists; JOSE agreement integration is not exposed",
         },
         Capability {
             kind: Kind::KeyType,

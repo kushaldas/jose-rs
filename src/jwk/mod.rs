@@ -3,6 +3,7 @@
 pub mod agreement;
 pub mod cert;
 pub mod convert;
+mod ed448;
 pub mod encrypted_pkcs8;
 pub mod generate;
 pub mod import;
@@ -26,8 +27,9 @@ pub use encrypted_pkcs8::{
 #[cfg(feature = "post-quantum")]
 pub use generate::{generate_composite_mldsa, generate_mldsa};
 pub use generate::{
-    generate_direct_symmetric, generate_ec, generate_ed25519, generate_key, generate_rsa,
-    generate_symmetric, generate_symmetric_for_alg, generate_x25519, EcCurve, KeyGeneration,
+    generate_direct_symmetric, generate_ec, generate_ed25519, generate_ed448, generate_key,
+    generate_rsa, generate_symmetric, generate_symmetric_for_alg, generate_x25519, EcCurve,
+    KeyGeneration,
 };
 pub use import::{
     jwk_from_pkcs1_der, jwk_from_pkcs1_public_der, jwk_from_pkcs8_der, jwk_from_sec1_der,

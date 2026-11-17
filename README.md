@@ -14,15 +14,16 @@ Pure-Rust JOSE (JSON Object Signing and Encryption) library covering JWS, JWE, J
 
 ## Supported algorithms
 
-**JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, Ed25519, EdDSA (Ed25519 only)
+**JWS signatures**: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, Ed25519, Ed448, EdDSA (Ed25519 or Ed448)
 
-`Ed25519` is the fully specified wire identifier from
+`Ed25519` and `Ed448` are fully specified identifiers from
 [RFC 9864 section 2.2](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.2).
-It requires `kty: "OKP"` and `crv: "Ed25519"`. Existing `EdDSA` tokens
-remain supported. These identifiers stay distinct in JWK algorithm pins and
-JWT allowlists; no protected headers or metadata are silently renamed.
-Raw backend Ed25519 verifiers identify only the primitive and accept both
-wire names. Use a pinned JWK or JWT allowlist to require one exact name.
+They require the corresponding `OKP` curve. Legacy `EdDSA` dispatches on that
+curve; its JWK pin and the matching fully specified pin are interchangeable.
+Application JWT algorithm allowlists remain exact: list only `Ed448` to refuse
+legacy `EdDSA` headers. Protected bytes are never renamed or reserialized for
+verification. Ed448 uses pure signatures with an empty context, not Ed448ph,
+and needs no post-quantum feature. X448 remains unsupported in JOSE.
 
 **JWS post-quantum signatures (opt-in)**: ML-DSA-44 / ML-DSA-65 /
 ML-DSA-87 (FIPS 204), plus the six composite algorithms from
@@ -62,6 +63,14 @@ ends are bounded: 1 000 is refused-and-refuses, 8 192 is emitted (inside the 10 
 will compute for someone else's message (ADR 0021).
 
 ## Feature flags
+
+For pure software consumers, disable the default PKCS#11 integration:
+
+```toml
+[dependencies]
+jose-rs = { version = "0.12.0", default-features = false }
+```
+
 
 | Feature | Default | Description |
 |---|---|---|
@@ -225,12 +234,11 @@ Run `cargo run --example generate_keys` first to create the key files, then run 
 
 ## Security notes
 
-- **`rsa` crate advisory (RUSTSEC-2023-0071, a.k.a. "Marvin attack").** The
-  upstream advisory remains open. Kryptering 0.7 blinds RSA private operations
-  with OS randomness; jose-rs also collapses RSA-OAEP failure classes and keeps
-  SHA-1 OAEP behind `deprecated`. The tracking rationale remains in
-  `.cargo/audit.toml`; rate-limit decryption failures and prefer non-RSA key
-  management where practical.
+- **RSA timing advisory (RUSTSEC-2023-0071).** The locked `rsa 0.10.0`
+  is in RustSec's patched range (`>=0.10.0`); `.cargo/audit.toml` contains no
+  advisory ignores. This covers the underlying private-operation timing issue,
+  including signing and decryption. PKCS#11 remains available for long-lived
+  keys that should stay non-exportable; token security depends on the provider.
 - **Trust-sensitive header fields.** `jku`, `x5u`, and `jwk` headers are
   parsed by the library but **never fetched or trusted** — callers must
   never resolve `jku`/`x5u` URLs without an explicit allow-list (SSRF /
@@ -414,7 +422,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.11.0", features = ["post-quantum"] }
+jose-rs = { version = "0.12.0", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the optional `ml-dsa` crate plus kryptering's
@@ -564,15 +572,14 @@ cargo audit --deny warnings
 ```
 
 CI runs the same command on every push to `main`, every pull request
-that touches `Cargo.toml` / `Cargo.lock`, and on a weekly schedule
+that touches `Cargo.toml` / `Cargo.lock`, and on a daily schedule
 (`.github/workflows/audit.yml`). With the current lockfile, the command
 completes successfully without warnings.
 
-`.cargo/audit.toml` carries one documented advisory ignore:
-RUSTSEC-2023-0071, the `rsa` crate Marvin timing advisory. Any RustSec
-advisory not in that list fails local and CI audits. The `--deny warnings`
-flag also rejects all audit warnings. The audit config and security notes
-are the source of truth for accepted findings and their mitigations.
+`.cargo/audit.toml` has no advisory ignores. Every advisory and, with
+`--deny warnings`, every audit warning fails the local and CI check. The
+[RustSec Marvin advisory](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
+lists `rsa >=0.10.0` as patched. CI also runs daily and on manual dispatch.
 
 ### Interop test vectors (RFC 7520)
 
@@ -615,3 +622,35 @@ longer-running campaign or OSS-Fuzz once the corpus stabilizes.
 ## License
 
 BSD-2-Clause
+
+## Migrating to 0.12
+
+- `Claims.extra` and `JoseHeader.extra` now use `BTreeMap<String, Value>`.
+  Custom members serialize in sorted order; typed members retain struct order.
+  Convert an existing `HashMap` with `.into_iter().collect()`. This is stable
+  serialization, not JSON canonicalization or preservation of incoming order.
+- Add `Ed448` to exhaustive `JwsAlgorithm` and `KeyGeneration` matches.
+  `generate_ed448()` returns an unpinned key, like `generate_ed25519()`.
+- Edwards JWK pins accept the same-curve `EdDSA` spelling (ADR 0043).
+  Require exact header spelling with `Validation::with_allowed_algorithms`.
+- `decode_with_jwkset_authenticated` and
+  `decode_with_jwkset_policy_authenticated` retain the authenticated header and
+  report `verified_key_index()`. The latter enforces a candidate budget.
+- `UnverifiedJwt::parse` exposes explicitly untrusted header/claims for key
+  discovery. Payload duplicates are rejected at every object depth before
+  normalization, including embedded JWKS/JWK data (ADR 0047). Ordinary JWT
+  claim parsing keeps its top-level-only duplicate policy.
+  After application-owned async discovery, call `.verify_with(...)`.
+  `decode_self_signed` provides a synchronous selector. Self-signature proves
+  key possession, not issuer identity; no trust establishment or fetching occurs.
+- `Validation::signature_only()` disables exp/nbf/future-iat checks. It still
+  verifies the signature; builders can add issuer, audience, type and algorithm
+  policy. `without_exp()`, `without_nbf()` and `without_iat_future_check()`
+  disable individual checks. Defaults still check all three with 60-second
+  leeway; use `Validation::new().with_leeway(0)` for exact time boundaries.
+- `Authenticated<T>` now has private provenance state. Receive it from a
+  verification API; transform its value with `.map(...)`. Direct construction
+  and exhaustive struct destructuring from outside the crate are unsupported.
+
+See `tests/migration_features.rs` for independent Ed448 vectors and regression
+coverage, and ADRs 0043–0046 for the policy and compatibility consequences.

@@ -11,7 +11,7 @@
 //! an RSA key past an EC decoder. Each concrete key type is then handed to
 //! its own vetted RustCrypto decoder. Supported families mirror what the
 //! crate already signs/verifies with: RSA (RS/PS), EC (P-256/384/521 →
-//! ES256/384/512), and Ed25519 (EdDSA).
+//! ES256/384/512), and Ed25519 / Ed448 (EdDSA).
 
 use p521::elliptic_curve::sec1::ToSec1Point;
 use pkcs8::der::Decode;
@@ -60,7 +60,7 @@ fn ensure_rsa_min_bits(key: &rsa::PublicKey) -> Result<()> {
 ///
 /// Accepts the unencrypted PKCS#8 `OneAsymmetricKey` / `PrivateKeyInfo`
 /// structure (RFC 5208 / RFC 5958) for the signature families this crate
-/// supports: RSA, EC (P-256/384/521), and Ed25519. The returned JWK carries
+/// supports: RSA, EC (P-256/384/521), and Ed25519/Ed448. The returned JWK carries
 /// the full private key material plus the matching public components, with
 /// no `alg` pinned (the caller selects the precise JWS algorithm — e.g.
 /// `RS256` vs `PS256` for the same RSA key — by setting `jwk.alg`).
@@ -99,6 +99,8 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
         ed25519_dalek::SigningKey::from_pkcs8_der(der)
             .map_err(|e| JoseError::Key(format!("invalid Ed25519 PKCS#8 key: {e}")))?;
         kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der)?
+    } else if oid == super::ed448::OID {
+        kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed448, der)?
     } else if oid == OID_EC_PUBLIC_KEY {
         let curve = info
             .algorithm
@@ -118,7 +120,7 @@ pub fn jwk_from_pkcs8_der(der: &[u8]) -> Result<Jwk> {
 /// [`Jwk`].
 ///
 /// Accepts the SPKI structure (RFC 5280 §4.1.2.7) for RSA, EC
-/// (P-256/384/521), and Ed25519 public keys. The returned JWK carries only
+/// (P-256/384/521), and Ed25519/Ed448 public keys. The returned JWK carries only
 /// public components and pins no `alg`.
 ///
 /// RSA-PSS-specific DER keys are rejected, including those with absent
@@ -150,6 +152,8 @@ pub fn jwk_from_spki_der(der: &[u8]) -> Result<Jwk> {
         ed25519_dalek::VerifyingKey::from_public_key_der(der)
             .map_err(|e| JoseError::Key(format!("invalid Ed25519 SPKI key: {e}")))?;
         kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Ed25519, der)?
+    } else if oid == super::ed448::OID {
+        kryptering::SoftwareKey::from_spki_der(kryptering::KeyAlgorithm::Ed448, der)?
     } else if oid == OID_EC_PUBLIC_KEY {
         let curve = spki
             .algorithm

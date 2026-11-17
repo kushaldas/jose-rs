@@ -1,4 +1,4 @@
-"""Check Ed25519 and legacy EdDSA compact interoperability with jwcrypto 1.6.1.
+"""Check Edwards curves and legacy EdDSA compact interoperability with jwcrypto 1.6.1.
 
 Pass the built jose-interop executable as the sole argument. Generates disposable
 keys in memory and never writes or prints private key material.
@@ -27,10 +27,12 @@ def rust(binary: str, command: str, algorithm: str, value: dict) -> dict:
 
 def main(binary: str) -> None:
     """Verify each producer using the other implementation and public keys."""
-    payload = b"Ed25519 interoperability"
+    payload = b"Edwards interoperability"
     encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
-    for algorithm in ("Ed25519", "EdDSA"):
-        rust_key = rust(binary, "gen-key", algorithm, {})
+    for curve, algorithm in (("Ed25519", "Ed25519"), ("Ed25519", "EdDSA"), ("Ed448", "Ed448"), ("Ed448", "EdDSA")):
+        rust_key = rust(binary, "gen-key", curve, {})
+        # Intentionally retain the fully specified pin while using a legacy header.
+        rust_key["alg"] = curve
         signed = rust(binary, "sign-compact", algorithm, {
             "jwk": rust_key, "payload_b64u": encoded,
         })
@@ -41,7 +43,7 @@ def main(binary: str) -> None:
         assert verified.payload == payload
         assert verified.jose_header["alg"] == algorithm
 
-        python_key = jwk.JWK.generate(kty="OKP", crv="Ed25519", alg=algorithm)
+        python_key = jwk.JWK.generate(kty="OKP", crv=curve, alg=curve)
         produced = jws.JWS(payload)
         produced.add_signature(python_key, protected=json.dumps({"alg": algorithm}))
         result = rust(binary, "verify-compact", algorithm, {
@@ -51,7 +53,7 @@ def main(binary: str) -> None:
         assert result["ok"]
         assert result["payload_b64u"] == encoded
         assert result["protected_header"]["alg"] == algorithm
-        print(f"{algorithm}: Rust -> jwcrypto and jwcrypto -> Rust passed")
+        print(f"{curve}/{algorithm}: Rust -> jwcrypto and jwcrypto -> Rust passed")
 
 
 if __name__ == "__main__":

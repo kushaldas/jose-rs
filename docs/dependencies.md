@@ -28,12 +28,13 @@ below against `Cargo.toml`, `Cargo.lock`, and `.cargo/audit.toml`.
 
 Kryptering 0.7 moved its RustCrypto provider to one coordinated trait family and added
 Ed448, X448, secp256k1, and Brainpool primitives. A backend capability is not automatic
-JOSE authorization: jose-rs continues to refuse those algorithms because it has not yet
-accepted their wire format, JWK conversion, policy, interop, and negative-test work.
+JOSE authorization: each still needs wire-format integration, JWK conversion,
+policy, interop, and negative tests. Ed448 is integrated in 0.12.0; the remaining
+curves are not exposed by the JOSE operation paths.
 
 | Plan item | Backend state | jose-rs state |
 |---|---|---|
-| A0 standalone Ed448 | available in Kryptering 0.7 | recognized but not integrated |
+| A0 standalone Ed448 | available in Kryptering 0.7 | supported in 0.12.0 (ADR 0043) |
 | A1 ES256K / secp256k1 | available in Kryptering 0.7 | recognized and refused by name |
 | A2 Brainpool curves | available in Kryptering 0.7 | no accepted JOSE integration |
 | X448 agreement | available in Kryptering 0.7 | no accepted JWK/JWE integration |
@@ -97,15 +98,19 @@ integers use the `crypto-bigint` types re-exported by the stable `rsa` release.
 
 ## Advisory posture
 
-`.cargo/audit.toml` carries exactly one tracked ignore:
+`.cargo/audit.toml` has no advisory ignores. The locked `rsa 0.10.0` is
+in the patched range (`>=0.10.0`) for
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The underlying RSA private-operation fix applies to signing and decryption.
+Older ADRs describe the advisory state when those decisions were accepted.
+Kryptering 0.7 also removed `rand` 0.8 and `num-bigint-dig`, closing the
+dependency path implicated by RUSTSEC-2026-0097. Every advisory or warning
+fails `cargo audit --deny warnings`.
 
-| Advisory | Why it remains tracked | Mitigation here |
-|---|---|---|
-| RUSTSEC-2023-0071 (`rsa`, Marvin) | the upstream advisory remains open for every `rsa` release | Kryptering 0.7 blinds RSA private operations using OS entropy; jose-rs collapses RSA-OAEP failure classes, enforces key-size policy, and keeps SHA-1 OAEP opt-in |
-
-Kryptering 0.7 also removes `rand` 0.8 and `num-bigint-dig`, closing the dependency
-path implicated by RUSTSEC-2026-0097. Every unignored advisory or warning fails
-`cargo audit --deny warnings`.
+Ed448 uses the already locked kryptering 0.7.1 RustCrypto implementation.
+JOSE only encodes/decodes RFC 8410 envelopes with existing `pkcs8` 0.11 /
+`der` 0.8 / `spki` 0.8 dependencies. There is no new primitive dependency,
+trait-family split, MSRV increase, or crypto dependency lockfile change.
 
 ## Platform and provider notes
 
