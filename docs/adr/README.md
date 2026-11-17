@@ -51,3 +51,4 @@ history.
 | [0045](0045-deterministic-custom-members.md) | Custom header and claim members serialize in sorted order | Accepted |
 | [0046](0046-explicit-validation-time-opt-outs.md) | Time checks can be disabled explicitly without changing defaults | Accepted |
 | [0047](0047-discovery-rejects-nested-duplicate-members.md) | Discovery rejects duplicate members before normalization | Accepted; extends 0044 |
+| [0048](0048-pbes2-timing-is-advisory.md) | PBES2 timing ratios are advisory | Accepted; supersedes part of 0035 |

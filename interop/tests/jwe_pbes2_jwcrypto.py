@@ -118,7 +118,39 @@ def header_of(token):
     return json.loads(b64d(token.split(".")[0]))
 
 
+def non_default_iteration_checks(harness_path):
+    """Check both directions with counts distinct from the default/RFC vector."""
+    enc = "A256GCM"
+    for alg in ALGS:
+        for count in (1_000, 2_048):
+            label = "%s/%s p2c=%d" % (alg, enc, count)
+            peer = jwe.JWE(PLAINTEXT, protected={"alg": alg, "enc": enc, "p2c": count})
+            peer.add_recipient(jwk.JWK.from_password(PASSWORD))
+            token = peer.serialize(compact=True)
+            check(label + " peer uses the requested count", header_of(token)["p2c"] == count)
+            out = harness(harness_path,
+                          ["decrypt-compact-password", "--alg", alg, "--enc", enc],
+                          {"password": PASSWORD, "jwe": token})
+            check(label + " jwcrypto -> Rust plaintext", b64d(out["plaintext_b64u"]) == PLAINTEXT)
+            check(label + " Rust authenticates the peer count", out["protected_header"]["p2c"] == count)
+
+            token = harness(harness_path,
+                            ["encrypt-compact-password", "--alg", alg, "--enc", enc],
+                            {"password": PASSWORD, "plaintext_b64u": b64e(PLAINTEXT), "p2c": count})["jwe"]
+            header = header_of(token)
+            check(label + " Rust advertises the requested count", header["p2c"] == count)
+            check(label + " Rust -> jwcrypto plaintext", _jwcrypto_reads(token))
+            salt = alg.encode("utf-8") + b"\x00" + b64d(header["p2s"])
+            kek = hashlib.pbkdf2_hmac(HASH[alg], PASSWORD.encode("utf-8"), salt, count,
+                                     dklen=DERIVED_LEN[alg])
+            parts = token.split(".")
+            cek = aes_key_unwrap(kek, b64d(parts[1]))
+            recovered = AESGCM(cek).decrypt(b64d(parts[2]), b64d(parts[3]) + b64d(parts[4]), parts[0].encode())
+            check(label + " independently rederived content", recovered == PLAINTEXT)
+
+
 def main(harness_path):
+    non_default_iteration_checks(harness_path)
     for alg in ALGS:
         for enc in ["A128GCM", "A256GCM", "A128CBC-HS256", "A256CBC-HS512"]:
             # ---- jwcrypto → jose-rs ---------------------------------------

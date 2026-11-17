@@ -5,14 +5,15 @@ memory "on representative key/token sizes", with attention to recipient counts,
 repeated key conversion, KDF cost and large post-quantum encodings — and for numeric
 targets to come from measurement rather than invention.
 
-This repository therefore keeps two things: a harness that produces the numbers, and
-invariants that hold without knowing the machine.
+This repository therefore keeps a harness that produces the numbers and coarse
+checks calibrated against measurements in the same process. PBES2 timing is
+advisory because ratios can still fluctuate with runner load.
 
 ```sh
 cargo run --release --example perf_baseline              # markdown table
 cargo run --release --example perf_baseline -- --json    # machine-readable
 cargo run --release --example perf_baseline -- --slow    # + 600 000-iteration PBES2
-cargo test --release --test perf_baselines               # shape invariants
+cargo test --release --test perf_baselines -- --show-output # shapes + PBES2 advisory
 ```
 
 ## Why the numbers are not committed
@@ -48,25 +49,31 @@ across a change — it is what shows whether a fix scaled with the work or aroun
 
 ## What CI enforces, and why it is shape rather than speed
 
-`tests/perf_baselines.rs` asserts four shapes, each with a slack factor far larger
-than the effect it guards against. They are alarms for order-of-magnitude regressions,
-not gates on drift:
+`tests/perf_baselines.rs` covers the following axes. Blocking shape assertions
+use broad slack factors to catch coarse regressions; PBES2 timing is advisory:
 
 - **Decrypting one named recipient does not scale with the recipient count** (alarm at
   10×; measured ≈1×). Encryption is allowed to grow — that is the work — but not
   super-linearly (alarm at 40× for 32× the recipients).
 - **Repeated key conversion is not super-linear** (alarm at 500× for 50 conversions;
   measured ≈50×).
-- **Password derivation follows the caller's budget**: 4× the iterations is measurably
-  slower (a silent no-op parameter would not be), and an input the budget rejects costs
-  far less than one it accepts.
+- **Password-derivation timing is advisory**: an unexpected ratio between 2 048
+  and 8 192 iterations prints a diagnostic and passes. Whole-operation overhead and
+  runner contention can flatten the ratio. Functional failures still fail the test.
+  Deterministic budget and parameter checks remain in `tests/jwe_pbes2.rs` and
+  `tests/jwk_encrypted_pkcs8.rs` (ADR 0048). Blocking tests in
+  `tests/pbes2_iteration_vectors.rs` additionally pin all three PRFs at non-default
+  counts of 1 000 and 2 048 against fixed Python/OpenSSL-derived KEKs and compact
+  tokens. Sender tests unwrap and authenticate fresh tokens using that validated
+  oracle outside the JOSE KDF glue, so a shared round-trip bug cannot pass.
 - **Oversized documents are refused before they are parsed**, self-calibrated against
   the cost of actually parsing a document the same budget admits.
 
 A wall-clock threshold ("ES256 verify under 5 ms") is not in that list on purpose: it
 passes on a build machine, fails on a loaded runner, and teaches people to rerun the
-job instead of reading the failure. Ratios measured back-to-back in one process are the
-version of a performance test that can be trusted.
+job instead of reading the failure. Ratios measured back-to-back can also fluctuate
+with scheduling and load, so the PBES2 ratio is not a CI failure condition. Use
+`--show-output` to see its advisory even when the test succeeds.
 
 Writing these tests corrected one assumption worth recording: the JWK Set budget is
 *two* checks with different powers. `max_bytes` can fire before parsing and is the

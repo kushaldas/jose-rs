@@ -4,12 +4,6 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
-### Security
-
-- Reject duplicate JSON members at every JWT discovery payload depth before
-  normalizing claims. Embedded key-policy ambiguity now fails before the
-  self-signed selector runs; ordinary JWT claims parsing is unchanged (ADR 0047).
-
 ## [0.12.0] - 2026-11-17
 
 ### Added
@@ -39,7 +33,19 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 - Keep PKCS#11 enabled by default; document `default-features = false` for software
   consumers. No crypto dependencies or MSRV changes; lockfile diffs only bump this package.
 
+### Fixed
+
+- Add blocking independent PBES2 vectors at 1 000 and 2 048 iterations for all
+  three PBES2 algorithms, plus bidirectional non-default-count peer checks.
+- Make the PBES2 timing-ratio check advisory so shared-runner timing noise cannot
+  fail CI. Remove the misleading malformed-DER timing assertion; deterministic
+  PBES2 and PKCS#8 work-budget regressions remain required (ADR 0048).
+
 ### Security
+
+- Reject duplicate JSON members at every JWT discovery payload depth before
+  normalizing claims. Embedded key-policy ambiguity now fails before the
+  self-signed selector runs; ordinary JWT claims parsing is unchanged (ADR 0047).
 
 - Correct stale audit guidance: RustSec lists `rsa >=0.10.0` as patched for
   RUSTSEC-2023-0071; the locked 0.10.0 needs no exception. Both signing and
