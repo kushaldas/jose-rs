@@ -36,6 +36,7 @@ fn all_jws_variants() -> Vec<JwsAlgorithm> {
         JwsAlgorithm::ES512,
         JwsAlgorithm::EdDSA,
         JwsAlgorithm::Ed25519,
+        JwsAlgorithm::Ed448,
         JwsAlgorithm::ES256K,
         #[cfg(feature = "post-quantum")]
         JwsAlgorithm::MlDsa44,
@@ -135,6 +136,7 @@ fn key_for_jws(alg: &str) -> Result<Jwk, JoseError> {
         "ES384" => jwk::generate_ec("P-384")?,
         "ES512" => jwk::generate_ec("P-521")?,
         "EdDSA" | "Ed25519" => jwk::generate_ed25519()?,
+        "Ed448" => jwk::generate_ed448()?,
         "ES256K" => jwk::generate_ec("P-256")?,
         #[cfg(feature = "post-quantum")]
         "ML-DSA-44" => jwk::generate_mldsa(kryptering::MlDsaVariant::MlDsa44)?,
@@ -162,9 +164,7 @@ fn key_for_jws(alg: &str) -> Result<Jwk, JoseError> {
         "ML-DSA-65-Ed25519" => {
             jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa65Ed25519)?
         }
-        // Listed as recognized-and-unsupported with the feature on: the composite needs a
-        // standalone Ed448, which the backend does not expose. Building the key anyway lets the
-        // refusal be observed at signing time, which is the stronger claim.
+        // Composite and standalone Ed448 have separate wire/key representations.
         #[cfg(feature = "post-quantum")]
         "ML-DSA-87-Ed448" => {
             jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
@@ -238,7 +238,7 @@ fn expected_kty(alg: &str) -> Option<&'static str> {
         "HS256" | "HS384" | "HS512" => "oct",
         "RS256" | "RS384" | "RS512" | "PS256" | "PS384" | "PS512" => "RSA",
         "ES256" | "ES384" | "ES512" => "EC",
-        "EdDSA" | "Ed25519" => "OKP",
+        "EdDSA" | "Ed25519" | "Ed448" => "OKP",
         _ if alg.starts_with("ML-DSA") => "AKP",
         _ => return None,
     })

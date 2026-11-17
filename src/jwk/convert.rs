@@ -29,7 +29,8 @@ pub fn jwk_to_software_key(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
 
 /// Convert a JWK for an explicitly selected JWS signing or verification operation.
 ///
-/// Enforces `use`, `key_ops`, and exact agreement with `alg` when present.
+/// Enforces `use`, `key_ops`, and curve-bound agreement with `alg` when present.
+/// Legacy EdDSA and the matching fully specified Edwards name satisfy the same pin.
 /// The requested algorithm determines key type, curve, and HMAC minimum length
 /// even when the JWK omits `alg`; the caller's JWK is never modified. Signing
 /// requires private (or symmetric secret) material. Algorithms unsupported by
@@ -66,7 +67,7 @@ pub fn jwk_to_signature_key(
         return Err(JoseError::Key("AKP JWK requires alg".into()));
     }
     if let Some(pinned) = jwk.alg.as_deref() {
-        if pinned != alg.as_str() {
+        if !signature_pin_matches(jwk, pinned, alg.as_str()) {
             return Err(JoseError::Key(format!(
                 "JWK alg {pinned} does not match requested algorithm {}",
                 alg.as_str()
@@ -86,6 +87,21 @@ pub fn jwk_to_signature_key(
         ));
     }
     Ok(key)
+}
+
+/// RFC 8037 §3.1 / RFC 9864 §2.2: aliases refer to the same pure
+/// signature only on the matching Edwards curve. This never expands an
+/// application's wire-algorithm allowlist or rewrites authenticated bytes.
+pub(crate) fn signature_pin_matches(jwk: &Jwk, pinned: &str, requested: &str) -> bool {
+    if jwk.kty == "OKP" {
+        let names = match jwk.crv.as_deref() {
+            Some("Ed25519") => ["EdDSA", "Ed25519"],
+            Some("Ed448") => ["EdDSA", "Ed448"],
+            _ => return pinned == requested,
+        };
+        return names.contains(&pinned) && names.contains(&requested);
+    }
+    pinned == requested
 }
 
 /// Verify that `alg`, if present, is consistent with `kty` and `crv`.
@@ -108,7 +124,7 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         // JWS ECDSA.
         "ES256" | "ES384" | "ES512" | "ES256K" => &["EC"],
         // EdDSA.
-        "EdDSA" | "Ed25519" => &["OKP"],
+        "EdDSA" | "Ed25519" | "Ed448" => &["OKP"],
         // Post-quantum ML-DSA and composite ML-DSA.
         "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" | "ML-DSA-44-ES256" | "ML-DSA-65-ES256"
         | "ML-DSA-87-ES384" | "ML-DSA-44-Ed25519" | "ML-DSA-65-Ed25519" | "ML-DSA-87-Ed448" => {
@@ -141,7 +157,9 @@ fn check_alg_kty_consistency(jwk: &Jwk) -> Result<()> {
         "ES384" => Some("P-384"),
         "ES512" => Some("P-521"),
         "ES256K" => Some("secp256k1"),
+        "EdDSA" if crv == Some("Ed448") => Some("Ed448"),
         "EdDSA" | "Ed25519" => Some("Ed25519"),
+        "Ed448" => Some("Ed448"),
         _ => None,
     };
     if let Some(want) = expected_crv {
@@ -253,6 +271,7 @@ pub fn software_key_to_jwk(key: &kryptering::SoftwareKey) -> Result<Jwk> {
             };
             ed25519_to_jwk(private.as_ref(), &public)
         }
+        KeyAlgorithm::Ed448 => super::ed448::to_jwk(key),
         KeyAlgorithm::X25519 => {
             // Raw 32-byte u-coordinate and scalar, not DER: `public_component`
             // and `export_private` are the raw paths for this algorithm.
@@ -347,7 +366,7 @@ fn reject_oversized_coord(bytes: &[u8], target_len: usize, field: &str) -> Resul
 }
 
 /// Build a new Jwk with only the common metadata cleared.
-fn new_jwk(kty: &str) -> Jwk {
+pub(crate) fn new_jwk(kty: &str) -> Jwk {
     Jwk {
         kty: kty.into(),
         use_: None,
@@ -723,6 +742,10 @@ fn jwk_to_okp(jwk: &Jwk) -> Result<kryptering::SoftwareKey> {
     // agreement then uses `d` while the message publishes `x`.
     if crv == "X25519" {
         return jwk_to_x25519(jwk);
+    }
+
+    if crv == "Ed448" {
+        return super::ed448::from_jwk(jwk);
     }
 
     if crv != "Ed25519" {

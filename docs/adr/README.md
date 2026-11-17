@@ -46,3 +46,7 @@ history.
 | [0040](0040-transient-secrets-have-zeroizing-owners.md) | Transient secrets have zeroizing owners | Accepted |
 | [0041](0041-dependency-refresh-and-msrv-1-89.md) | Refresh dependencies and raise the compiler floor to Rust 1.89 | Accepted |
 | [0042](0042-daily-and-manual-security-audit.md) | Run dependency security audits daily and on demand | Accepted |
+| [0043](0043-edwards-curves-and-pins.md) | Edwards pins identify a pure signature on one curve | Accepted; supersedes parts of 0006 |
+| [0044](0044-authenticated-jwks-and-discovery.md) | Discovery reads untrusted claims; verification returns a fresh result | Accepted |
+| [0045](0045-deterministic-custom-members.md) | Custom header and claim members serialize in sorted order | Accepted |
+| [0046](0046-explicit-validation-time-opt-outs.md) | Time checks can be disabled explicitly without changing defaults | Accepted |

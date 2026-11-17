@@ -23,13 +23,13 @@ fn identifiers_roundtrip_without_aliasing() {
         );
     }
     assert_ne!(JwsAlgorithm::Ed25519, JwsAlgorithm::EdDSA);
-    for invalid in ["ed25519", "ED25519", "Ed448", "Ed25519ph"] {
+    for invalid in ["ed25519", "ED25519", "Ed448ph", "Ed25519ph"] {
         assert!(JwsAlgorithm::from_str(invalid).is_err());
     }
 }
 
 #[test]
-fn compact_jwk_pins_remain_exact() {
+fn compact_jwk_pins_accept_the_same_curve_alias() {
     for (name, other) in [("Ed25519", "EdDSA"), ("EdDSA", "Ed25519")] {
         let mut key = jwk::generate_ed25519().unwrap();
         assert!(key.alg.is_none());
@@ -42,8 +42,8 @@ fn compact_jwk_pins_remain_exact() {
             b"payload"
         );
         public.alg = Some(other.into());
-        assert!(compact::verify_with_jwk(&public, &token).is_err());
-        assert!(compact::sign_with_jwk(&key, b"payload", &JoseHeader::new(other)).is_err());
+        assert!(compact::verify_with_jwk(&public, &token).is_ok());
+        assert!(compact::sign_with_jwk(&key, b"payload", &JoseHeader::new(other)).is_ok());
         public.alg = None;
         assert_eq!(
             compact::verify_with_jwk(&public, &token).unwrap(),

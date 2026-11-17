@@ -124,7 +124,7 @@ pub struct JoseHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crit: Option<Vec<String>>,
 
-    /// Catch-all for additional header parameters.
+    /// Additional header parameters, serialized in lexicographic name order.
     ///
     /// Must not contain a name that a typed field already serializes (`alg`,
     /// `enc`, `kid`, `crit`, ...): signing and encryption reject such headers
@@ -134,7 +134,7 @@ pub struct JoseHeader {
     /// `tag`); JWS signing rejects the JWE-only members
     /// ([`JWE_ONLY_MEMBERS`]).
     #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, Value>,
+    pub extra: std::collections::BTreeMap<String, Value>,
 }
 
 impl JoseHeader {
@@ -153,7 +153,7 @@ impl JoseHeader {
             x5t: None,
             x5t_s256: None,
             crit: None,
-            extra: std::collections::HashMap::new(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 

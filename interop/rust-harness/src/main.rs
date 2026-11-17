@@ -220,6 +220,7 @@ fn gen_key(alg: &str, enc: Option<&str>, crv: Option<&str>) -> Result<()> {
             jose_rs::jwk::generate_composite_mldsa(kryptering::CompositeMlDsaVariant::MlDsa87Ed448)?
         }
         "EdDSA" | "Ed25519" => set_alg(jose_rs::jwk::generate_ed25519()?, alg),
+        "Ed448" => set_alg(jose_rs::jwk::generate_ed448()?, alg),
         // RSA generation for the PEM checks: an RSA key is the one family whose PKCS#8
         // export is long enough that a truncated armor read would still look plausible.
         "RS256" => set_alg(jose_rs::jwk::generate_rsa(2048)?, "RS256"),
@@ -311,7 +312,13 @@ fn derive_key() -> Result<()> {
     let own = agreement_key(&input.own_jwk).map_err(anyhow::Error::from)?;
     let peer = peer_key(&input.peer_jwk).map_err(anyhow::Error::from)?;
     let derived = own
-        .derive_key(&peer, alg_id, input.apu.as_deref(), input.apv.as_deref(), key_len)
+        .derive_key(
+            &peer,
+            alg_id,
+            input.apu.as_deref(),
+            input.apv.as_deref(),
+            key_len,
+        )
         .map_err(anyhow::Error::from)?;
     emit(&json!({
         "derived_b64u": URL_SAFE_NO_PAD.encode(derived.as_slice()),
@@ -521,11 +528,9 @@ fn verify_flattened_jwk() -> Result<()> {
         None => None,
     };
     let payload = match detached {
-        Some(bytes) => jose_rs::jws::json::verify_flattened_detached_with_jwk(
-            &input.jwk,
-            &input.jws,
-            &bytes,
-        )?,
+        Some(bytes) => {
+            jose_rs::jws::json::verify_flattened_detached_with_jwk(&input.jwk, &input.jws, &bytes)?
+        }
         None => jose_rs::jws::json::verify_flattened_with_jwk(&input.jwk, &input.jws)?,
     };
     emit(&VerifyPayloadOutput {
@@ -654,7 +659,6 @@ fn verify_general_jwk() -> Result<()> {
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // JWK Set selection (bounded, explicit policy)
 // ---------------------------------------------------------------------------
@@ -716,12 +720,8 @@ fn decode_jwkset_policy() -> Result<()> {
         policy.require_kid = true;
     }
     let validation = jose_rs::jwt::Validation::default();
-    let claims = jose_rs::jwt::decode_with_jwkset_policy(
-        &input.jwks,
-        &input.jwt,
-        &validation,
-        &policy,
-    )?;
+    let claims =
+        jose_rs::jwt::decode_with_jwkset_policy(&input.jwks, &input.jwt, &validation, &policy)?;
     emit(&DecodeJwkSetOutput { claims })
 }
 
@@ -775,7 +775,6 @@ fn diagnose_jwks() -> Result<()> {
         .collect();
     emit(&DiagnoseJwksOutput { entries })
 }
-
 
 #[derive(Deserialize)]
 struct SignJwtInput {
@@ -1083,7 +1082,6 @@ fn decrypt_compact(alg: &str, enc: &str) -> Result<()> {
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // General JWE JSON Serialization (RFC 7516 §7.2.1)
 // ---------------------------------------------------------------------------
@@ -1280,7 +1278,7 @@ fn export_pem(kind: &str) -> Result<()> {
 /// Byte-for-byte comparison against `jose`'s `calculateJwkThumbprintUri` is the point, so this
 /// prints text rather than JSON: the URI *is* the artifact.
 fn thumbprint_uri(hash: Option<&str>) -> Result<()> {
-    use jose_rs::jwk::thumbprint::{ThumbprintHash, thumbprint_uri};
+    use jose_rs::jwk::thumbprint::{thumbprint_uri, ThumbprintHash};
     let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
     let hash = match hash.unwrap_or("SHA-256") {
         "SHA-256" | "sha-256" | "sha256" => ThumbprintHash::Sha256,
@@ -1326,7 +1324,9 @@ fn export_pkcs8_encrypted(password: &str, iterations: Option<&str>) -> Result<()
     let jwk: Jwk = serde_json::from_str(&read_stdin()?)?;
     let scheme = match iterations {
         Some(raw) => jose_rs::jwk::Pkcs8Encryption::Aes256CbcPbkdf2HmacSha256 {
-            iterations: raw.parse().map_err(|_| anyhow!("--iterations must be a number"))?,
+            iterations: raw
+                .parse()
+                .map_err(|_| anyhow!("--iterations must be a number"))?,
         },
         None => jose_rs::jwk::Pkcs8Encryption::default(),
     };

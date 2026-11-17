@@ -15,8 +15,7 @@
 //!   [`crate::jws::SignOptions`] / [`crate::jws::VerifyOptions`] carried
 //!   from `jws::compact`.
 //!
-//! Raw Ed25519 verifiers support both `Ed25519` and legacy `EdDSA` wire
-//! identifiers. Applications requiring one exact name must enforce their
+//! Raw Edwards verifiers support their fully specified identifier and legacy `EdDSA`. Applications requiring one exact name must enforce their
 //! protected-header algorithm policy in addition to primitive verification.
 
 use std::borrow::Cow;
@@ -857,7 +856,7 @@ pub fn sign_flattened_detached_with_jwk_opts(
 /// The algorithm comes from the JWS's own protected header and the verifier is
 /// built by the same internal rule set `compact::verify_with_jwk` uses — one function,
 /// [`verify_with_jwk`](crate::jws::compact::verify_with_jwk) uses: a pinned
-/// `jwk.alg` must match the token's `alg` spelling, `use`/`key_ops` are enforced
+/// `jwk.alg` must match (including same-curve Edwards aliases); `use`/`key_ops` are enforced
 /// for verification, and strength is checked against the *token's* algorithm —
 /// so an HS256-sized secret cannot be used for an HS512 token by editing the
 /// header, whether or not `alg` is pinned.
@@ -1093,8 +1092,8 @@ pub fn verify_general_with_jwks(
     let mut any_verified = false;
 
     // The algorithms present, deduplicated by *spelling*: `EdDSA` and `Ed25519` are distinct
-    // variants with distinct key requirements, and collapsing their names would let a pinned key
-    // be applied to the wrong one.
+    // wire names. Keep each spelling to construct the appropriate verifier while
+    // preserving per-signature reporting; JWK pin matching handles curve aliases.
     let mut present_algs: Vec<String> = Vec::new();
     for entry in &jws.signatures {
         let Ok(header) = decode_protected(&entry.protected) else {

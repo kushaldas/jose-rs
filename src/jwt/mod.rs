@@ -5,8 +5,10 @@
 //! validation (expiration, not-before, issuer, audience).
 
 pub mod claims;
+mod discovery;
 pub mod numeric_date;
 pub mod validation;
+pub use discovery::{decode_self_signed, UnverifiedJwt};
 
 pub use claims::{Audience, Claims};
 pub use numeric_date::NumericDate;
@@ -305,6 +307,26 @@ pub fn decode_with_jwkset(
     token: &str,
     validation: &Validation,
 ) -> Result<Claims> {
+    decode_with_jwkset_authenticated(set, token, validation).map(crate::Authenticated::into_value)
+}
+
+/// Verify with the legacy JWKS selection rules and retain the authenticated header.
+///
+/// Reports the successful key's original set index through
+/// [`crate::Authenticated::verified_key_index`]. For bounded key discovery use
+/// [`decode_with_jwkset_policy_authenticated`]. No URL or embedded key is trusted.
+///
+/// # Errors
+///
+/// Returns [`JoseError::Key`] for empty sets, ambiguous or unmatched key IDs,
+/// and key-policy errors. Header parsing may return [`JoseError::Base64`],
+/// [`JoseError::Json`] or [`JoseError::InvalidToken`]; signature and claim errors
+/// propagate from [`decode_with_jwk_authenticated`].
+pub fn decode_with_jwkset_authenticated(
+    set: &crate::jwk::JwkSet,
+    token: &str,
+    validation: &Validation,
+) -> Result<crate::Authenticated<Claims>> {
     let header = crate::jws::compact::decode_header(token)?;
 
     // Prefer kid-based selection when the header pins one and the set
@@ -314,7 +336,13 @@ pub fn decode_with_jwkset(
     // smuggle a signature past key-pinning policies.
     if let Some(kid) = header.kid.as_deref() {
         if let Some(jwk) = set.find_unique_by_kid(kid)? {
-            return decode_with_jwk(jwk, token, validation);
+            let index = set
+                .keys
+                .iter()
+                .position(|key| std::ptr::eq(key, jwk))
+                .expect("selected key belongs to set");
+            return decode_with_jwk_authenticated(jwk, token, validation)
+                .map(|outcome| outcome.with_verified_key_index(index));
         }
         // Exception: a set in which no JWK carries a `kid` at all cannot be
         // addressed by name, so a pinned kid selects nothing and the token is
@@ -340,9 +368,9 @@ pub fn decode_with_jwkset(
         return Err(JoseError::Key("JWK Set is empty".into()));
     }
     let mut last_err: Option<JoseError> = None;
-    for jwk in &set.keys {
-        match decode_with_jwk(jwk, token, validation) {
-            Ok(claims) => return Ok(claims),
+    for (index, jwk) in set.keys.iter().enumerate() {
+        match decode_with_jwk_authenticated(jwk, token, validation) {
+            Ok(outcome) => return Ok(outcome.with_verified_key_index(index)),
             Err(e) => last_err = Some(e),
         }
     }
@@ -399,6 +427,28 @@ pub fn decode_with_jwkset_policy(
     validation: &Validation,
     policy: &crate::jwk::selection::SelectionPolicy,
 ) -> Result<Claims> {
+    decode_with_jwkset_policy_authenticated(set, token, validation, policy)
+        .map(crate::Authenticated::into_value)
+}
+
+/// Verify with an explicit candidate budget and return authenticated claims/header.
+///
+/// The successful index refers to the original set, not the filtered candidates.
+/// Selection and validation requirements are combined; neither can weaken the other.
+///
+/// # Errors
+///
+/// Returns selection errors ([`JoseError::Key`] or [`JoseError::InvalidHeader`]),
+/// or [`JoseError::InvalidToken`] when no selected candidate passes signature
+/// and claims validation, as in [`decode_with_jwkset_policy`]. Malformed
+/// headers propagate [`JoseError::Base64`], [`JoseError::Json`] or
+/// [`JoseError::InvalidToken`] before selecting keys.
+pub fn decode_with_jwkset_policy_authenticated(
+    set: &crate::jwk::JwkSet,
+    token: &str,
+    validation: &Validation,
+    policy: &crate::jwk::selection::SelectionPolicy,
+) -> Result<crate::Authenticated<Claims>> {
     let header = crate::jws::compact::decode_header(token)?;
     // Either source of the requirement is enough: `Validation::require_kid` is the
     // caller's token-level rule, `SelectionPolicy::require_kid` the key-level one.
@@ -416,8 +466,15 @@ pub fn decode_with_jwkset_policy(
     let matched_kid = selection.matched_kid.clone();
     let mut failures: Vec<String> = Vec::new();
     for candidate in selection.candidates {
-        match decode_with_jwk(candidate, token, validation) {
-            Ok(claims) => return Ok(claims),
+        match decode_with_jwk_authenticated(candidate, token, validation) {
+            Ok(outcome) => {
+                let index = set
+                    .keys
+                    .iter()
+                    .position(|key| std::ptr::eq(key, candidate))
+                    .expect("selected key belongs to set");
+                return Ok(outcome.with_verified_key_index(index));
+            }
             Err(err) => failures.push(err.to_string()),
         }
     }
@@ -441,18 +498,30 @@ pub fn decode_with_jwkset_policy(
 /// Decode and validate a JWT, returning the claims *with* the protected header the
 /// signature authenticated.
 ///
-/// Same checks as [`decode_with_jwk`]. The returned [`Authenticated`](crate::Authenticated)(crate::Authenticated)
+/// Same checks as [`decode_with_jwk`]. The returned [`Authenticated`](crate::Authenticated)
 /// carries the verified header and the (clearly labelled) unauthenticated metadata, so a
 /// caller that needs `kid`, `typ`, `cty` or a `crit` parameter reads the copy the signature
 /// covered instead of re-parsing and hoping it picked the right object.
+///
+/// # Errors
+///
+/// Returns [`JoseError::Key`] for key material or operation refusal,
+/// [`JoseError::UnsupportedAlgorithm`] for unsupported/disallowed algorithms,
+/// [`JoseError::InvalidHeader`] for header-policy failures, or
+/// [`JoseError::InvalidToken`] / [`JoseError::Crypto`] for signature failures.
+/// Parsing may return [`JoseError::Base64`], [`JoseError::Json`] or
+/// [`JoseError::InvalidClaims`]. Claim validation can return
+/// [`JoseError::Expired`], [`JoseError::NotYetValid`], [`JoseError::InvalidIssuer`],
+/// [`JoseError::InvalidAudience`] or [`JoseError::InvalidClaims`].
 pub fn decode_with_jwk_authenticated(
     jwk: &crate::jwk::Jwk,
     token: &str,
     validation: &Validation,
 ) -> Result<crate::Authenticated<Claims>> {
-    let claims = decode_with_jwk(jwk, token, validation)?;
-    let protected = crate::jws::compact::decode_header(token)?;
-    Ok(crate::Authenticated::new(claims, protected, Vec::new()))
+    let outcome = crate::jws::compact::verify_with_jwk_authenticated(jwk, token)?;
+    let claims = Claims::from_json_bytes(&outcome.value)?;
+    validation.validate_with_header(&claims, &outcome.protected)?;
+    Ok(outcome.map(|_| claims))
 }
 
 /// Decode a JWT without verifying the signature (DANGEROUS — for inspection only).

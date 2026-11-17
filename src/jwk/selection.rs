@@ -72,7 +72,7 @@ pub const DEFAULT_MAX_CANDIDATES: usize = 64;
 const SUPPORTED_KTY: [&str; 5] = ["RSA", "EC", "OKP", "oct", "AKP"];
 
 /// Curves this build can potentially use, per `kty`.
-const SUPPORTED_OKP_CRV: [&str; 2] = ["Ed25519", "X25519"];
+const SUPPORTED_OKP_CRV: [&str; 3] = ["Ed25519", "Ed448", "X25519"];
 const SUPPORTED_EC_CRV: [&str; 3] = ["P-256", "P-384", "P-521"];
 
 /// Import-time budgets for a JWK Set.
@@ -137,7 +137,7 @@ impl SetLimits {
 /// the actionable part:
 ///
 /// * [`EntryStatus::Unsupported`] — this build does not implement that kind of
-///   key (secp256k1, Ed448, Brainpool). The entry is fine; the operator's
+///   key (secp256k1, X448, Brainpool). The entry is fine; the operator's
 ///   expectation may not be. Nothing is wrong with the data.
 /// * [`EntryStatus::Invalid`] — the kind *is* supported and the material is
 ///   broken. This is the one to alert on: it means someone published something

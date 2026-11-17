@@ -30,8 +30,8 @@ pub struct Validation {
     /// Allow-list of JwsAlgorithm values. If non-empty, the token's
     /// header `alg` must map to one of these. Empty means no restriction
     /// beyond the verifier-algorithm binding.
-    /// `Ed25519` and `EdDSA` are distinct entries even though they currently
-    /// use the same cryptographic primitive.
+    /// `Ed25519`, `Ed448` and legacy `EdDSA` are distinct entries; the JWK pin
+    /// aliases never broaden this application allowlist.
     pub allowed_algorithms: Vec<JwsAlgorithm>,
     /// Clock skew tolerance in seconds (default: 60).
     pub leeway: u64,
@@ -89,6 +89,37 @@ impl Validation {
     /// Construct validation settings with secure defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Verify signatures without checking `exp`, `nbf`, or future `iat`.
+    ///
+    /// This explicit opt-in accepts expired and not-yet-valid tokens. Required
+    /// claims, issuer, audience, type and algorithm policy still apply when set.
+    /// Defaults from [`Self::new`] continue to enforce all three time checks.
+    pub fn signature_only() -> Self {
+        Self::new()
+            .without_exp()
+            .without_nbf()
+            .without_iat_future_check()
+    }
+
+    /// Disable expiration checking, accepting expired tokens. Required `exp`
+    /// presence and any configured maximum age remain enforced.
+    pub fn without_exp(mut self) -> Self {
+        self.validate_exp = false;
+        self
+    }
+
+    /// Disable not-before checking, accepting tokens before their validity window.
+    pub fn without_nbf(mut self) -> Self {
+        self.validate_nbf = false;
+        self
+    }
+
+    /// Accept future `iat` values; any configured maximum-age policy still applies.
+    pub fn without_iat_future_check(mut self) -> Self {
+        self.validate_iat_not_future = false;
+        self
     }
 
     /// Require the `iss` claim to equal `issuer`.

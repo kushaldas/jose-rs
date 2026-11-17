@@ -265,8 +265,8 @@ pub(crate) fn pkcs8_portable_form(der: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 ///
 /// `OKP`/`X25519` is refused: this backend represents an X25519 public key as its bare
 /// 32-octet `u` coordinate, and dressing raw bytes up with a hand-made SPKI wrapper would
-/// write a file that announces a format it does not have. Ed25519 has a real SPKI encoding
-/// and is exported normally — the distinction is the curve, not the `kty`.
+/// write a file that announces a format it does not have. Ed25519 and Ed448 have real SPKI encodings
+/// and are exported normally — the distinction is the curve, not the `kty`.
 ///
 /// # Errors
 ///
@@ -292,7 +292,7 @@ fn spki_refusal(jwk: &Jwk) -> Option<String> {
     match (jwk.kty.as_str(), crv) {
         // Raw-coordinate key types: the "public key" *is* the coordinate, with no algorithm
         // identifier and no DER structure around it.
-        ("OKP", crv) if crv != "Ed25519" => Some(format!(
+        ("OKP", crv) if !matches!(crv, "Ed25519" | "Ed448") => Some(format!(
             "{crv} public keys have no SPKI encoding in this backend — the public value is a \
              bare coordinate, and wrapping it in a hand-made SPKI header would produce a file \
              that claims a structure it does not have"

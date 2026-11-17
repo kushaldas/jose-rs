@@ -340,8 +340,7 @@ pub(crate) fn prepare_sign_header(
         ));
     }
     let header_alg = JwsAlgorithm::from_str(&header.alg)?;
-    let header_sig_alg = header_alg.to_crypto()?;
-    if signer.algorithm() != header_sig_alg {
+    if !header_alg.matches_crypto(signer.algorithm())? {
         return Err(JoseError::InvalidHeader(format!(
             "header alg {} does not match signer algorithm",
             header.alg
@@ -462,8 +461,7 @@ pub(crate) fn validate_header_opts(
     }
 
     let header_alg = JwsAlgorithm::from_str(&header.alg)?;
-    let header_sig_alg = header_alg.to_crypto()?;
-    if verifier.algorithm() != header_sig_alg {
+    if !header_alg.matches_crypto(verifier.algorithm())? {
         return Err(JoseError::InvalidToken(format!(
             "header alg {} does not match verifier algorithm",
             header.alg
@@ -500,9 +498,8 @@ pub(crate) fn validate_header_b64_opts(header_b64: &str, opts: &VerifyOptions) -
 /// Returns the decoded payload on success. The token's `alg` header is
 /// cross-checked against `verifier.algorithm()` — mismatches are rejected
 /// before any cryptographic operation. `alg: "none"` is always rejected.
-/// A raw Ed25519 verifier supports both `Ed25519` and legacy `EdDSA` wire
-/// names because it identifies only the primitive. To require one exact name,
-/// use [`verify_with_jwk`] with a pinned `jwk.alg`, or a JWT algorithm allowlist.
+/// Raw Edwards verifiers accept their fully specified name and legacy `EdDSA`.
+/// Applications requiring one wire spelling must use a JWT algorithm allowlist.
 pub fn verify(verifier: &dyn kryptering::Verifier, token: &str) -> Result<Vec<u8>> {
     verify_with_options(verifier, token, &VerifyOptions::new())
 }
@@ -624,10 +621,10 @@ pub(crate) fn signer_from_jwk(
         .as_deref()
         .ok_or_else(|| JoseError::Key("JWK alg must be set for sign_with_jwk".into()))?;
     let jwk_alg = JwsAlgorithm::from_str(jwk_alg_str)?;
-    let sig_alg = jwk_alg.to_crypto()?;
+    let sig_alg = jwk_alg.crypto_for_jwk(jwk)?;
 
     // 2. Header must agree with the JWK's pinned alg.
-    if header.alg != jwk_alg_str {
+    if !crate::jwk::convert::signature_pin_matches(jwk, jwk_alg_str, &header.alg) {
         return Err(JoseError::InvalidHeader(format!(
             "header alg {} does not match JWK alg {jwk_alg_str}",
             header.alg
@@ -645,7 +642,7 @@ pub(crate) fn signer_from_jwk(
 /// Build a verifier from a JWK for an algorithm named by an *untrusted* header value.
 ///
 /// The rules mirror [`signer_from_jwk`] with the direction reversed: the algorithm comes from the
-/// token, a `jwk.alg` pin must match it exactly if present, `use`/`key_ops` are enforced for
+/// token, a `jwk.alg` pin must match it (including same-curve Edwards aliases), `use`/`key_ops` are enforced for
 /// [`JwkOp::Verify`], and the key is converted under that algorithm's strength rules — which is
 /// why an HS256 key is refused for an HS512 token even with no `alg` pinned, and why a short
 /// HMAC key cannot be talked into a weaker algorithm by editing the header.
@@ -654,13 +651,12 @@ pub(crate) fn verifier_from_jwk(
     header_alg: &str,
 ) -> Result<kryptering::SoftwareVerifier> {
     let parsed = JwsAlgorithm::from_str(header_alg)?;
-    let sig_alg = parsed.to_crypto()?;
+    let sig_alg = parsed.crypto_for_jwk(jwk)?;
 
-    // If the JWK pins an alg, require exact agreement with the header. Compared as the *wire*
-    // strings, not the parsed enums: `EdDSA` and `Ed25519` are distinct enum variants, and a pin
-    // is a statement about what the token may say, so spelling is what must match.
+    // RFC 8725 §3.1: preserve pins, allowing only the curve-bound Edwards
+    // equivalence in ADR 0043. Caller wire-name allowlists remain exact.
     if let Some(jwk_alg) = jwk.alg.as_deref() {
-        if jwk_alg != header_alg {
+        if !crate::jwk::convert::signature_pin_matches(jwk, jwk_alg, header_alg) {
             return Err(JoseError::InvalidToken(format!(
                 "JWK alg {jwk_alg} does not match token header alg {header_alg}"
             )));

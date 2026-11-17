@@ -41,7 +41,7 @@ new `[[bin]]` target lands on the library.
 
 ## Running locally
 
-For focused Ed25519 and legacy EdDSA compatibility with jwcrypto 1.6.1,
+For focused Ed25519, Ed448 and legacy EdDSA compatibility with jwcrypto 1.6.1,
 use a Python environment with that package installed:
 
 ```sh
@@ -66,8 +66,9 @@ The last check needs `cryptography` (already a `jwcrypto` dependency) and takes
 no arguments.
 
 These checks generate disposable keys in memory and verify messages in both
-directions; they are separate from the Node matrix below. The Ed25519 check
-covers RFC 8037 §1.1 key shapes and RFC 7515 §4.1.9 legacy `EdDSA` labels; the
+directions; they are separate from the Node matrix below. The Edwards check
+covers both OKP curves with explicit and legacy wire names, including fully
+specified JWK pins paired with legacy headers (ADR 0043); the
 NumericDate check covers signed JWTs with fractional dates in both directions
 (Rust integration tests cover nanosecond boundary decisions).
 
@@ -159,6 +160,9 @@ jwcrypto's `JWK.from_password` takes text and UTF-8 encodes it itself, so it can
 express a password that is not valid text. jose-rs accepts both forms.
 
 ### PEM key files against OpenSSL and `cryptography` (`pem_jwcrypto.py`)
+
+Includes Ed448 PKCS#8/SPKI import/export in both directions, checking raw JWK
+components and OpenSSL re-encoding as well as signatures from imported keys.
 
 60 checks, and the only suite here that shells out to the `openssl` CLI — because the
 question a key file raises is not "does somebody read it" but "is it the file everybody

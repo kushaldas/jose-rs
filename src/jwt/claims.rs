@@ -77,9 +77,10 @@ pub struct Claims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
 
-    /// Custom claims
+    /// Custom claims, serialized in lexicographic name order.
+    /// This is deterministic emission, not JSON canonicalization.
     #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, Value>,
+    pub extra: std::collections::BTreeMap<String, Value>,
 }
 
 /// Audience can be a single string or an array of strings.

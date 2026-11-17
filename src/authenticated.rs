@@ -76,6 +76,7 @@ pub struct Authenticated<T> {
     /// are not integrity-protected: a document that verifies perfectly can carry a
     /// hostile `kid` here.
     pub unprotected: Vec<Value>,
+    verified_key_index: Option<usize>,
 }
 
 impl<T> Authenticated<T> {
@@ -89,7 +90,22 @@ impl<T> Authenticated<T> {
             value,
             protected,
             unprotected,
+            verified_key_index: None,
         }
+    }
+
+    /// Index of the JWK that verified this token, relative to the supplied set.
+    ///
+    /// This identifies the successful candidate even in a kid-less fallback.
+    /// It is not an identity or authorization claim. Single-key and JWE APIs
+    /// return `None`; [`Self::map`] preserves it.
+    pub fn verified_key_index(&self) -> Option<usize> {
+        self.verified_key_index
+    }
+
+    pub(crate) fn with_verified_key_index(mut self, index: usize) -> Self {
+        self.verified_key_index = Some(index);
+        self
     }
 
     /// Discard the header and keep the value.
@@ -106,6 +122,7 @@ impl<T> Authenticated<T> {
             value: f(self.value),
             protected: self.protected,
             unprotected: self.unprotected,
+            verified_key_index: self.verified_key_index,
         }
     }
 

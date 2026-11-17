@@ -78,7 +78,7 @@ pub fn generate_ec(curve: &str) -> Result<Jwk> {
 ///
 /// The key has no `alg` pin. Choose `Ed25519` for the fully specified wire
 /// identifier or `EdDSA` for legacy interoperability before one-shot signing.
-/// The two identifiers are not interchangeable in a pinned JWK.
+/// The matching curve names satisfy the same JWK pin; JWT allowlists stay exact.
 ///
 /// ```
 /// use jose_rs::{jwk, jws::compact, JoseHeader, JwsAlgorithm};
@@ -98,6 +98,31 @@ pub fn generate_ed25519() -> Result<Jwk> {
     let sw =
         kryptering::SoftwareKey::from_pkcs8_der(kryptering::KeyAlgorithm::Ed25519, der.as_bytes())?;
     software_key_to_jwk(&sw)
+}
+
+/// Generate an unpinned Ed448 JWK using the backend's pure Ed448 primitive.
+///
+/// Set `alg` to `Ed448` or legacy `EdDSA` before one-shot signing. No
+/// post-quantum feature is required; Ed448ph and nonempty contexts are refused.
+///
+/// # Errors
+///
+/// Returns [`JoseError::Key`] if OS entropy or key encoding fails, or
+/// [`JoseError::Crypto`] if the backend refuses the generated key.
+///
+/// ```
+/// use jose_rs::{jwk, jws::compact, JoseHeader};
+/// let mut key = jwk::generate_ed448()?;
+/// key.alg = Some("Ed448".into());
+/// let token = compact::sign_with_jwk(&key, b"statement", &JoseHeader::new("EdDSA"))?;
+/// assert_eq!(compact::verify_with_jwk(&key.to_public_jwk(), &token)?, b"statement");
+/// # Ok::<(), jose_rs::JoseError>(())
+/// ```
+pub fn generate_ed448() -> Result<Jwk> {
+    let mut seed = zeroize::Zeroizing::new([0u8; 57]);
+    getrandom::fill(seed.as_mut()).map_err(|_| JoseError::Key("OS entropy unavailable".into()))?;
+    let key = super::ed448::from_seed(seed.as_ref())?;
+    software_key_to_jwk(&key)
 }
 
 /// Generate an X25519 key pair as an OKP JWK (RFC 8037 §2).
@@ -508,6 +533,8 @@ pub enum KeyGeneration {
     },
     /// Ed25519 key pair.
     Ed25519,
+    /// Pure Ed448 key pair with a 57-byte private seed.
+    Ed448,
     /// X25519 key pair (key agreement; no signing).
     X25519,
     /// Symmetric key of a JOSE-sized length in bytes.
@@ -523,7 +550,7 @@ impl KeyGeneration {
         match self {
             KeyGeneration::Rsa { .. } => "RSA",
             KeyGeneration::Ec { .. } => "EC",
-            KeyGeneration::Ed25519 | KeyGeneration::X25519 => "OKP",
+            KeyGeneration::Ed25519 | KeyGeneration::Ed448 | KeyGeneration::X25519 => "OKP",
             KeyGeneration::Oct { .. } => "oct",
         }
     }
@@ -555,6 +582,7 @@ pub fn generate_key(options: KeyGeneration) -> Result<Jwk> {
         KeyGeneration::Rsa { bits } => generate_rsa(bits),
         KeyGeneration::Ec { curve } => generate_ec(curve.as_str()),
         KeyGeneration::Ed25519 => generate_ed25519(),
+        KeyGeneration::Ed448 => generate_ed448(),
         KeyGeneration::X25519 => generate_x25519(),
         KeyGeneration::Oct { size } => {
             // The set is what JOSE's own algorithms use: AES-128/192/256 for key management and

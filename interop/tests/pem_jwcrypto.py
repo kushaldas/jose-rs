@@ -4,7 +4,7 @@
 PEM is where an implementation decides how strict it wants to be, so these checks are
 deliberately weighted toward the label and the armor rather than toward the DER:
 
-  * **Python → Rust.** `cryptography` generates RSA-2048 / P-256 / P-384 / P-521 / Ed25519
+  * **Python → Rust.** `cryptography` generates RSA-2048 / P-256 / P-384 / P-521 / Ed25519 / Ed448
     keys and exports PKCS#8 and SPKI PEM. jose-rs imports them, and the resulting JWK is
     compared member by member against values computed *here* from the key object — the
     fixed-width coordinates, the minimal-width RSA integers — so an import that guessed at
@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa, padding
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, rsa, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -119,11 +119,12 @@ def expected_jwk_from_python(key, include_private):
         if include_private:
             d = key.private_numbers().private_value
             jwk["d"] = i2b(d, width)
-    elif isinstance(key, (ed25519.Ed25519PrivateKey, ed25519.Ed25519PublicKey)):
+    elif isinstance(key, (ed25519.Ed25519PrivateKey, ed25519.Ed25519PublicKey, ed448.Ed448PrivateKey, ed448.Ed448PublicKey)):
         raw = pub.public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw
         )
-        jwk = {"kty": "OKP", "crv": "Ed25519", "x": b64e(raw)}
+        curve = "Ed448" if isinstance(pub, ed448.Ed448PublicKey) else "Ed25519"
+        jwk = {"kty": "OKP", "crv": curve, "x": b64e(raw)}
         if include_private:
             jwk["d"] = b64e(
                 key.private_bytes(
@@ -156,6 +157,7 @@ def make_keys():
         "P-384": ec.generate_private_key(ec.SECP384R1(), default_backend()),
         "P-521": ec.generate_private_key(ec.SECP521R1(), default_backend()),
         "Ed25519": ed25519.Ed25519PrivateKey.generate(),
+        "Ed448": ed448.Ed448PrivateKey.generate(),
     }
 
 
@@ -165,7 +167,7 @@ def pem_of(key, private=True):
     return key.private_bytes(serialization.Encoding.PEM, fmt, enc) if private else key.public_key().public_bytes(serialization.Encoding.PEM, fmt)
 
 
-SIGN_ALG = {"RSA-2048": "RS256", "P-256": "ES256", "P-384": "ES384", "P-521": "ES512", "Ed25519": "EdDSA"}
+SIGN_ALG = {"RSA-2048": "RS256", "P-256": "ES256", "P-384": "ES384", "P-521": "ES512", "Ed25519": "EdDSA", "Ed448": "Ed448"}
 
 
 def verify_in_python(name, public_pem, token):
@@ -174,7 +176,7 @@ def verify_in_python(name, public_pem, token):
     signing_input = (header_b64 + "." + payload_b64).encode()
     sig = base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
     key = serialization.load_pem_public_key(public_pem, backend=default_backend())
-    if name == "Ed25519":
+    if name in ("Ed25519", "Ed448"):
         key.verify(sig, signing_input)
     elif name == "RSA-2048":
         key.verify(sig, signing_input, padding.PKCS1v15(), hashes.SHA256())
@@ -287,7 +289,7 @@ def main(harness_path):
             check("%s signs with a key read from another implementation's PEM" % name, False, str(exc)[:200])
 
     # ------------------------------------------------------------------ Rust → Python
-    for alg, crv in [("RS256", None), ("ES256", None), ("ES384", None), ("EdDSA", None)]:
+    for alg, crv in [("RS256", None), ("ES256", None), ("ES384", None), ("EdDSA", None), ("Ed448", None)]:
         gen_args = ["gen-key", "--alg", alg]
         jwk_json = harness_ok(harness_path, gen_args, b"")
         rust_key = json.loads(jwk_json)

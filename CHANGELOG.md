@@ -4,6 +4,42 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-17
+
+### Added
+
+- Standalone pure Ed448 signatures with empty context: `JwsAlgorithm::Ed448`,
+  `generate_ed448()`, `KeyGeneration::Ed448`, OKP JWK conversion and RFC 8410
+  PKCS#8/SPKI/PEM import/export. Uses the existing kryptering 0.7.1 primitive.
+- Authenticated JWT verification with JWK Sets, with legacy and explicit bounded
+  selection variants and `Authenticated::verified_key_index()` (ADR 0044).
+- `UnverifiedJwt` inspection followed by bounded verification, and synchronous
+  `decode_self_signed` for embedded candidate-key discovery. Neither establishes
+  issuer trust or fetches keys. The deprecated inspection API remains available.
+- `Validation::signature_only()`, `without_exp()`, `without_nbf()` and
+  `without_iat_future_check()`; normal validation defaults are unchanged (ADR 0046).
+
+### Changed / migration
+
+- Edwards JWK pins accept `EdDSA` and the matching curve-specific name in either
+  direction, with strict curve/key-operation checks. JWT algorithm allowlists
+  still compare wire names exactly. This supersedes ADR 0006's spelling restriction
+  (ADR 0043); use an allowlist when requiring fully specified headers.
+- **Source breaking:** `Claims.extra` and `JoseHeader.extra` are now sorted
+  `BTreeMap`s. Convert HashMaps with `.into_iter().collect()` (ADR 0045).
+- **Source breaking:** exhaustive `JwsAlgorithm`/`KeyGeneration` matches need an
+  Ed448 arm. `Authenticated` has private verification-index metadata: external
+  construction/exhaustive struct patterns must use the verification APIs/accessors.
+- Keep PKCS#11 enabled by default; document `default-features = false` for software
+  consumers. No crypto dependencies or MSRV changes; lockfile diffs only bump this package.
+
+### Security
+
+- Correct stale audit guidance: RustSec lists `rsa >=0.10.0` as patched for
+  RUSTSEC-2023-0071; the locked 0.10.0 needs no exception. Both signing and
+  decryption use the patched private-operation implementation. No advisory ignores
+  remain. Historical ADRs retain their contemporaneous advisory assessments.
+
 ## [0.11.0] - 2026-11-10
 
 ### Changed
@@ -17,8 +53,9 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 ### Security
 
 - Updated `crypto-bigint` and `ctutils` to patched releases, clearing their
-  RustSec advisories. `cargo audit --deny warnings` passes with the existing
-  documented exception for the unresolved RSA timing advisory.
+  RustSec advisories. `cargo audit --deny warnings` passes without advisory
+  ignores. The locked `rsa 0.10.0` is in RustSec's patched range for the
+  RSA timing advisory (corrected in the 0.12.0 documentation review).
 
 ## [0.10.0] - 2026-10-20
 

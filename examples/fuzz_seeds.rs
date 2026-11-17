@@ -90,6 +90,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Err("fuzz seed corpus drifted from its generator".into())
 }
 
+/// Public RFC 8032 §7.4 Blank vector, never a deployed secret.
+fn ed448_jwk() -> Result<Jwk, Box<dyn std::error::Error>> {
+    Ok(Jwk::from_json(
+        r#"{"kty":"OKP","crv":"Ed448","alg":"Ed448","x":"X9dEm1m0Yf0s54fsYWrUah2hNCSFpw4fig6nXYDpZ3jt8SR2m0bHBhvWeD3x5Q9s0foavq_oJWGA","d":"bIKlYsuAjRDWMr6JyFE-v2ySnzTd-oyfY8mWDvbjSKNSjIo_zC8ETjmj_FuUSS-PAy51SaIAmPlb"}"#,
+    )?)
+}
+
 /// Seeds for `jwk_from_pem`, `jwk_from_der`, `certificate_extract` and
 /// `encrypted_pkcs8`: checked-in key files, plus the DER inside their armor.
 ///
@@ -276,6 +283,38 @@ fn key_file_seeds(root: &Path, out: &Path) -> Result<(), Box<dyn std::error::Err
 /// `jwe_decrypt`, `jwt_decode_unverified`, `base64url_decode`): real tokens built
 /// through the real sign/encrypt paths, so a fuzzer starts past the base64 layer.
 fn token_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let ed = ed448_jwk()?;
+    let private = jose_rs::jwk::jwk_to_software_key(&ed)?;
+    write_seed(
+        out,
+        "jwk_from_der",
+        "ed448-pkcs8.der",
+        &private.export_private()?,
+    )?;
+    write_seed(
+        out,
+        "jwk_from_der",
+        "ed448-spki.der",
+        &private.export_spki_der()?,
+    )?;
+    write_seed(
+        out,
+        "jwk_from_pem",
+        "ed448-pkcs8.pem",
+        jose_rs::jwk::private_pem_from_jwk(&ed)?.as_bytes(),
+    )?;
+    let mut embedded = Claims::default();
+    embedded.extra.insert(
+        "jwks".into(),
+        serde_json::json!({"keys":[ed.to_public_jwk()]}),
+    );
+    let token = jose_rs::jwt::encode_with_jwk(&ed, &JoseHeader::new("EdDSA"), &embedded)?;
+    write_seed(
+        out,
+        "jwt_decode_unverified",
+        "ed448-self-signed.txt",
+        token.as_bytes(),
+    )?;
     let hmac = hmac_jwk(Some("hmac-a"))?;
     let payload = b"seed corpus payload";
     let claims = br#"{"iss":"https://issuer.example","sub":"fuzz-seed","exp":4100000000}"#;
@@ -353,6 +392,7 @@ fn token_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn jwk_json_seeds(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut seeds: Vec<(String, String)> = Vec::new();
     for (name, jwk) in [
+        ("ed448-rfc8032.json", ed448_jwk()?),
         ("oct-hs256.json", hmac_jwk(Some("hmac-a"))?),
         ("dir-key.json", dir_jwk()?),
         ("kid-less.json", hmac_jwk(None)?),

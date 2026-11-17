@@ -416,6 +416,17 @@ fn replay_jwt_unverified(bytes: &[u8]) {
         return;
     };
     let _ = jose_rs::jwt::decode_unverified(text);
+    if let Ok(inspected) = jose_rs::jwt::UnverifiedJwt::parse(text) {
+        let _ = inspected.header();
+        if let Some(value) = inspected.claims().extra.get("jwks") {
+            if let Ok(set) = jose_rs::jwk::JwkSet::from_json_with_limits(
+                &value.to_string(),
+                &jose_rs::jwk::selection::SetLimits::default(),
+            ) {
+                let _ = inspected.verify_with(&set, &jose_rs::jwt::Validation::new());
+            }
+        }
+    }
 }
 
 /// Drive one harness: seeds and their mutations, and a hard statement that no
