@@ -4,6 +4,15 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-18
+
+### Added
+
+- Implement `std::str::FromStr` for `JwsAlgorithm`, `JweAlgorithm` and
+  `JweEncryption`. Callers can use `"Ed448".parse::<JwsAlgorithm>()` or the
+  existing inherent `from_str` methods. Both use the same exact wire names,
+  feature gates and `JoseError::UnsupportedAlgorithm` errors.
+
 ## [0.12.0] - 2026-11-17
 
 ### Added

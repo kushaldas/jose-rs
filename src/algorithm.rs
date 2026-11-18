@@ -1,7 +1,22 @@
 //! JOSE algorithm identifiers and mapping to kryptering enums.
+//!
+//! Parse case-sensitive wire names from configuration or a JOSE header:
+//!
+//! ```
+//! use jose_rs::{JweAlgorithm, JweEncryption, JwsAlgorithm};
+//!
+//! let signature: JwsAlgorithm = "Ed448".parse()?;
+//! let key_management: JweAlgorithm = "RSA-OAEP-256".parse()?;
+//! let encryption: JweEncryption = "A256GCM".parse()?;
+//! # Ok::<(), jose_rs::JoseError>(())
+//! ```
+//!
+//! Parsing identifies the algorithm. Verification and decryption still require
+//! the caller's algorithm policy and a suitable key.
 
 use crate::error::{JoseError, Result};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
 // JWS signature algorithms (RFC 7518 §3)
@@ -85,7 +100,6 @@ pub enum JwsAlgorithm {
     None,
 }
 
-#[allow(clippy::should_implement_trait)] // from_str returns JoseError, not FromStr::Err
 impl JwsAlgorithm {
     /// Map to the corresponding kryptering signature algorithm.
     ///
@@ -180,7 +194,15 @@ impl JwsAlgorithm {
         self.to_crypto()
     }
 
-    /// Parse from the `alg` header string.
+    /// Parse an exact JOSE `alg` name, also available through [`str::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JoseError::UnsupportedAlgorithm`] if this build does not recognize the name.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "retain the inherent API for callers without FromStr in scope"
+    )]
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "HS256" => Ok(Self::HS256),
@@ -266,6 +288,14 @@ impl JwsAlgorithm {
     }
 }
 
+impl FromStr for JwsAlgorithm {
+    type Err = JoseError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        JwsAlgorithm::from_str(s)
+    }
+}
+
 impl std::fmt::Display for JwsAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -327,9 +357,16 @@ pub enum JweAlgorithm {
     Pbes2Hs512A256kw,
 }
 
-#[allow(clippy::should_implement_trait)]
 impl JweAlgorithm {
-    /// Parse from the `alg` header string.
+    /// Parse an exact JOSE `alg` name, also available through [`str::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JoseError::UnsupportedAlgorithm`] if this build does not recognize the name.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "retain the inherent API for callers without FromStr in scope"
+    )]
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "dir" => Ok(Self::Dir),
@@ -377,6 +414,14 @@ impl JweAlgorithm {
     }
 }
 
+impl FromStr for JweAlgorithm {
+    type Err = JoseError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        JweAlgorithm::from_str(s)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JWE content encryption algorithms (RFC 7518 §5)
 // ---------------------------------------------------------------------------
@@ -401,7 +446,6 @@ pub enum JweEncryption {
     A256GCM,
 }
 
-#[allow(clippy::should_implement_trait)]
 impl JweEncryption {
     /// Content Encryption Key size in bytes.
     pub fn cek_size(self) -> usize {
@@ -415,7 +459,15 @@ impl JweEncryption {
         }
     }
 
-    /// Parse from the `enc` header string.
+    /// Parse an exact JOSE `enc` name, also available through [`str::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JoseError::UnsupportedAlgorithm`] if this build does not recognize the name.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "retain the inherent API for callers without FromStr in scope"
+    )]
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "A128CBC-HS256" => Ok(Self::A128CbcHs256),
@@ -438,6 +490,14 @@ impl JweEncryption {
             Self::A192GCM => "A192GCM",
             Self::A256GCM => "A256GCM",
         }
+    }
+}
+
+impl FromStr for JweEncryption {
+    type Err = JoseError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        JweEncryption::from_str(s)
     }
 }
 
