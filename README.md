@@ -31,7 +31,7 @@ ML-DSA-87 (FIPS 204), plus the six composite algorithms from
 ML-DSA-65-ES256, ML-DSA-87-ES384, ML-DSA-44-Ed25519,
 ML-DSA-65-Ed25519, and ML-DSA-87-Ed448.
 
-**JWE key management**: dir, A128KW/A192KW/A256KW, A128GCMKW/A192GCMKW/A256GCMKW, ECDH-ES and ECDH-ES+A128KW/+A192KW/+A256KW (P-256/P-384/P-521, X25519), PBES2-HS256+A128KW/PBES2-HS384+A192KW/PBES2-HS512+A256KW, RSA-OAEP-256 (`RSA-OAEP` only with `--features deprecated`)
+**JWE key management**: dir, A128KW/A192KW/A256KW, A128GCMKW/A192GCMKW/A256GCMKW, ECDH-ES and ECDH-ES+A128KW/+A192KW/+A256KW (P-256/P-384/P-521, X25519), PBES2-HS256+A128KW/PBES2-HS384+A192KW/PBES2-HS512+A256KW, RSA-OAEP-256 (`RSA-OAEP` with `--features rsa-oaep`)
 
 **JWE content encryption**: A128GCM/A192GCM/A256GCM, A128CBC-HS256/A192CBC-HS384/A256CBC-HS512
 
@@ -68,7 +68,7 @@ For pure software consumers, disable the default PKCS#11 integration:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.12.1", default-features = false }
+jose-rs = { version = "0.13.0", default-features = false }
 ```
 
 
@@ -422,7 +422,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.12.1", features = ["post-quantum"] }
+jose-rs = { version = "0.13.0", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the optional `ml-dsa` crate plus kryptering's

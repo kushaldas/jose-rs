@@ -11,7 +11,7 @@
 //!   HS256 byte-for-byte roundtrip.
 //! - §5.6 (dir + A128GCM), §5.8 (A128KW + A128GCM) — JWE decrypt under
 //!   default features.
-//! - §5.2 (RSA-OAEP + A256GCM) — JWE decrypt under the `deprecated`
+//! - §5.2 (RSA-OAEP + A256GCM) — JWE decrypt under the `rsa-oaep`
 //!   feature (RSA-OAEP uses SHA-1, gated by design).
 //!
 //! Skipped algorithms this library does not implement: RSA1_5 (§5.1),
@@ -220,14 +220,14 @@ fn rfc7520_5_8_a128kw_a128gcm_decrypt() {
     assert_eq!(String::from_utf8(recovered).unwrap(), JWE_PLAINTEXT);
 }
 
-// ── §5.2: RSA-OAEP + A256GCM (gated — SHA-1 OAEP is under `deprecated`) ───
+// ── §5.2: RSA-OAEP + A256GCM (gated — SHA-1 OAEP is under `rsa-oaep`) ───
 
 /// RSA-4096 private key from RFC 7520 Figure 84. Preserved verbatim
 /// from the RFC (including the indent-whitespace continuations) so the
 /// test text mirrors the RFC exactly; `strip_ws` removes the whitespace
-/// at runtime before parsing. Gated behind the `deprecated` feature
+/// at runtime before parsing. Gated behind the `rsa-oaep` feature
 /// because the example uses RSA-OAEP (SHA-1).
-#[cfg(feature = "deprecated")]
+#[cfg(feature = "rsa-oaep")]
 const JWE_5_2_RSA_JWK_RAW: &str = r#"{
   "kty": "RSA",
   "kid": "samwise.gamgee@hobbiton.example",
@@ -299,7 +299,7 @@ const JWE_5_2_RSA_JWK_RAW: &str = r#"{
 
 /// Compact JWE from RFC 7520 Figure 92. Multi-line with whitespace
 /// preserved; stripped at runtime.
-#[cfg(feature = "deprecated")]
+#[cfg(feature = "rsa-oaep")]
 const JWE_5_2_COMPACT_RAW: &str = "
 eyJhbGciOiJSU0EtT0FFUCIsImtpZCI6InNhbXdpc2UuZ2FtZ2VlQGhvYmJpdG
 9uLmV4YW1wbGUiLCJlbmMiOiJBMjU2R0NNIn0
@@ -329,7 +329,7 @@ maPpOslY2n525DxDfWaVFUfKQxMF56vn4B9QMpWAbnypNimbM8zVOw
 UCGiqJxhBI3IFVdPalHHvA
 ";
 
-#[cfg(feature = "deprecated")]
+#[cfg(feature = "rsa-oaep")]
 #[test]
 fn rfc7520_5_2_rsa_oaep_a256gcm_decrypt() {
     let jwk_json = strip_ws(JWE_5_2_RSA_JWK_RAW);

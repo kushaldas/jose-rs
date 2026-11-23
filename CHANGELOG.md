@@ -4,6 +4,12 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-23
+
+### Added
+
+- Added the `rsa-oaep` feature for peers requiring RSA-OAEP with SHA-1. The existing `deprecated` feature includes it.
+
 ## [0.12.1] - 2026-11-18
 
 ### Added

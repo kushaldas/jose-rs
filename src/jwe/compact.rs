@@ -683,7 +683,7 @@ mod tests {
         (pub_der.as_ref().to_vec(), priv_der.as_bytes().to_vec())
     }
 
-    #[cfg(feature = "deprecated")]
+    #[cfg(feature = "rsa-oaep")]
     #[test]
     fn rsa_oaep_a256gcm_roundtrip() {
         let (pub_der, priv_der) = generate_rsa_keypair();
@@ -800,7 +800,7 @@ mod tests {
 
     /// The deprecated SHA-1 RSA-OAEP variant shares the same implicit-
     /// rejection guarantee.
-    #[cfg(feature = "deprecated")]
+    #[cfg(feature = "rsa-oaep")]
     #[test]
     fn deprecated_rsa_oaep_failure_classes_are_indistinguishable() {
         assert_rsa_oaep_failure_classes_are_indistinguishable(JweAlgorithm::RsaOaep);

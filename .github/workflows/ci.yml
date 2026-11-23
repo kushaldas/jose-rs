@@ -52,6 +52,9 @@ jobs:
       - name: cargo clippy (default, pkcs11)
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: cargo clippy (RSA-OAEP)
+        run: cargo clippy --locked --no-default-features --features rsa-oaep --all-targets -- -D warnings
+
       - name: cargo clippy (deprecated)
         run: cargo clippy --locked --no-default-features --features deprecated --all-targets -- -D warnings
 
@@ -72,6 +75,9 @@ jobs:
 
       - name: cargo test (default, pkcs11)
         run: cargo test --locked
+
+      - name: cargo test (RSA-OAEP without other deprecated algorithms)
+        run: cargo test --locked --no-default-features --features rsa-oaep
 
       - name: cargo test (deprecated)
         run: cargo test --locked --no-default-features --features deprecated

@@ -166,6 +166,7 @@ pub fn feature_enabled(name: &str) -> bool {
     #[allow(clippy::match_like_matches_macro)] // documented three-way answer, not a predicate
     match name {
         "post-quantum" => cfg!(feature = "post-quantum"),
+        "rsa-oaep" => cfg!(feature = "rsa-oaep"),
         "deprecated" => cfg!(feature = "deprecated"),
         // Named separately from the arms above so the `matches!`-shaped lint does not flatten
         // this into an expression and hide which features are knowable at all.
@@ -180,6 +181,11 @@ pub fn features() -> Vec<Feature> {
             name: "post-quantum",
             enabled: feature_enabled("post-quantum"),
             effect: "ML-DSA and composite signature algorithms, and their key generation",
+        },
+        Feature {
+            name: "rsa-oaep",
+            enabled: feature_enabled("rsa-oaep"),
+            effect: "RSA-OAEP key transport with SHA-1",
         },
         Feature {
             name: "deprecated",
@@ -434,22 +440,22 @@ pub fn jwe_algorithms() -> Vec<Capability> {
             note: "iv and tag are always library-generated",
         },
         // RSA-OAEP (SHA-1 label) is feature-gated: the identifier itself is only compiled in
-        // with `deprecated`, which is precisely the kind of fact a caller cannot discover from
+        // with `rsa-oaep`, which is precisely the kind of fact a caller cannot discover from
         // the type signature and a capability table exists to say out loud.
         Capability {
             kind: Kind::JweKeyManagement,
             identifier: rsa_oaep_identifier(),
-            availability: if feature_enabled("deprecated") {
+            availability: if feature_enabled("rsa-oaep") {
                 Availability::Supported
             } else {
-                Availability::RequiresFeature("deprecated")
+                Availability::RequiresFeature("rsa-oaep")
             },
-            operations: if feature_enabled("deprecated") {
+            operations: if feature_enabled("rsa-oaep") {
                 BOTH
             } else {
                 &[]
             },
-            note: "RSAES-OAEP with SHA-1 MGF1; compiled in only with `deprecated`, and keys \
+            note: "RSAES-OAEP with SHA-1 MGF1; compiled in only with `rsa-oaep`, and keys \
                    below 2048 bits are refused",
         },
         Capability {
@@ -564,13 +570,13 @@ fn pq_operations<'a>(_identifier: &str, _operations: &'a [Operation]) -> &'a [Op
 ///
 /// Written as two cfg'd functions rather than one `if`, because the *variant path* has to exist
 /// at compile time to be named.
-#[cfg(feature = "deprecated")]
+#[cfg(feature = "rsa-oaep")]
 fn rsa_oaep_identifier() -> &'static str {
     // Resolved through the enum, so a rename cannot leave the table behind.
     JweAlgorithm::RsaOaep.as_str()
 }
 
-#[cfg(not(feature = "deprecated"))]
+#[cfg(not(feature = "rsa-oaep"))]
 fn rsa_oaep_identifier() -> &'static str {
     "RSA-OAEP"
 }

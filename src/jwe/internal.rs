@@ -1018,7 +1018,7 @@ pub(crate) fn wrap_cek(
                 .map_err(JoseError::Crypto)
         }
 
-        #[cfg(feature = "deprecated")]
+        #[cfg(feature = "rsa-oaep")]
         JweAlgorithm::RsaOaep => {
             let pub_key = parse_rsa_public_key(key)?;
             let kt_alg = jwe_alg_to_keytransport(alg)?;
@@ -2110,7 +2110,7 @@ pub(crate) fn recover_cek(
 
         JweAlgorithm::RsaOaep256 => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
 
-        #[cfg(feature = "deprecated")]
+        #[cfg(feature = "rsa-oaep")]
         JweAlgorithm::RsaOaep => rsa_oaep_recover_cek(key, alg, encrypted_key, cek_len),
 
         _ => Err(JoseError::UnsupportedAlgorithm(format!(
@@ -2218,7 +2218,7 @@ pub(crate) fn jwe_alg_to_keytransport(
 ) -> Result<kryptering::KeyTransportAlgorithm> {
     use kryptering::{HashAlgorithm, KeyTransportAlgorithm, OaepConfig};
     match alg {
-        #[cfg(feature = "deprecated")]
+        #[cfg(feature = "rsa-oaep")]
         JweAlgorithm::RsaOaep => Ok(KeyTransportAlgorithm::RsaOaep(OaepConfig {
             digest: HashAlgorithm::Sha1,
             mgf_digest: HashAlgorithm::Sha1,
@@ -2421,7 +2421,7 @@ pub(crate) fn jwk_to_jwe_key_bytes(
             Ok(Zeroizing::new(base64url::decode(k)?))
         }
         JweAlgorithm::RsaOaep256 => rsa_jwk_to_der(jwk, for_decrypt),
-        #[cfg(feature = "deprecated")]
+        #[cfg(feature = "rsa-oaep")]
         JweAlgorithm::RsaOaep => rsa_jwk_to_der(jwk, for_decrypt),
         // Named rather than left to the catch-all below, because this is the exact
         // confusion the password type exists to prevent: an `oct` JWK whose `k` holds a
