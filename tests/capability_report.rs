@@ -71,7 +71,7 @@ fn all_jwe_key_management_variants() -> Vec<JweAlgorithm> {
         JweAlgorithm::A128Gcmkw,
         JweAlgorithm::A192Gcmkw,
         JweAlgorithm::A256Gcmkw,
-        #[cfg(feature = "deprecated")]
+        #[cfg(feature = "rsa-oaep")]
         JweAlgorithm::RsaOaep,
         JweAlgorithm::RsaOaep256,
         JweAlgorithm::EcdhEs,
@@ -479,7 +479,7 @@ fn advertised_key_format_imports_work() {
 /// Checked only in the default-feature build, because the rendering states the build's feature
 /// state and therefore legitimately differs under `--features deprecated` / `--all-features`. The
 /// second half of the test — every available identifier appears in the rendering — runs everywhere.
-#[cfg(all(not(feature = "deprecated"), not(feature = "post-quantum")))]
+#[cfg(all(not(feature = "rsa-oaep"), not(feature = "post-quantum")))]
 #[test]
 fn committed_markdown_matches_the_code() {
     let rendered = capability::markdown();
@@ -511,7 +511,7 @@ fn committed_markdown_matches_the_code() {
 /// In non-default builds, the tables still describe *this* build: no row may advertise an
 /// operation while its own gating says it is unavailable, and every available identifier must be
 /// rendered.
-#[cfg(any(feature = "deprecated", feature = "post-quantum"))]
+#[cfg(any(feature = "rsa-oaep", feature = "post-quantum"))]
 #[test]
 fn feature_builds_report_themselves_honestly() {
     let rendered = capability::markdown();

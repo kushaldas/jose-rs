@@ -53,3 +53,4 @@ history.
 | [0047](0047-discovery-rejects-nested-duplicate-members.md) | Discovery rejects duplicate members before normalization | Accepted; extends 0044 |
 | [0048](0048-pbes2-timing-is-advisory.md) | PBES2 timing ratios are advisory | Accepted; supersedes part of 0035 |
 | [0049](0049-algorithm-from-str.md) | Parse algorithm identifiers through FromStr | Accepted |
+| [0050](0050-opt-in-rsa-oaep.md) | Opt in to RSA-OAEP independently | Accepted |

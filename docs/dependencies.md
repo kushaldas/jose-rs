@@ -47,7 +47,8 @@ No local primitive is added to bypass that boundary.
 |---|---|---|
 | `default` | `pkcs11` | `kryptering/pkcs11` |
 | `post-quantum` | PQ signatures | `kryptering/post-quantum`, optional `ml-dsa` 0.1.2, and transitive `slh-dsa`, `ml-kem`, `sha3` |
-| `deprecated` | legacy JOSE algorithms | `kryptering/legacy` |
+| `rsa-oaep` | SHA-1 OAEP key transport | `kryptering/legacy` |
+| `deprecated` | legacy JOSE algorithms | `rsa-oaep` |
 | `pkcs11` | HSM-backed keys | `kryptering/pkcs11` |
 
 ## Direct dependencies and their locked versions

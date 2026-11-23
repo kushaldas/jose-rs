@@ -49,7 +49,13 @@ fn respect_compile_time_feature_gates() {
     #[cfg(not(feature = "deprecated"))]
     {
         assert_unsupported::<JwsAlgorithm>("none");
+        #[cfg(not(feature = "rsa-oaep"))]
         assert_unsupported::<JweAlgorithm>("RSA-OAEP");
+        #[cfg(feature = "rsa-oaep")]
+        assert_eq!(
+            "RSA-OAEP".parse::<JweAlgorithm>().unwrap(),
+            JweAlgorithm::RsaOaep
+        );
     }
     #[cfg(feature = "post-quantum")]
     assert_eq!(

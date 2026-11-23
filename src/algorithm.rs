@@ -327,8 +327,8 @@ pub enum JweAlgorithm {
     /// AES GCM key wrapping with a 256-bit key (RFC 7518 §4.7)
     #[serde(rename = "A256GCMKW")]
     A256Gcmkw,
-    /// RSAES-OAEP using default parameters (SHA-1 — only available with the `deprecated` feature)
-    #[cfg(feature = "deprecated")]
+    /// RSAES-OAEP using default parameters (SHA-1 — only available with the `rsa-oaep` feature)
+    #[cfg(feature = "rsa-oaep")]
     #[serde(rename = "RSA-OAEP")]
     RsaOaep,
     /// RSAES-OAEP using SHA-256 and MGF1 with SHA-256
@@ -376,7 +376,7 @@ impl JweAlgorithm {
             "A128GCMKW" => Ok(Self::A128Gcmkw),
             "A192GCMKW" => Ok(Self::A192Gcmkw),
             "A256GCMKW" => Ok(Self::A256Gcmkw),
-            #[cfg(feature = "deprecated")]
+            #[cfg(feature = "rsa-oaep")]
             "RSA-OAEP" => Ok(Self::RsaOaep),
             "RSA-OAEP-256" => Ok(Self::RsaOaep256),
             "ECDH-ES" => Ok(Self::EcdhEs),
@@ -400,7 +400,7 @@ impl JweAlgorithm {
             Self::A128Gcmkw => "A128GCMKW",
             Self::A192Gcmkw => "A192GCMKW",
             Self::A256Gcmkw => "A256GCMKW",
-            #[cfg(feature = "deprecated")]
+            #[cfg(feature = "rsa-oaep")]
             Self::RsaOaep => "RSA-OAEP",
             Self::RsaOaep256 => "RSA-OAEP-256",
             Self::EcdhEs => "ECDH-ES",

@@ -15,7 +15,7 @@
 # Notes on the exact invocations, each of which is a lesson paid for once:
 #   * `--locked` everywhere, so a Cargo.lock change cannot ride along unnoticed.
 #   * Clippy's `-D warnings` goes through RUSTFLAGS, not as a cargo-clippy argument.
-#   * Five feature configurations, matching .github/workflows/ci.yml; `--pem` is
+#   * Six feature configurations, matching .github/workflows/ci.yml; `--pem` is
 #     not one of them because `pem` is not a feature.
 #   * Tests are run without `--lib`, which would silently skip tests/*.
 #   * The capability tables are diffed against their generator, because a table
@@ -40,8 +40,8 @@ step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok() { printf '  \033[32mok\033[0m     %s\n' "$*"; }
 bad() { printf '  \033[31mFAIL\033[0m   %s\n' "$*"; FAILED=1; }
 
-FEATURES=("" "--no-default-features" "--features deprecated" "--features post-quantum" "--all-features")
-CONFIG_LABEL="five feature configurations"
+FEATURES=("" "--no-default-features" "--no-default-features --features rsa-oaep" "--no-default-features --features deprecated" "--no-default-features --features post-quantum" "--all-features")
+CONFIG_LABEL="six feature configurations"
 if [[ "$QUICK" == 1 ]]; then
     FEATURES=("")
     CONFIG_LABEL="default configuration only (--quick)"
@@ -52,13 +52,12 @@ if cargo fmt --all -- --check >/dev/null 2>&1; then ok "cargo fmt --check"; else
 
 step "tests ($CONFIG_LABEL)"
 for f in "${FEATURES[@]}"; do
-    out=$(cargo test --locked $f 2>&1)
-    total=$(printf '%s' "$out" | grep -E '^test result: ok' | awk '{s+=$4} END {print s+0}')
-    if printf '%s' "$out" | grep -qE '^test result: FAILED|^error'; then
+    if out=$(cargo test --locked $f 2>&1); then
+        total=$(printf '%s' "$out" | awk '/^test result: ok/ {s+=$4} END {print s+0}')
+        ok "cargo test --locked ${f:-<default>} => $total passed"
+    else
         bad "cargo test --locked $f"
         printf '%s\n' "$out" | grep -E 'panicked|^error' | head -5 | sed 's/^/         /'
-    else
-        ok "cargo test --locked ${f:-<default>} => $total passed"
     fi
 done
 
