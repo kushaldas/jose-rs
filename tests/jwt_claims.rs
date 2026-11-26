@@ -248,7 +248,10 @@ fn oversized_payloads_are_refused_on_both_sides_of_the_wire() {
     // symmetry is the point — an emit guard alone would be a courtesy, and a read guard alone
     // would let a caller produce tokens it cannot consume.
     let key = signer();
-    let big = format!(r#"{{"jti":"{}"}}"#, "a".repeat(2 * 1024 * 1024));
+    let big = format!(
+        r#"{{"jti":"{}"}}"#,
+        "a".repeat(jose_rs::MAX_TOKEN_BYTES + 1024)
+    );
     let err = jose_rs::jws::compact::sign_with_jwk(&key, big.as_bytes(), &header()).unwrap_err();
     assert!(
         matches!(&err, JoseError::InvalidToken(msg) if msg.contains("MAX_TOKEN_BYTES")),
