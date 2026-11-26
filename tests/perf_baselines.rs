@@ -232,11 +232,15 @@ fn oversized_documents_are_refused_before_they_are_parsed() {
         return;
     }
 
-    // Comfortably over `SetLimits::default().max_bytes` (4 MiB), so the byte budget
-    // is what refuses — before any JSON tree exists.
-    let oversized = oversized_jwk_set(35_000);
+    // Comfortably over `SetLimits::default().max_bytes` — the budget scales
+    // with MAX_TOKEN_BYTES, so the fixture does too — keeping the byte
+    // budget what refuses, before any JSON tree exists.
+    let byte_budget = SetLimits::default().max_bytes;
+    // ~146 bytes per fixture entry: budget/100 entries build a document
+    // ~1.5x the budget, whatever the cap.
+    let oversized = oversized_jwk_set(byte_budget / 100);
     assert!(
-        oversized.len() > 4 * 1024 * 1024,
+        oversized.len() > byte_budget,
         "test document must exceed the default byte budget"
     );
     let parse_document = oversized_jwk_set(20_000);

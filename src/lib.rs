@@ -59,10 +59,11 @@ pub const MAX_KEY_DER_BYTES: usize = 64 * 1024;
 ///
 /// Caps memory allocation from an attacker-supplied oversized token — the
 /// decoders refuse any input longer than this before any base64url or
-/// JSON decoding runs. Set to 1 MiB, which comfortably exceeds any
-/// realistic JOSE token (RFC 7519 §2 notes that JWTs are compact
-/// precisely to fit HTTP Authorization headers, URLs, and POST bodies).
-pub const MAX_TOKEN_BYTES: usize = 1024 * 1024;
+/// JSON decoding runs. Set to 4 MiB: JOSE payloads have outgrown the
+/// compact-token ceiling of RFC 7519 §2 — post-quantum signatures and
+/// KEMs, and the proof systems that carry credentials over them, emit
+/// payloads past the old 1 MiB bound, and a JWE wrapping one crosses it.
+pub const MAX_TOKEN_BYTES: usize = 4 * 1024 * 1024;
 
 /// The exact message raised when a signature fails to verify.
 ///

@@ -189,10 +189,11 @@ fn structurally_broken_armor_is_refused() {
     // An empty body.
     let empty = "-----BEGIN PUBLIC KEY-----\n\n-----END PUBLIC KEY-----\n";
     assert!(pem::jwk_from_pem(empty).is_err());
-    // And the input is size-bounded like everything else that is parsed.
+    // And the input is size-bounded like everything else that is parsed
+    // (relative to MAX_TOKEN_BYTES, so the bound moves with the cap).
     let huge = format!(
         "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-        "A".repeat(4_000_000)
+        "A".repeat(jose_rs::MAX_TOKEN_BYTES + 64)
     );
     assert!(pem::jwk_from_pem(&huge)
         .unwrap_err()
