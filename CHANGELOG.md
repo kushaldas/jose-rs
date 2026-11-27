@@ -4,6 +4,22 @@ All notable changes to `jose-rs` from the `0.5.0` release onward are documented 
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-27
+
+### Changed
+
+- Raise `MAX_TOKEN_BYTES` from 1 MiB to 4 MiB to accommodate larger
+  post-quantum and proof payloads and their JWE envelopes. Limits derived from
+  this constant also increase, including the default JWK Set byte budget from
+  4 MiB to 16 MiB. Applications should account for the higher memory budget.
+  No public API signatures, dependencies or MSRV changed.
+
+### Fixed
+
+- Scale oversized PEM, JWT payload and JWK Set regression fixtures with their
+  configured limits. The JWK Set regression now verifies rejection by the byte
+  budget before parsing, rather than by the entry-count limit.
+
 ## [0.13.0] - 2026-11-23
 
 ### Added

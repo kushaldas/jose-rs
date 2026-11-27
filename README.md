@@ -68,7 +68,7 @@ For pure software consumers, disable the default PKCS#11 integration:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.13.0", default-features = false }
+jose-rs = { version = "0.13.1", default-features = false }
 ```
 
 
@@ -422,7 +422,7 @@ ML-DSA support is available behind the opt-in `post-quantum` feature:
 
 ```toml
 [dependencies]
-jose-rs = { version = "0.13.0", features = ["post-quantum"] }
+jose-rs = { version = "0.13.1", features = ["post-quantum"] }
 ```
 
 Enabling this pulls in the optional `ml-dsa` crate plus kryptering's
